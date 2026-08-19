@@ -979,7 +979,7 @@ class TestPerUserToolManager:
             return 1
 
         result = await m.call_tool("blocked", {}, use_cache=False)
-        assert "已被管理员禁用" in result
+        assert "在当前设备上不可用" in result
 
     async def test_call_tool_not_found(self):
         m = self._make_manager()

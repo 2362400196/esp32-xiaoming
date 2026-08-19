@@ -1,0 +1,232 @@
+/* ESP-AI UI Redesign — Mint Glass Theme Tokens */
+:root {
+  /* Brand primary: mint green */
+  --esp-primary: #10b981;
+  --esp-primary-600: #059669;
+  --esp-primary-400: #34d399;
+  --esp-primary-300: #6ee7b7;
+  --esp-primary-50: rgba(16, 185, 129, 0.08);
+  --esp-primary-100: rgba(16, 185, 129, 0.12);
+  --esp-primary-200: rgba(16, 185, 129, 0.22);
+
+  /* Surfaces */
+  --esp-background: #e9f0f4;
+  --esp-surface: rgba(255, 255, 255, 0.72);
+  --esp-surface-2: rgba(255, 255, 255, 0.88);
+  --esp-surface-3: rgba(255, 255, 255, 0.55);
+
+  /* Text */
+  --esp-foreground: #12212e;
+  --esp-foreground-2: #5b6b78;
+  --esp-foreground-3: #8fa0ad;
+  --esp-primary-foreground: #ffffff;
+
+  /* Dividers / borders */
+  --esp-border: rgba(255, 255, 255, 0.65);
+  --esp-border-2: rgba(16, 185, 129, 0.35);
+  --esp-input: rgba(255, 255, 255, 0.55);
+
+  /* Card & popover surfaces */
+  --esp-card: rgba(255, 255, 255, 0.72);
+  --esp-card-foreground: #12212e;
+  --esp-popover: rgba(255, 255, 255, 0.88);
+  --esp-popover-foreground: #12212e;
+
+  /* Muted surfaces */
+  --esp-muted: rgba(139, 160, 173, 0.12);
+  --esp-muted-foreground: #8fa0ad;
+
+  /* Ring */
+  --esp-ring: rgba(16, 185, 129, 0.35);
+
+  /* State colors */
+  --esp-state-success: #10b981;
+  --esp-state-warning: #f59e0b;
+  --esp-state-error: #ef4444;
+  --esp-state-info: #38bdf8;
+
+  /* Gradients */
+  --esp-grad-primary: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+  --esp-grad-brand: linear-gradient(135deg, #34d399 0%, #10b981 45%, #0ea5e9 100%);
+  --esp-grad-hero: radial-gradient(120% 90% at 20% 0%, rgba(52, 211, 153, 0.16) 0%, rgba(56, 189, 248, 0.07) 45%, transparent 72%);
+  --esp-grad-surface: linear-gradient(155deg, rgba(255, 255, 255, 0.72) 0%, rgba(255, 255, 255, 0.38) 100%);
+
+  /* Radius */
+  --esp-radius-sm: 4px;
+  --esp-radius-md: 8px;
+  --esp-radius-lg: 16px;
+  --esp-radius-xl: 16px;
+  --esp-radius-pill: 999px;
+
+  /* Shadows */
+  --esp-shadow-1: 0 1px 2px rgba(23, 52, 74, 0.05), 0 1px 1px rgba(23, 52, 74, 0.03);
+  --esp-shadow-2: 0 8px 24px -8px rgba(23, 52, 74, 0.18);
+  --esp-shadow-3: 0 24px 60px -20px rgba(23, 52, 74, 0.30);
+  --esp-shadow-mint: 0 10px 28px rgba(16, 185, 129, 0.28);
+  --esp-shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+
+  /* Typography */
+  --esp-font-sans: Inter, "Noto Sans SC", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+  --esp-font-mono: "SF Mono", "Fira Code", "Consolas", monospace;
+
+  /* Easing */
+  --esp-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --esp-ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* Glass blur */
+  --esp-glass-blur: blur(22px) saturate(180%);
+  --esp-glass-blur-sm: blur(14px) saturate(160%);
+}
+
+/* Aurora background layer */
+.esp-aurora {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(1100px 700px at 12% -10%, rgba(52, 211, 153, 0.20) 0%, transparent 60%),
+    radial-gradient(900px 620px at 104% 8%, rgba(56, 189, 248, 0.18) 0%, transparent 55%),
+    radial-gradient(1000px 820px at 50% 112%, rgba(129, 140, 248, 0.16) 0%, transparent 60%),
+    radial-gradient(700px 500px at 88% 62%, rgba(52, 211, 153, 0.10) 0%, transparent 60%),
+    linear-gradient(160deg, #f6fafc 0%, #e9f1f5 55%, #eef6f2 100%);
+  background-attachment: fixed;
+}
+
+.esp-aurora::before,
+.esp-aurora::after {
+  content: '';
+  position: fixed;
+  border-radius: 50%;
+  pointer-events: none;
+  filter: blur(6px);
+}
+.esp-aurora::before {
+  top: -140px; right: -120px;
+  width: 460px; height: 460px;
+  background: radial-gradient(circle, rgba(52, 211, 153, 0.22) 0%, transparent 66%);
+  animation: espOrbDrift1 18s ease-in-out infinite;
+}
+.esp-aurora::after {
+  bottom: -180px; left: -120px;
+  width: 520px; height: 520px;
+  background: radial-gradient(circle, rgba(56, 189, 248, 0.18) 0%, transparent 66%);
+  animation: espOrbDrift2 22s ease-in-out infinite;
+}
+
+@keyframes espOrbDrift1 {
+  0%, 100% { transform: translate(0, 0) scale(1); opacity: 1; }
+  33% { transform: translate(-44px, 32px) scale(1.12); opacity: 0.85; }
+  66% { transform: translate(-22px, -22px) scale(0.95); opacity: 1; }
+}
+@keyframes espOrbDrift2 {
+  0%, 100% { transform: translate(0, 0) scale(1); opacity: 1; }
+  33% { transform: translate(34px, -28px) scale(1.1); opacity: 0.9; }
+  66% { transform: translate(18px, 18px) scale(0.92); opacity: 1; }
+}
+
+/* Base */
+.esp-root {
+  font-family: var(--esp-font-sans);
+  color: var(--esp-foreground);
+  background: var(--esp-background);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Glass card */
+.esp-glass {
+  background: var(--esp-grad-surface);
+  backdrop-filter: var(--esp-glass-blur);
+  -webkit-backdrop-filter: var(--esp-glass-blur);
+  border: 1px solid var(--esp-border);
+  border-radius: var(--esp-radius-lg);
+  box-shadow: var(--esp-shadow-1), var(--esp-shadow-inset);
+}
+
+/* Primary button */
+.esp-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 20px;
+  border: none;
+  border-radius: var(--esp-radius-md);
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--esp-primary-foreground);
+  background: var(--esp-grad-primary);
+  box-shadow: 0 6px 18px rgba(16, 185, 129, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  cursor: pointer;
+  transition: transform 0.2s var(--esp-ease), box-shadow 0.2s var(--esp-ease);
+}
+.esp-btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--esp-shadow-mint), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+.esp-btn-primary:active {
+  transform: translateY(0);
+}
+
+/* Ghost button */
+.esp-btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 20px;
+  border: 1px solid var(--esp-border);
+  border-radius: var(--esp-radius-md);
+  font-weight: 500;
+  font-size: 14px;
+  color: var(--esp-foreground);
+  background: var(--esp-surface-2);
+  cursor: pointer;
+  transition: all 0.2s var(--esp-ease);
+}
+.esp-btn-ghost:hover {
+  border-color: var(--esp-border-2);
+  color: var(--esp-primary-600);
+  background: var(--esp-primary-50);
+}
+
+/* Input */
+.esp-input {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--esp-border);
+  border-radius: var(--esp-radius-md);
+  background: var(--esp-input);
+  color: var(--esp-foreground);
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s var(--esp-ease), box-shadow 0.2s var(--esp-ease), background 0.2s var(--esp-ease);
+}
+.esp-input::placeholder { color: var(--esp-foreground-3); }
+.esp-input:focus {
+  border-color: var(--esp-border-2);
+  background: var(--esp-surface-2);
+  box-shadow: 0 0 0 3px var(--esp-primary-100);
+}
+
+/* Status dot */
+.esp-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--esp-foreground-3);
+}
+.esp-dot.on {
+  background: var(--esp-state-success);
+  box-shadow: 0 0 0 3px var(--esp-primary-100);
+  animation: espDotBreathe 2s ease-in-out infinite;
+}
+@keyframes espDotBreathe {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+  50% { box-shadow: 0 0 0 4px rgba(16, 185, 049, 0.15); }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: rgba(139, 160, 173, 0.35); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--esp-border-2); }
+::-webkit-scrollbar-track { background: transparent; }

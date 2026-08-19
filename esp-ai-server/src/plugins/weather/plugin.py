@@ -7,7 +7,8 @@
     （mont48）+ 中文字体（font_puhui_16_4.c，全量汉字 + °·~ 符号）。
     卡片文本需避开源字体缺失的 ≤≥℃ 字符。
 
-配置：高德 Key 通过设备插件商店「⚙ 配置」设置，或环境变量 AMAP_WEATHER_KEY 提供。
+配置：高德 Key 通过设备插件商店「⚙ 配置」设置，或环境变量 WEATHER_AMAP_KEY 提供
+（兼容旧变量名 AMAP_WEATHER_KEY，需在 PLUGIN_ENV_ALLOWLIST 中显式放行）。
 文档：https://lbs.amap.com/api/webservice/guide/api-advanced/weatherinfo
 """
 
@@ -20,7 +21,11 @@ AMAP_WEATHER_URL = "https://restapi.amap.com/v3/weather/weatherInfo"
 
 
 def _get_amap_key(tool_manager) -> str:
-    """获取高德 Key：优先设备插件配置（商店「配置」），其次环境变量 AMAP_WEATHER_KEY。"""
+    """获取高德 Key：优先设备插件配置（商店「配置」），其次环境变量 WEATHER_AMAP_KEY。
+    旧变量名 AMAP_WEATHER_KEY 兼容保留（读取仍受环境变量白名单约束）。"""
+    key = get_plugin_config_or_env(tool_manager, "weather", "amap_key", "WEATHER_AMAP_KEY")
+    if key:
+        return key
     return get_plugin_config_or_env(tool_manager, "weather", "amap_key", "AMAP_WEATHER_KEY")
 
 # 天气 → 图标 id（设备端内置 ARGB8565 彩色图标表 fonts/weather_icons.c：
@@ -99,7 +104,7 @@ async def get_weather(city: str = "", tool_manager=None) -> str:
         city = "北京"
     amap_key = _get_amap_key(tool_manager)
     if not amap_key:
-        return "天气服务未配置，请在 App 插件商店中为「天气」插件配置高德 API Key，或联系管理员在 .env 中设置 AMAP_WEATHER_KEY"
+        return "天气服务未配置，请在 App 插件商店中为「天气」插件配置高德 API Key，或联系管理员在 .env 中设置 WEATHER_AMAP_KEY"
     # 实测高德：extensions=base 只返回实况(lives)，all 只返回预报(forecasts)，需分别请求
     live_data, err = await http_get_json(
         AMAP_WEATHER_URL, params={"key": amap_key, "city": city, "extensions": "base"},

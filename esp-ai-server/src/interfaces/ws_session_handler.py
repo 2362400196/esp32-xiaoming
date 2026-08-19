@@ -951,6 +951,17 @@ class WebSocketSessionHandler:
                             if tool_mgr and tool_mgr._pending_device_state_future and not tool_mgr._pending_device_state_future.done():
                                 tool_mgr._pending_device_state_future.set_result(str(raw_data))
                                 tool_mgr._pending_device_state_future = None
+                        elif t == "instruct_ack" or (t == "instruct" and data.get("command_id") == "instruct_ack"):
+                            # 设备指令 ack 确认（send_device_command_ack 等待的回执）
+                            ack_data = data.get("data", "")
+                            logger.info(f"[WS] 设备指令 ack: {ack_data}")
+                            if (
+                                tool_mgr
+                                and tool_mgr._pending_command_ack_future
+                                and not tool_mgr._pending_command_ack_future.done()
+                            ):
+                                tool_mgr._pending_command_ack_future.set_result(str(ack_data))
+                                tool_mgr._pending_command_ack_future = None
                         elif t == "start":
                             if self.wake_start_task and not self.wake_start_task.done():
                                 logger.info(f"[Session:{session.session_id}] Duplicate start ignored: wake flow already running")

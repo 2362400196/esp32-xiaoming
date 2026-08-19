@@ -1,19 +1,24 @@
 {
-    "id": "weather",
-    "name": "天气",
-    "version": "1.0.0",
-    "author": "system",
-    "description": "查询实时天气、温湿度、空气质量并显示天气卡片",
-    "api_version": "1.0",
-    "requires": [],
-    "config_fields": [
-        {
-            "key": "amap_key",
-            "label": "高德 API Key",
-            "type": "text",
-            "required": true,
-            "placeholder": "https://console.amap.com 获取（必填）"
-        }
-    ],
-    "permissions": ["network"]
+    "id":  "weather",
+    "name":  "天气",
+    "version":  "1.0.0",
+    "author":  "system",
+    "description":  "查询实时天气、温湿度、空气质量并显示天气卡片",
+    "api_version":  "1.0",
+    "requires":  [
+
+                 ],
+    "config_fields":  [
+                          {
+                              "key":  "amap_key",
+                              "label":  "高德 API Key",
+                              "type":  "text",
+                              "required":  true,
+                              "placeholder":  "https://console.amap.com 获取（必填）"
+                          }
+                      ],
+    "permissions":  [
+                        "network",
+                        "device"
+                    ]
 }

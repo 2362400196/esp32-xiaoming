@@ -116,6 +116,10 @@ async def set_brightness(level: int, tool_manager=None) -> str:
 
 返回值语义：**`None` = 成功，字符串 = 失败原因**。所以示例里 `if err:` 就是失败分支，工具代码无需再手写 `try/except` 和连接判断。
 
+::: tip 别忘了声明权限
+调用设备指令（`send_device_command` 等）需要在 `manifest.json` 里声明 `"permissions": ["device"]`，否则会被沙箱拒绝，返回 `"设备指令权限未声明"`。同理，调用 HTTP 需要 `"network"`、读写记忆需要 `"ltm"`。
+:::
+
 如果不使用 SDK，指令的原始格式是这样的（一般不需要手写）：
 
 ```json
@@ -443,7 +447,7 @@ raise StopPipeline()                         # 无参数：静默结束
       "placeholder": "https://console.amap.com 获取（必填）"
     }
   ],
-  "permissions": ["network"]
+  "permissions": ["network", "device"]
 }
 ```
 
@@ -500,7 +504,7 @@ async def get_weather(city: str = "", tool_manager=None) -> str:
     # SDK 读取配置：设备配置 → 环境变量 → 默认值
     amap_key = get_plugin_config_or_env(
         tool_manager, "mini_weather", "amap_key",
-        env_var="AMAP_WEATHER_KEY", default="",
+        env_var="MINI_WEATHER_AMAP_KEY", default="",
     )
     if not amap_key:
         return "天气服务未配置，请在插件设置中填写高德 API Key"

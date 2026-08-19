@@ -1,28 +1,43 @@
-"""插件加载器：扫描 plugins/ 目录，动态加载插件模块，支持热加载。
+"""插件加载器：扫描 plugins/ 目录，加载插件，支持热加载与子进程沙箱。
 
 插件约定：
-  src/plugins/<插件名>/plugin.py        # 内置插件
-  data/plugins/installed/<插件名>/plugin.py  # 下载安装的插件
+  src/plugins/<插件名>/plugin.py        # 内置插件（受信任，进程内加载）
+  data/plugins/installed/<插件名>/plugin.py  # 下载安装的插件（不受信任，子进程沙箱）
     - 模块内用 @tool() 装饰器定义 LLM 工具（tools_system.tool）
     - 加载后工具自动注册进全局工具表，无需改 builtin_tools.py
 
+安全模型：
+  - 内置插件：进程内加载（随源码分发、代码审查可审计），运行时 contextvar 守卫
+  - 已安装插件：独立子进程沙箱（import 白名单 + 审计钩子 + 文件命名空间 + SDK RPC
+    权限裁决），与内置插件共用同一套权限模型（manifest.permissions）
+
 加载优先级：
   - 同名插件，INSTALLED_PLUGINS_DIR 优先于 PLUGINS_DIR（下载版本覆盖内置）
-  - 每个插件目录必须包含 manifest.json，从中读取元数据（name/description/requires/config_fields 等）
+  - 每个插件目录必须包含 manifest.json，从中读取元数据
 
 热加载：
   - reload_plugins() 重新加载所有插件（先注销该插件旧工具，再重新执行模块）
   - reload_single_plugin(name) 仅重载单个插件（安装/更新后调用）
   - 服务器提供 POST /api/v1/plugins/reload 接口，改插件代码后无需重启服务器
-  - 注意：仅模块级代码（@tool 注册）热生效；模块内持有的连接/单例不会重建
+
+注意：本模块的加载函数均为 async（子进程沙箱需要事件循环），调用方需 await。
 """
 
+from __future__ import annotations
+
+import ast
 import importlib.util
 import sys
 from pathlib import Path
 
 from src.infrastructure.logging import get_logger
-from src.use_cases.tools_system import get_all_tools, unregister_tool
+from src.use_cases.tools_system import (
+    get_all_tools,
+    get_tool,
+    is_builtin_tool,
+    register_tool,
+    unregister_tool,
+)
 
 logger = get_logger(__name__)
 
@@ -42,7 +57,6 @@ PLUGINS_CACHE_DIR = _PROJECT_ROOT / "data" / "plugins" / "cache"
 _loaded_tools: dict[str, list[str]] = {}
 
 # 插件 → 能力声明（manifest.json 的 requires 字段，如 ["display"]）
-# 用于设备级过滤：无屏设备自动隐藏 requires=display 插件的工具
 _plugin_meta: dict[str, dict] = {}
 
 # 插件 → 来源标识（"built-in" / "installed"）
@@ -60,6 +74,9 @@ _plugin_module_names: dict[str, str] = {}
 # 插件 → 已加入 sys.path 的目录（支持 plugin.py 同目录 import 其他模块）
 _plugin_syspaths: dict[str, str] = {}
 
+# 工具名 → 所属插件名（避免重复遍历 _loaded_tools，且消除重名归属歧义）
+_tool_owner: dict[str, str] = {}
+
 
 def _resolve_plugin_dir(plugin_name: str) -> tuple[Path | None, str]:
     """解析插件目录：优先 installed，其次 built-in。
@@ -76,11 +93,33 @@ def _resolve_plugin_dir(plugin_name: str) -> tuple[Path | None, str]:
     return None, ""
 
 
-def _load_plugin(plugin_name: str) -> bool:
-    """加载单个插件模块（动态 import，@tool() 自动注册）。
+def _security_gate(plugin_name: str, plugin_dir: Path) -> bool:
+    """加载前安全门禁：静态审计 + 签名校验。失败返回 False。"""
+    try:
+        from src.infrastructure.plugin_security import check_permissions
+        from src.infrastructure.plugin_manifest import load_manifest_from_dir
+        manifest_pre = load_manifest_from_dir(plugin_dir)
+        declared_perms = list(getattr(manifest_pre, "permissions", None) or [])
+        audit_ok, undeclared = check_permissions(plugin_dir, declared_perms)
+        if not audit_ok:
+            logger.error(
+                f"[插件安全] {plugin_name} 使用了未声明的能力 {undeclared}，拒绝加载。"
+                f"请在 manifest.json 的 permissions 中声明。"
+            )
+            return False
+        if manifest_pre is not None and not manifest_pre.verify_package(plugin_dir):
+            logger.error(
+                f"[插件安全] {plugin_name} v{manifest_pre.version} 签名/文件校验失败，拒绝加载"
+            )
+            return False
+    except Exception as e:
+        logger.error(f"[插件安全] 插件 {plugin_name} 加载前校验异常: {e}")
+        return False
+    return True
 
-    加载优先级：INSTALLED_PLUGINS_DIR > PLUGINS_DIR。
-    每个插件目录必须包含 manifest.json，从中读取元数据；无 manifest.json 则跳过。
+
+async def _load_plugin(plugin_name: str) -> bool:
+    """加载单个插件（installed 走子进程沙箱，built-in 走进程内加载）。
 
     Returns:
         是否成功加载
@@ -91,16 +130,40 @@ def _load_plugin(plugin_name: str) -> bool:
         return False
 
     plugin_file = plugin_dir / "plugin.py"
-    # 不同来源使用不同模块名前缀，避免 sys.modules 缓存冲突
-    if source == "installed":
-        module_name = f"esp_ai_installed_plugin_{plugin_name}"
-    else:
-        module_name = f"esp_ai_plugins_{plugin_name}"
 
+    # ── 安全门禁 1：静态审计 + 签名校验（在 import 执行前）──
+    if not _security_gate(plugin_name, plugin_dir):
+        return False
+
+    # ── 安全门禁 2：工具名冲突检测（AST 提取声明工具名，与其它插件及系统工具比对）──
     try:
-        # 记录加载前的工具集合，加载后 diff 出本插件注册的工具
+        declared_tools = _extract_tool_names(plugin_file)
+        conflicts = []
+        for t in declared_tools:
+            if t in _tool_owner and _tool_owner[t] != plugin_name:
+                conflicts.append((t, f"插件 {_tool_owner[t]}"))
+            elif is_builtin_tool(t):
+                conflicts.append((t, "系统/内置工具"))
+        if conflicts:
+            logger.error(
+                f"[插件] {plugin_name} 的工具名 {[c[0] for c in conflicts]} "
+                f"已被占用（{sorted({c[1] for c in conflicts})}），拒绝加载"
+            )
+            return False
+    except SyntaxError as e:
+        logger.error(f"[插件] {plugin_name} plugin.py 语法错误: {e}")
+        return False
+
+    if source == "installed":
+        return await _load_installed_plugin(plugin_name, plugin_dir)
+    return _load_builtin_plugin(plugin_name, plugin_dir, plugin_file)
+
+
+def _load_builtin_plugin(plugin_name: str, plugin_dir: Path, plugin_file: Path) -> bool:
+    """内置插件：进程内加载（受信任，仅做权限上下文守卫）。"""
+    module_name = f"esp_ai_plugins_{plugin_name}"
+    try:
         before = set(get_all_tools().keys())
-        # 将插件目录加入 sys.path，支持 plugin.py 同目录 import（如 import utils）
         if str(plugin_dir) not in sys.path:
             sys.path.insert(0, str(plugin_dir))
             _plugin_syspaths[plugin_name] = str(plugin_dir)
@@ -110,31 +173,13 @@ def _load_plugin(plugin_name: str) -> bool:
         after = set(get_all_tools().keys())
         _loaded_tools[plugin_name] = sorted(after - before)
 
-        # 从 manifest.json 读取元数据
-        manifest = None
-        meta = {}
-        try:
-            from src.infrastructure.plugin_manifest import load_manifest_from_dir
-            manifest = load_manifest_from_dir(plugin_dir)
-        except Exception:
-            manifest = None
+        for tname in _loaded_tools[plugin_name]:
+            _tool_owner[tname] = plugin_name
 
-        if manifest is not None:
-            meta = manifest.to_meta_dict()
-            _plugin_manifest[plugin_name] = manifest
-            _plugin_version[plugin_name] = manifest.version
-        else:
-            logger.warning(f"[插件] {plugin_name} 无 manifest.json，元数据缺失")
-            _plugin_version[plugin_name] = "1.0.0"
-
-        _plugin_meta[plugin_name] = meta
-        _plugin_source[plugin_name] = source
-        _plugin_module_names[plugin_name] = module_name
-
+        _record_meta(plugin_name, plugin_dir)
         logger.info(
-            f"[插件] 已加载: {plugin_name}（来源: {source}，版本: {_plugin_version[plugin_name]}，"
-            f"工具: {_loaded_tools[plugin_name]}，"
-            f"名称: {meta.get('name', plugin_name)}，requires={meta.get('requires', [])}）"
+            f"[插件] 已加载: {plugin_name}（来源: built-in，版本: {_plugin_version[plugin_name]}，"
+            f"工具: {_loaded_tools[plugin_name]}，名称: {_plugin_meta[plugin_name].get('name', plugin_name)}）"
         )
         return True
     except Exception as e:
@@ -142,10 +187,55 @@ def _load_plugin(plugin_name: str) -> bool:
         return False
 
 
-def _unload_plugin(plugin_name: str) -> None:
+async def _load_installed_plugin(plugin_name: str, plugin_dir: Path) -> bool:
+    """已安装插件：子进程沙箱加载（不可信代码在独立进程内执行）。"""
+    from src.infrastructure.plugin_host.supervisor import get_plugin_supervisor
+    from src.infrastructure.plugin_manifest import load_manifest_from_dir
+
+    manifest = load_manifest_from_dir(plugin_dir)
+    supervisor = get_plugin_supervisor()
+    tools = await supervisor.load_plugin(plugin_name, plugin_dir, manifest)
+    if not tools:
+        logger.error(f"[插件] 沙箱加载失败 {plugin_name}")
+        return False
+
+    _loaded_tools[plugin_name] = sorted(tools)
+    for t in tools:
+        _tool_owner[t] = plugin_name
+    _record_meta(plugin_name, plugin_dir)
+    logger.info(
+        f"[插件] 已加载: {plugin_name}（来源: installed，版本: {_plugin_version[plugin_name]}，"
+        f"工具: {_loaded_tools[plugin_name]}，名称: {_plugin_meta[plugin_name].get('name', plugin_name)}，沙箱运行）"
+    )
+    return True
+
+
+def _record_meta(plugin_name: str, plugin_dir: Path) -> None:
+    """从 manifest.json 记录插件元数据。"""
+    from src.infrastructure.plugin_manifest import load_manifest_from_dir
+
+    manifest = load_manifest_from_dir(plugin_dir)
+    if manifest is not None:
+        _plugin_manifest[plugin_name] = manifest
+        _plugin_meta[plugin_name] = manifest.to_meta_dict()
+        _plugin_version[plugin_name] = manifest.version
+    else:
+        logger.warning(f"[插件] {plugin_name} 无 manifest.json，元数据缺失")
+        _plugin_meta[plugin_name] = {}
+        _plugin_version[plugin_name] = "1.0.0"
+    _plugin_source[plugin_name] = "installed" if (INSTALLED_PLUGINS_DIR / plugin_name).is_dir() else "built-in"
+    _plugin_module_names[plugin_name] = (
+        f"esp_ai_installed_plugin_{plugin_name}"
+        if _plugin_source[plugin_name] == "installed"
+        else f"esp_ai_plugins_{plugin_name}"
+    )
+
+
+async def _unload_plugin(plugin_name: str) -> None:
     """注销插件注册过的工具（热加载前清理，避免残留旧版本工具）。
 
-    同时从 sys.modules 移除模块缓存，确保下次 import 重新执行模块代码。
+    内置插件：注销工具 + 清理 sys.modules / sys.path。
+    已安装插件：停止子进程沙箱 + 注销工具。
     """
     old_tools = _loaded_tools.pop(plugin_name, [])
     _plugin_meta.pop(plugin_name, None)
@@ -154,18 +244,25 @@ def _unload_plugin(plugin_name: str) -> None:
     _plugin_manifest.pop(plugin_name, None)
     module_name = _plugin_module_names.pop(plugin_name, None)
 
+    if _plugin_source.get(plugin_name) == "installed" or (INSTALLED_PLUGINS_DIR / plugin_name).is_dir():
+        try:
+            from src.infrastructure.plugin_host.supervisor import get_plugin_supervisor
+            await get_plugin_supervisor().unload_plugin(plugin_name)
+        except Exception as e:
+            logger.warning(f"[插件] 停止沙箱进程异常 {plugin_name}: {e}")
+
     removed = []
     for name in old_tools:
         if unregister_tool(name):
             removed.append(name)
+            if _tool_owner.get(name) == plugin_name:
+                _tool_owner.pop(name, None)
     if removed:
         logger.info(f"[插件] 已卸载 {plugin_name} 的工具: {removed}")
 
-    # 清理 sys.modules 缓存，确保重新加载时重新执行模块代码
     if module_name and module_name in sys.modules:
         del sys.modules[module_name]
 
-    # 清理该插件加入的 sys.path（同目录 import 支持）
     added = _plugin_syspaths.pop(plugin_name, None)
     if added and added in sys.path:
         try:
@@ -174,22 +271,19 @@ def _unload_plugin(plugin_name: str) -> None:
             pass
 
 
-def reload_single_plugin(plugin_name: str) -> bool:
+async def reload_single_plugin(plugin_name: str) -> bool:
     """重载单个插件（安装/更新后调用）。
 
     先卸载旧工具 → 再重新加载。返回是否成功。
     """
     if plugin_name in _loaded_tools:
-        _unload_plugin(plugin_name)
-    return _load_plugin(plugin_name)
+        await _unload_plugin(plugin_name)
+    return await _load_plugin(plugin_name)
 
 
 def get_plugin_of_tool(tool_name: str) -> str | None:
     """工具名 → 所属插件名（无归属返回 None，内置工具不属于任何插件）。"""
-    for plugin_name, tools in _loaded_tools.items():
-        if tool_name in tools:
-            return plugin_name
-    return None
+    return _tool_owner.get(tool_name)
 
 
 def get_plugin_requires(plugin_name: str) -> list[str]:
@@ -232,10 +326,7 @@ def is_installed_plugin(plugin_name: str) -> bool:
 
 
 def _available_plugins_info() -> list[dict]:
-    """返回所有已加载插件的基本信息（名称、来源、版本）。
-
-    供管理 API 展示已安装插件列表使用。
-    """
+    """返回所有已加载插件的基本信息（名称、来源、版本）。"""
     out = []
     for name in sorted(_loaded_tools.keys()):
         out.append({
@@ -246,7 +337,7 @@ def _available_plugins_info() -> list[dict]:
     return out
 
 
-def load_plugins() -> list[str]:
+async def load_plugins() -> list[str]:
     """首次加载：扫描并加载所有插件，返回成功加载的插件名列表。
 
     扫描顺序：先 INSTALLED_PLUGINS_DIR（优先级高），再 PLUGINS_DIR。
@@ -255,29 +346,26 @@ def load_plugins() -> list[str]:
     loaded = []
     seen: set[str] = set()
 
-    # 1. 先扫描已安装插件（优先级高）
     if INSTALLED_PLUGINS_DIR.is_dir():
         for entry in sorted(INSTALLED_PLUGINS_DIR.iterdir()):
             if not entry.is_dir():
                 continue
             if entry.name in seen:
                 continue
-            if _load_plugin(entry.name):
+            if await _load_plugin(entry.name):
                 loaded.append(entry.name)
                 seen.add(entry.name)
     else:
         logger.info(f"[插件] 已安装插件目录不存在，跳过: {INSTALLED_PLUGINS_DIR}")
 
-    # 2. 再扫描内置插件（跳过已从 installed 加载的同名插件）
     if PLUGINS_DIR.is_dir():
         for entry in sorted(PLUGINS_DIR.iterdir()):
             if not entry.is_dir():
                 continue
             if entry.name in seen:
-                # installed 版本已加载，记录覆盖日志
                 logger.info(f"[插件] 内置插件 {entry.name} 已被 installed 版本覆盖，跳过")
                 continue
-            if _load_plugin(entry.name):
+            if await _load_plugin(entry.name):
                 loaded.append(entry.name)
                 seen.add(entry.name)
     else:
@@ -286,25 +374,28 @@ def load_plugins() -> list[str]:
     return loaded
 
 
-def reload_plugins() -> dict:
-    """热加载：卸载全部插件旧工具 → 重新加载全部插件。
+async def reload_plugins() -> dict:
+    """热加载：卸载全部插件旧工具 → 重新加载全部插件（事务回滚）。
+
+    任一插件加载失败时，自动回滚恢复该插件之前的工具注册，
+    避免"部分插件丢失"导致系统处于半损坏状态。
 
     返回统计信息供 HTTP 接口返回。
     """
-    result = {"reloaded": [], "failed": [], "tools": []}
+    result = {"reloaded": [], "failed": [], "rolled_back": [], "tools": []}
 
-    # 1. 先卸载所有旧插件工具（清理残留）
+    snapshot = _snapshot_registry()
+
     for plugin_name in list(_loaded_tools.keys()):
-        _unload_plugin(plugin_name)
+        await _unload_plugin(plugin_name)
 
-    # 2. 重新加载全部插件（先 installed，再 built-in）
     seen: set[str] = set()
 
     if INSTALLED_PLUGINS_DIR.is_dir():
         for entry in sorted(INSTALLED_PLUGINS_DIR.iterdir()):
             if not entry.is_dir() or entry.name in seen:
                 continue
-            if _load_plugin(entry.name):
+            if await _load_plugin(entry.name):
                 result["reloaded"].append(entry.name)
                 seen.add(entry.name)
             else:
@@ -314,11 +405,107 @@ def reload_plugins() -> dict:
         for entry in sorted(PLUGINS_DIR.iterdir()):
             if not entry.is_dir() or entry.name in seen:
                 continue
-            if _load_plugin(entry.name):
+            if await _load_plugin(entry.name):
                 result["reloaded"].append(entry.name)
                 seen.add(entry.name)
             else:
                 result["failed"].append(entry.name)
 
+    if result["failed"]:
+        _restore_registry(snapshot, failed_names=set(result["failed"]))
+        result["rolled_back"] = list(result["failed"])
+
     result["tools"] = sorted(get_all_tools().keys())
     return result
+
+
+# ──────────────────────────────────────────────────────────
+# 事务回滚辅助
+# ──────────────────────────────────────────────────────────
+
+def _snapshot_registry() -> dict:
+    """快照当前插件注册状态（工具对象 + 插件元数据）。"""
+    return {
+        "tools": {name: get_tool(name) for name in list(get_all_tools().keys())},
+        "loaded_tools": {k: list(v) for k, v in _loaded_tools.items()},
+        "tool_owner": dict(_tool_owner),
+        "plugin_meta": {k: dict(v) for k, v in _plugin_meta.items()},
+        "plugin_source": dict(_plugin_source),
+        "plugin_version": dict(_plugin_version),
+        "plugin_manifest": dict(_plugin_manifest),
+        "plugin_module_names": dict(_plugin_module_names),
+        "plugin_syspaths": dict(_plugin_syspaths),
+    }
+
+
+def _restore_registry(snapshot: dict, failed_names: set[str]) -> None:
+    """回滚失败的插件：恢复其加载前注册的工具与插件元数据。
+
+    成功加载的插件不受影响（保留新版本）。
+    """
+    for plugin_name in failed_names:
+        current_tools = _loaded_tools.pop(plugin_name, [])
+        for t in current_tools:
+            unregister_tool(t)
+            if _tool_owner.get(t) == plugin_name:
+                _tool_owner.pop(t, None)
+        old_tools = snapshot["loaded_tools"].get(plugin_name, [])
+        for t in old_tools:
+            td = snapshot["tools"].get(t)
+            if td is not None:
+                register_tool(td)
+            _tool_owner[t] = plugin_name
+        if old_tools:
+            _loaded_tools[plugin_name] = list(old_tools)
+        if plugin_name in snapshot["plugin_meta"]:
+            _plugin_meta[plugin_name] = dict(snapshot["plugin_meta"][plugin_name])
+        if plugin_name in snapshot["plugin_source"]:
+            _plugin_source[plugin_name] = snapshot["plugin_source"][plugin_name]
+        if plugin_name in snapshot["plugin_version"]:
+            _plugin_version[plugin_name] = snapshot["plugin_version"][plugin_name]
+        if plugin_name in snapshot["plugin_manifest"]:
+            _plugin_manifest[plugin_name] = snapshot["plugin_manifest"][plugin_name]
+        if plugin_name in snapshot["plugin_module_names"]:
+            _plugin_module_names[plugin_name] = snapshot["plugin_module_names"][plugin_name]
+        if plugin_name in snapshot["plugin_syspaths"]:
+            _plugin_syspaths[plugin_name] = snapshot["plugin_syspaths"][plugin_name]
+    if failed_names:
+        logger.warning(
+            f"[插件] 热加载失败已回滚: {sorted(failed_names)}"
+        )
+
+
+# ──────────────────────────────────────────────────────────
+# AST 工具名提取（加载前冲突检测）
+# ──────────────────────────────────────────────────────────
+
+def _extract_tool_names(plugin_file: Path) -> list[str]:
+    """解析 plugin.py，提取 @tool(...) 装饰器声明的工具名（不执行代码）。
+
+    工具名 = 装饰器 name= 参数（若提供）否则函数名。
+    """
+    source = plugin_file.read_text(encoding="utf-8", errors="replace")
+    tree = ast.parse(source)
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for dec in node.decorator_list:
+            dname = ""
+            if isinstance(dec, ast.Call):
+                target = dec.func
+            else:
+                target = dec
+            if isinstance(target, ast.Name):
+                dname = target.id
+            elif isinstance(target, ast.Attribute):
+                dname = target.attr
+            if dname != "tool":
+                continue
+            tool_name = node.name
+            if isinstance(dec, ast.Call):
+                for kw in dec.keywords:
+                    if kw.arg == "name" and isinstance(kw.value, ast.Constant):
+                        tool_name = str(kw.value.value)
+            names.append(tool_name)
+    return names

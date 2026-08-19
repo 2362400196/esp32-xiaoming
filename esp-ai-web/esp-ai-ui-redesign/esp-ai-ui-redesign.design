@@ -1,0 +1,129 @@
+{
+  "data": [
+    {
+      "id": "page-devices",
+      "title": "设备中心",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1787130600000,
+      "canvasData": {
+        "x": -36,
+        "y": -60,
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-f4a9d94b",
+          "measuredAt": 1787132234323
+        }
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/devices.html",
+        "interactions": [
+          { "id": "int-devices-to-control", "type": "navigation", "trigger": "click", "domId": "nav-control", "sourcePageId": "page-devices", "sourceDomId": "nav-control", "targetPageId": "page-control", "label": "切换到控制台" },
+          { "id": "int-devices-to-store", "type": "navigation", "trigger": "click", "domId": "nav-store", "sourcePageId": "page-devices", "sourceDomId": "nav-store", "targetPageId": "page-store", "label": "切换到技能商店" },
+          { "id": "int-devices-to-profile", "type": "navigation", "trigger": "click", "domId": "nav-profile", "sourcePageId": "page-devices", "sourceDomId": "nav-profile", "targetPageId": "page-profile", "label": "切换到我的" },
+          { "id": "int-device-select", "type": "selection", "trigger": "click", "domId": "device-selected", "sourcePageId": "page-devices", "sourceDomId": "device-selected", "targetPageId": "page-devices", "targetDomId": "device-selected", "label": "选中/取消设备" },
+          { "id": "int-add-device", "type": "action", "trigger": "click", "domId": "btn-add-device", "sourcePageId": "page-devices", "sourceDomId": "btn-add-device", "targetPageId": "page-devices", "label": "添加设备" }
+        ]
+      }
+    },
+    {
+      "id": "page-control",
+      "title": "控制台",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1787130600000,
+      "canvasData": {
+        "x": 552,
+        "y": -108,
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-90970eba",
+          "measuredAt": 1787132234323
+        }
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/control.html",
+        "interactions": [
+          { "id": "int-control-to-devices", "type": "navigation", "trigger": "click", "domId": "nav-devices", "sourcePageId": "page-control", "sourceDomId": "nav-devices", "targetPageId": "page-devices", "label": "切换到设备中心" },
+          { "id": "int-control-to-store", "type": "navigation", "trigger": "click", "domId": "nav-store", "sourcePageId": "page-control", "sourceDomId": "nav-store", "targetPageId": "page-store", "label": "切换到技能商店" },
+          { "id": "int-control-to-profile", "type": "navigation", "trigger": "click", "domId": "nav-profile", "sourcePageId": "page-control", "sourceDomId": "nav-profile", "targetPageId": "page-profile", "label": "切换到我的" },
+          { "id": "int-volume", "type": "input", "trigger": "input", "domId": "volume-slider", "sourcePageId": "page-control", "sourceDomId": "volume-slider", "targetPageId": "page-control", "label": "音量调节" },
+          { "id": "int-interrupt", "type": "action", "trigger": "click", "domId": "btn-interrupt", "sourcePageId": "page-control", "sourceDomId": "btn-interrupt", "targetPageId": "page-control", "label": "打断" },
+          { "id": "int-send", "type": "action", "trigger": "click", "domId": "btn-send", "sourcePageId": "page-control", "sourceDomId": "btn-send", "targetPageId": "page-control", "label": "发送消息" }
+        ]
+      }
+    },
+    {
+      "id": "page-store",
+      "title": "技能商店",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1787130600000,
+      "canvasData": {
+        "x": 960,
+        "y": 0,
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-5833050d",
+          "measuredAt": 1787132234323
+        }
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/store.html",
+        "interactions": [
+          { "id": "int-store-to-devices", "type": "navigation", "trigger": "click", "domId": "nav-devices", "sourcePageId": "page-store", "sourceDomId": "nav-devices", "targetPageId": "page-devices", "label": "切换到设备中心" },
+          { "id": "int-store-to-control", "type": "navigation", "trigger": "click", "domId": "nav-control", "sourcePageId": "page-store", "sourceDomId": "nav-control", "targetPageId": "page-control", "label": "切换到控制台" },
+          { "id": "int-store-to-profile", "type": "navigation", "trigger": "click", "domId": "nav-profile", "sourcePageId": "page-store", "sourceDomId": "nav-profile", "targetPageId": "page-profile", "label": "切换到我的" },
+          { "id": "int-search", "type": "input", "trigger": "input", "domId": "search-input", "sourcePageId": "page-store", "sourceDomId": "search-input", "targetPageId": "page-store", "label": "搜索技能" },
+          { "id": "int-category-all", "type": "selection", "trigger": "click", "domId": "chip-all", "sourcePageId": "page-store", "sourceDomId": "chip-all", "targetPageId": "page-store", "label": "全部分类" }
+        ]
+      }
+    },
+    {
+      "id": "page-profile",
+      "title": "我的",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1787130600000,
+      "canvasData": {
+        "x": 1440,
+        "y": 0,
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 935,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-4b932412",
+          "measuredAt": 1787132234323
+        }
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/profile.html",
+        "interactions": [
+          { "id": "int-profile-to-devices", "type": "navigation", "trigger": "click", "domId": "nav-devices", "sourcePageId": "page-profile", "sourceDomId": "nav-devices", "targetPageId": "page-devices", "label": "切换到设备中心" },
+          { "id": "int-profile-to-control", "type": "navigation", "trigger": "click", "domId": "nav-control", "sourcePageId": "page-profile", "sourceDomId": "nav-control", "targetPageId": "page-control", "label": "切换到控制台" },
+          { "id": "int-profile-to-store", "type": "navigation", "trigger": "click", "domId": "nav-store", "sourcePageId": "page-profile", "sourceDomId": "nav-store", "targetPageId": "page-store", "label": "切换到技能商店" },
+          { "id": "int-login-state", "type": "toggle", "trigger": "click", "domId": "btn-logged-in", "sourcePageId": "page-profile", "sourceDomId": "btn-logged-in", "targetPageId": "page-profile", "label": "切换登录状态" },
+          { "id": "int-theme-light", "type": "selection", "trigger": "click", "domId": "theme-light", "sourcePageId": "page-profile", "sourceDomId": "theme-light", "targetPageId": "page-profile", "label": "浅色主题" },
+          { "id": "int-theme-dark", "type": "selection", "trigger": "click", "domId": "theme-dark", "sourcePageId": "page-profile", "sourceDomId": "theme-dark", "targetPageId": "page-profile", "label": "深色主题" },
+          { "id": "int-theme-mint", "type": "selection", "trigger": "click", "domId": "theme-mint", "sourcePageId": "page-profile", "sourceDomId": "theme-mint", "targetPageId": "page-profile", "label": "薄荷绿主题" }
+        ]
+      }
+    }
+  ],
+  "config": {
+    "autoLayout": false,
+    "deviceType": "desktop",
+    "projectName": "ESP-AI UI 重设计",
+    "visualEditorEnabled": false
+  }
+}

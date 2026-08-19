@@ -1,11 +1,17 @@
 {
-    "id": "device_control",
-    "name": "设备控制",
-    "version": "1.0.0",
-    "author": "system",
-    "description": "执行设备硬件指令、重启、测试等操作",
-    "api_version": "1.0",
-    "requires": [],
-    "config_fields": [],
-    "permissions": []
+    "id":  "device_control",
+    "name":  "设备控制",
+    "version":  "1.0.0",
+    "author":  "system",
+    "description":  "执行设备硬件指令、重启、测试等操作",
+    "api_version":  "1.0",
+    "requires":  [
+
+                 ],
+    "config_fields":  [
+
+                      ],
+    "permissions":  [
+                        "device"
+                    ]
 }

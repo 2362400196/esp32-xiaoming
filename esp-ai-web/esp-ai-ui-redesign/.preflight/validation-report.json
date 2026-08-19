@@ -1,0 +1,144 @@
+{
+  "success": true,
+  "outcome": "passed",
+  "repairable": true,
+  "terminalViolations": [],
+  "terminalBlockingSummary": null,
+  "skillProvenance": {
+    "name": "solo-design",
+    "version": "2026.07.06.8",
+    "version_source": "skill-release-manifest.json",
+    "runtime_skill_dir": null,
+    "recorded_at": null,
+    "expected_version": "2026.08.06.19.15.08",
+    "status": "mismatch",
+    "read_status": "ok"
+  },
+  "operatingMode": "free-explore",
+  "renderBlockingErrorCount": 0,
+  "softWarningCount": 4,
+  "renderBlockingErrors": [],
+  "errorSignatures": [],
+  "softWarnings": [
+    "[html-quality] colors_and_type.css: ordinary/static shadow tokens must keep every shadow alpha <= 0.05; deeper shadows are allowed only for floating-layer tokens such as modal/popover/dropdown/drawer/overlay (--esp-shadow-2: 0 8px 24px -8px rgba(23, 52, 74, 0.18), --esp-shadow-3: 0 24px 60px -20px rgba(23, 52, 74, 0.30), --esp-shadow-mint: 0 10px 28px rgba(16, 185, 129, 0.28), --esp-shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.75)).",
+    "[html-quality] control.html: hardcoded colors are forbidden outside <style id=\"theme-vars\">. Use brand CSS variables from the token reference.",
+    "[html-quality] profile.html: hardcoded colors are forbidden outside <style id=\"theme-vars\">. Use brand CSS variables from the token reference.",
+    "[html-quality] store.html: hardcoded colors are forbidden outside <style id=\"theme-vars\">. Use brand CSS variables from the token reference."
+  ],
+  "repairPlanHints": [
+    {
+      "errorClass": "hardcoded-color-in-body",
+      "owner": "sub-agent",
+      "repairScope": "targeted-token-replace",
+      "strategy": "targeted_token_replace_once",
+      "affectedFiles": [
+        "control.html"
+      ],
+      "repairReportPath": null,
+      "repairAlreadyAttempted": false,
+      "allowSourceRead": "no-full-html-read",
+      "maxValidationRuns": 2
+    },
+    {
+      "errorClass": "hardcoded-color-in-body",
+      "owner": "sub-agent",
+      "repairScope": "targeted-token-replace",
+      "strategy": "targeted_token_replace_once",
+      "affectedFiles": [
+        "profile.html"
+      ],
+      "repairReportPath": null,
+      "repairAlreadyAttempted": false,
+      "allowSourceRead": "no-full-html-read",
+      "maxValidationRuns": 2
+    },
+    {
+      "errorClass": "hardcoded-color-in-body",
+      "owner": "sub-agent",
+      "repairScope": "targeted-token-replace",
+      "strategy": "targeted_token_replace_once",
+      "affectedFiles": [
+        "store.html"
+      ],
+      "repairReportPath": null,
+      "repairAlreadyAttempted": false,
+      "allowSourceRead": "no-full-html-read",
+      "maxValidationRuns": 2
+    }
+  ],
+  "repairActionTable": [],
+  "errorCount": 0,
+  "warningCount": 4,
+  "errors": [],
+  "warnings": [
+    "[html-quality] colors_and_type.css: ordinary/static shadow tokens must keep every shadow alpha <= 0.05; deeper shadows are allowed only for floating-layer tokens such as modal/popover/dropdown/drawer/overlay (--esp-shadow-2: 0 8px 24px -8px rgba(23, 52, 74, 0.18), --esp-shadow-3: 0 24px 60px -20px rgba(23, 52, 74, 0.30), --esp-shadow-mint: 0 10px 28px rgba(16, 185, 129, 0.28), --esp-shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.75)).",
+    "[html-quality] control.html: hardcoded colors are forbidden outside <style id=\"theme-vars\">. Use brand CSS variables from the token reference.",
+    "[html-quality] profile.html: hardcoded colors are forbidden outside <style id=\"theme-vars\">. Use brand CSS variables from the token reference.",
+    "[html-quality] store.html: hardcoded colors are forbidden outside <style id=\"theme-vars\">. Use brand CSS variables from the token reference."
+  ],
+  "validationRunDisciplineStatus": {
+    "declared": true,
+    "restoreMode": false,
+    "maxFullValidationRuns": 2,
+    "validationHistoryCount": 0,
+    "repairLedgerCount": 0,
+    "softWarningsTriggerRepair": false,
+    "terminalState": null,
+    "nextAction": null,
+    "violations": [],
+    "success": true
+  },
+  "terminalState": null,
+  "nextCheck": {
+    "type": "finish-readiness",
+    "command": "node \"c:\\Users\\23624\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-finish-readiness.mjs\" \"c:\\Users\\23624\\Desktop\\esp\\esp32-xiaoming\\esp-ai-web\\esp-ai-ui-redesign\" --check=all",
+    "fullValidationAllowed": false,
+    "reason": "workspace validation passed; run complete finish readiness before final delivery"
+  },
+  "repairBatch": [],
+  "repairContextPacket": {
+    "schema_version": "1.0",
+    "purpose": "small-context repair packet; read this before full validation-report.json",
+    "success": true,
+    "terminalState": null,
+    "skillProvenance": {
+      "name": "solo-design",
+      "version": "2026.07.06.8",
+      "version_source": "skill-release-manifest.json",
+      "runtime_skill_dir": null,
+      "recorded_at": null,
+      "expected_version": "2026.08.06.19.15.08",
+      "status": "mismatch",
+      "read_status": "ok"
+    },
+    "renderBlockingErrorCount": 0,
+    "softWarningCount": 4,
+    "renderBlockingErrors": [],
+    "repairActionTable": [],
+    "nextCheck": {
+      "type": "finish-readiness",
+      "command": "node \"c:\\Users\\23624\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-finish-readiness.mjs\" \"c:\\Users\\23624\\Desktop\\esp\\esp32-xiaoming\\esp-ai-web\\esp-ai-ui-redesign\" --check=all",
+      "fullValidationAllowed": false,
+      "reason": "workspace validation passed; run complete finish readiness before final delivery"
+    },
+    "forbidden": [
+      "do not read validator source",
+      "do not rerun full validation when nextCheck.fullValidationAllowed=false",
+      "do not start preview/browser unless user explicitly asks",
+      "do not hand-edit repair ledger fields"
+    ]
+  },
+  "projectFileHashes": {
+    "esp-ai-ui-redesign.design": "14998373d3e2750da7b74480da8507e33dac6e837a3ee80755e0dc17c3ebb5d0",
+    "colors_and_type.css": "c9456b01b7a17296d2bdad255b1a3e95e3377d420828ef467384df0d5b1774a5",
+    "runtime-orchestration-summary.json": "efcf66cf7ee1219317331c9ed2a85e05f3b6666f664bc2ab020f7d65058131bb",
+    "pages/control.html": "f917715cafce52aaa216e62d52877cef31414897276009eee6d5e867574ea875",
+    "pages/devices.html": "462cb5cb6b27a5896c7e2f97398c63b6154377aa1b8502f8847f5fa51ffff278",
+    "pages/profile.html": "a374e88f10d24732758bc8d307d50f68734caa1564978051c934262e2d8050f7",
+    "pages/store.html": "97c70c5eb0686698777f9a98b2b43246cfed5fa2921aa911340570132497c3a2"
+  },
+  "designDir": "c:\\Users\\23624\\Desktop\\esp\\esp32-xiaoming\\esp-ai-web\\esp-ai-ui-redesign",
+  "expectedPages": 4,
+  "requireInteractions": "nav-control:pages/devices.html,nav-store:pages/devices.html,nav-profile:pages/devices.html,device-selected:pages/devices.html,btn-add-device:pages/devices.html,nav-devices:pages/control.html,nav-store:pages/control.html,nav-profile:pages/control.html,volume-slider:pages/control.html,btn-interrupt:pages/control.html,btn-send:pages/control.html,nav-devices:pages/store.html,nav-control:pages/store.html,nav-profile:pages/store.html,search-input:pages/store.html,chip-all:pages/store.html,nav-devices:pages/profile.html,nav-control:pages/profile.html,nav-store:pages/profile.html,btn-logged-in:pages/profile.html,theme-light:pages/profile.html,theme-dark:pages/profile.html,theme-mint:pages/profile.html",
+  "checkedAt": "2026-08-19T09:55:59.628Z"
+}

@@ -23,12 +23,13 @@ class StopPipeline(Exception):
 
 class ToolDefinition:
     def __init__(self, name: str, description: str, func: Callable, parameters: dict,
-                 cache: bool = True):
+                 cache: bool = True, builtin: bool = False):
         self.name = name
         self.description = description
         self.func = func
         self.parameters = parameters
         self.cache = cache  # 结果缓存开关：False 时每次调用都执行函数（如含屏幕显示的查询工具）
+        self.builtin = builtin  # True=系统/内置工具（插件不可覆盖）；False=插件工具
 
     def to_openai_schema(self) -> dict:
         return {
@@ -42,6 +43,29 @@ class ToolDefinition:
 
 
 _registry: dict[str, ToolDefinition] = {}
+
+# 系统/内置工具名集合（auto_discover 发现的系统工具 + 通过 builtin=True 注册的工具）。
+# 插件注册的工具（builtin=False）永远不能覆盖这些核心工具。
+_builtin_tool_names: set[str] = set()
+
+
+def _is_plugin_module_path(module_file: str | None) -> bool:
+    """判断工具定义所在的模块是否属于插件目录（src/plugins 或 data/plugins）。
+
+    用于在工具注册时区分系统工具与插件工具（插件工具不允许覆盖系统工具）。
+    """
+    if not module_file:
+        return False
+    try:
+        parts = Path(module_file).resolve().parts
+    except (OSError, ValueError):
+        return False
+    for i, part in enumerate(parts):
+        if part == "plugins" and i >= 1 and parts[i - 1] in ("src", "installed"):
+            return True
+        if part == "plugins" and i >= 1 and parts[i - 1] == "data":
+            return True
+    return False
 
 
 def tool(name: str | None = None, description: str | None = None, cache: bool = True):
@@ -95,17 +119,48 @@ def tool(name: str | None = None, description: str | None = None, cache: bool = 
         if required:
             parameters_schema["required"] = required
 
+        # 判断来源：系统工具 vs 插件工具（插件工具不允许覆盖系统工具）
+        module_file = None
+        try:
+            module = sys.modules.get(func.__module__)
+            module_file = getattr(module, "__file__", None)
+        except Exception:
+            module_file = None
+        is_builtin = not _is_plugin_module_path(module_file)
+
         definition = ToolDefinition(
             name=tool_name,
             description=tool_desc,
             func=func,
             parameters=parameters_schema,
             cache=cache,
+            builtin=is_builtin,
         )
-        _registry[tool_name] = definition
+        _register(definition)
         return func
 
     return decorator
+
+
+def _register(td: ToolDefinition) -> None:
+    """统一注册入口：维护系统/插件工具集合 + 覆盖保护。"""
+    existing = _registry.get(td.name)
+    if existing is not None and existing.builtin and not td.builtin:
+        raise ValueError(
+            f"工具 {td.name} 是系统/内置工具，插件不允许覆盖"
+        )
+    _registry[td.name] = td
+    if td.builtin:
+        _builtin_tool_names.add(td.name)
+    else:
+        _builtin_tool_names.discard(td.name)
+
+
+def register_tool(td: ToolDefinition) -> None:
+    """注册一个已构造好的 ToolDefinition（热加载回滚时恢复旧工具）。"""
+    if not isinstance(td, ToolDefinition):
+        raise TypeError("register_tool 需要 ToolDefinition 实例")
+    _register(td)
 
 
 def get_all_tools() -> dict[str, ToolDefinition]:
@@ -115,9 +170,15 @@ def get_all_tools() -> dict[str, ToolDefinition]:
 def unregister_tool(name: str) -> bool:
     """注销工具（插件热加载/卸载时使用）。返回是否成功移除。"""
     if name in _registry:
+        _builtin_tool_names.discard(name)
         del _registry[name]
         return True
     return False
+
+
+def is_builtin_tool(name: str) -> bool:
+    """判断工具是否为系统/内置工具（插件不得覆盖）。"""
+    return name in _builtin_tool_names
 
 
 def get_openai_tools_schema() -> list[dict]:
@@ -1035,6 +1096,8 @@ class PerUserToolManager:
         self._pending_lua_future: asyncio.Future = None
         # 设备状态查询等待（get_volume/get_brightness 工具）：设备上报 device_state_result 时 set_result
         self._pending_device_state_future: asyncio.Future = None
+        # 设备指令 ack 等待（send_device_command_ack 工具）：设备回发 instruct_ack 时 set_result
+        self._pending_command_ack_future: asyncio.Future = None
 
     def get_plugin_config(self, plugin: str, key: str, default: str = "") -> str:
         """读取设备级插件配置项（如天气插件的高德 Key）。"""
@@ -1204,10 +1267,19 @@ class PerUserToolManager:
         1. 黑名单 disabled_tools → 禁用
         2. 插件白名单 enabled_plugins：None/空 = 无限制（所有插件工具启用）；
            非空集合 = 插件必须在该白名单内才生效（内置工具不受影响）
-        3. 能力适配：插件声明 requires=display 且设备无屏（device_has_display=False）→ 隐藏
+        3. MCP 服务器视为虚拟插件（mcp:<server>），纳入同一白名单语义
+        4. 能力适配：插件声明 requires=display 且设备无屏（device_has_display=False）→ 隐藏
         """
         if tool_name in self._disabled_tools:
             return False
+        # MCP 工具：映射到虚拟插件名 mcp:<server>，参与白名单过滤
+        if tool_name in self._mcp_tool_map:
+            if self._enabled_plugins is not None:
+                server = self._mcp_server_of_tool(tool_name)
+                if server and f"mcp:{server}" not in self._enabled_plugins:
+                    logger.info(f"[ToolManager] 设备未启用 MCP 服务器 {server}，隐藏工具 {tool_name}")
+                    return False
+            return True
         # 延迟导入避免与 plugin_loader 循环依赖（plugin_loader 依赖本模块）
         from src.infrastructure.plugin_loader import get_plugin_of_tool, get_plugin_requires
         plugin = get_plugin_of_tool(tool_name)
@@ -1221,6 +1293,15 @@ class PerUserToolManager:
                 logger.info(f"[ToolManager] 设备无屏幕，隐藏工具 {tool_name}（插件「{plugin}」需 display）")
                 return False
         return True
+
+    def _mcp_server_of_tool(self, tool_name: str) -> str | None:
+        """工具名 → 所属 MCP 服务器名（用于白名单过滤）。"""
+        pool_info = self._mcp_tool_map.get(tool_name)
+        if pool_info is None:
+            return None
+        if isinstance(pool_info, tuple):
+            return str(pool_info[0])
+        return getattr(pool_info, "server_name", None) or "mcp"
 
     async def _call_mcp_with_circuit_breaker(
         self,
@@ -1267,6 +1348,12 @@ class PerUserToolManager:
         if not self._device_tool_allowed(tool_name):
             logger.warning(f"[ToolManager] 工具 {tool_name} 已被设备级配置禁用（缓存路径拦截）")
             return f"工具 {tool_name} 在当前设备上不可用"
+
+        # 参数校验前置：按工具声明 schema 校验 LLM 传入参数（jsonschema）
+        validation_error = self._validate_arguments(tool_name, arguments)
+        if validation_error:
+            logger.warning(f"[ToolManager] 工具 {tool_name} 参数校验失败: {validation_error}")
+            return f"工具 {tool_name} 参数校验失败: {validation_error}"
 
         # 工具可声明 cache=False（@tool(cache=False)）禁用结果缓存：
         # 缓存命中会跳过整个函数，含屏幕显示/设备指令副作用的工具会因此失效
@@ -1331,6 +1418,37 @@ class PerUserToolManager:
                 pass
         return kwargs
 
+    def _validate_arguments(self, tool_name: str, arguments: dict) -> str | None:
+        """按工具声明的参数 schema 校验 LLM 传入参数（jsonschema）。
+
+        Args:
+            tool_name: 工具名
+            arguments: LLM 传入的参数（dict）
+
+        Returns:
+            None 表示校验通过；字符串表示校验失败原因。
+        """
+        # MCP 工具：schema 由远端声明，跳过本地校验（避免误拦）
+        if tool_name in self._mcp_tool_map:
+            return None
+
+        td = get_tool(tool_name)
+        if td is None:
+            return None
+        schema = td.parameters
+        if not isinstance(schema, dict) or not schema.get("properties"):
+            return None
+
+        try:
+            import jsonschema
+            jsonschema.validate(instance=arguments, schema=schema)
+        except jsonschema.ValidationError as e:
+            return f"{e.message}"
+        except Exception as e:
+            logger.debug(f"[ToolManager] 参数校验异常（放行）: {e}")
+            return None
+        return None
+
     async def _call_tool_internal(self, tool_name: str, arguments: dict) -> str:
         self._shared.ensure_discovered()
 
@@ -1351,12 +1469,15 @@ class PerUserToolManager:
                     kwargs["ctx"] = self.ctx
                 if self.fsm and "fsm" in sig.parameters:
                     kwargs["fsm"] = self.fsm
-                result = builtin.func(**kwargs)
+                result = self._call_with_plugin_context(builtin, tool_name, kwargs)
                 if asyncio.iscoroutine(result):
                     result = await result
                 return str(result)
             except StopPipeline:
                 raise
+            except PermissionError as e:
+                logger.error(f"[ToolManager] 插件工具 {tool_name} 权限被拒: {e}")
+                return f"权限不足: {e}"
             except Exception as e:
                 logger.error(f"[ToolManager] 内置工具 {tool_name} 执行异常: {e}")
                 return f"工具执行异常: {e}"
@@ -1375,6 +1496,38 @@ class PerUserToolManager:
 
         logger.warning(f"[ToolManager] 未找到工具: {tool_name}")
         return f"未找到工具: {tool_name}"
+
+    def _call_with_plugin_context(self, td, tool_name: str, kwargs: dict):
+        """在插件权限上下文中执行工具函数（运行时守卫的数据源）。
+
+        非插件工具（内置/系统工具）不设上下文 → SDK 权限检查放行。
+        """
+        plugin = None
+        try:
+            from src.infrastructure.plugin_loader import get_plugin_of_tool
+            plugin = get_plugin_of_tool(tool_name)
+        except Exception:
+            plugin = None
+
+        if plugin is None:
+            return td.func(**kwargs)
+
+        # 插件工具：注入权限上下文（permissions 来自 manifest）
+        from src.infrastructure.plugin_security import reset_plugin_context, set_plugin_context
+
+        permissions = []
+        try:
+            from src.infrastructure.plugin_loader import get_plugin_manifest
+            manifest = get_plugin_manifest(plugin)
+            if manifest is not None:
+                permissions = list(getattr(manifest, "permissions", []) or [])
+        except Exception:
+            permissions = []
+        token = set_plugin_context(plugin, permissions)
+        try:
+            return td.func(**kwargs)
+        finally:
+            reset_plugin_context(token)
 
     async def call_tools_batch(
         self,
@@ -1458,6 +1611,7 @@ __all__ = [
     "StopPipeline",
     "ToolDefinition",
     "tool",
+    "register_tool",
     "get_all_tools",
     "get_openai_tools_schema",
     "get_tool",

@@ -1,53 +1,60 @@
 """
-builtin_tools.py 单元测试
+内置插件工具单元测试（src/plugins/* 迁移版）
 
-覆盖工具：
-- get_current_time / get_current_date：时间日期工具
-- set_volume / volume_down / volume_up / set_brightness：设备控制工具
-- standby：待机（抛 StopPipeline）
-- parse_lrc / fetch_lyrics：歌词解析与下载
-- play_music：音乐播放（mock urllib + settings）
-- test_device：设备测试（mock get_app）
-- execute_lua / stop_lua / clear_screen：Lua 控制
-- memory_store / memory_recall / memory_list / memory_update / memory_forget：长期记忆工具
-- _resolve_device_id / _get_ltm_service 辅助函数
+原 src/use_cases/builtin_tools.py 的函数已迁移至 src/plugins/ 各插件模块，
+本文件直接测试迁移后的插件实现。覆盖：
 
-通过 mock channel / tool_manager / settings / urllib 避免真实网络和设备调用。
+- system_basic：get_current_time / get_current_date / set_volume / volume_down /
+  volume_up / set_brightness / standby / get_volume / get_brightness
+- media_player：parse_lrc / fetch_lyrics / play_music
+- device_control：test_device / execute_lua / stop_lua / clear_screen
+- memory：memory_store / memory_recall / memory_list / memory_update / memory_forget
+
+通过 mock channel / tool_manager / http_request / request_device_result /
+get_settings 避免真实网络和设备调用；权限敏感调用通过 set_plugin_context
+模拟插件 manifest 权限上下文（与 tools_system.call_tool 的生产注入一致）。
 """
-import json
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.use_cases.builtin_tools import (
-    _get_default_ltm_service,
-    _get_ltm_service,
-    _resolve_device_id,
-    clear_screen,
-    execute_lua,
-    fetch_lyrics,
-    get_current_date,
-    get_current_time,
+from src.infrastructure.plugin_security import reset_plugin_context, set_plugin_context
+from src.plugins.device_control.plugin import clear_screen, execute_lua, stop_lua, test_device
+from src.plugins.media_player.plugin import fetch_lyrics, parse_lrc, play_music
+from src.plugins.memory.plugin import (
     memory_forget,
     memory_list,
     memory_recall,
     memory_store,
     memory_update,
-    parse_lrc,
-    play_music,
+)
+from src.plugins.system_basic.plugin import (
+    get_brightness,
+    get_current_date,
+    get_current_time,
+    get_volume,
     set_brightness,
     set_volume,
     standby,
-    stop_lua,
-    test_device,
     volume_down,
     volume_up,
 )
 from src.use_cases.tools_system import StopPipeline
 
 
+@contextmanager
+def _plugin_ctx(plugin: str, permissions: list[str]):
+    """模拟插件 manifest 权限上下文（与生产 tools_system.call_tool 一致）。"""
+    token = set_plugin_context(plugin, permissions)
+    try:
+        yield
+    finally:
+        reset_plugin_context(token)
+
+
 # ============================================================
-# 时间日期工具
+# 时间日期工具（system_basic）
 # ============================================================
 
 
@@ -86,7 +93,7 @@ class TestGetCurrentDate:
 
 
 # ============================================================
-# 音量控制工具
+# 音量控制工具（system_basic）
 # ============================================================
 
 
@@ -105,7 +112,8 @@ class TestSetVolume:
 
     async def test_with_channel_sends_instruction(self):
         tm = _make_tool_manager_with_channel()
-        result = await set_volume(80, tool_manager=tm)
+        with _plugin_ctx("system_basic", ["device"]):
+            result = await set_volume(80, tool_manager=tm)
         assert "80%" in result
         tm.channel.send_json.assert_awaited_once()
         sent = tm.channel.send_json.call_args.args[0]
@@ -116,28 +124,39 @@ class TestSetVolume:
     async def test_without_channel_returns_message(self):
         result = await set_volume(50, tool_manager=None)
         assert "50%" in result
-        assert "未连接设备" in result
+        assert "设备未连接" in result
 
     async def test_clamps_above_100(self):
         tm = _make_tool_manager_with_channel()
-        result = await set_volume(150, tool_manager=tm)
+        with _plugin_ctx("system_basic", ["device"]):
+            result = await set_volume(150, tool_manager=tm)
         assert "100%" in result
 
     async def test_clamps_below_0(self):
         tm = _make_tool_manager_with_channel()
-        result = await set_volume(-10, tool_manager=tm)
+        with _plugin_ctx("system_basic", ["device"]):
+            result = await set_volume(-10, tool_manager=tm)
         assert "0%" in result
 
     async def test_mute(self):
         tm = _make_tool_manager_with_channel()
-        result = await set_volume(0, tool_manager=tm)
+        with _plugin_ctx("system_basic", ["device"]):
+            result = await set_volume(0, tool_manager=tm)
         assert "0%" in result
 
     async def test_send_exception_returns_error_message(self):
         tm = _make_tool_manager_with_channel()
         tm.channel.send_json = AsyncMock(side_effect=RuntimeError("send fail"))
-        result = await set_volume(50, tool_manager=tm)
-        assert "设置音量失败" in result
+        with _plugin_ctx("system_basic", ["device"]):
+            result = await set_volume(50, tool_manager=tm)
+        assert "50%" in result
+        assert "发送失败" in result
+
+    async def test_without_permission_declared(self):
+        tm = _make_tool_manager_with_channel()
+        with _plugin_ctx("system_basic", []):
+            result = await set_volume(50, tool_manager=tm)
+        assert "设备指令权限未声明" in result
 
 
 class TestVolumeDown:
@@ -145,7 +164,8 @@ class TestVolumeDown:
 
     async def test_with_channel(self):
         tm = _make_tool_manager_with_channel()
-        result = await volume_down(tool_manager=tm)
+        with _plugin_ctx("system_basic", ["device"]):
+            result = await volume_down(tool_manager=tm)
         assert "调小" in result
         sent = tm.channel.send_json.call_args.args[0]
         assert sent["command_id"] == "subtract_volume"
@@ -153,12 +173,13 @@ class TestVolumeDown:
 
     async def test_without_channel(self):
         result = await volume_down(tool_manager=None)
-        assert "未连接设备" in result
+        assert "设备未连接" in result
 
     async def test_send_exception(self):
         tm = _make_tool_manager_with_channel()
         tm.channel.send_json = AsyncMock(side_effect=RuntimeError("fail"))
-        result = await volume_down(tool_manager=tm)
+        with _plugin_ctx("system_basic", ["device"]):
+            result = await volume_down(tool_manager=tm)
         assert "失败" in result
 
 
@@ -167,14 +188,15 @@ class TestVolumeUp:
 
     async def test_with_channel(self):
         tm = _make_tool_manager_with_channel()
-        result = await volume_up(tool_manager=tm)
+        with _plugin_ctx("system_basic", ["device"]):
+            result = await volume_up(tool_manager=tm)
         assert "调大" in result
         sent = tm.channel.send_json.call_args.args[0]
         assert sent["command_id"] == "add_volume"
 
     async def test_without_channel(self):
         result = await volume_up(tool_manager=None)
-        assert "未连接设备" in result
+        assert "设备未连接" in result
 
 
 class TestSetBrightness:
@@ -182,7 +204,8 @@ class TestSetBrightness:
 
     async def test_with_channel(self):
         tm = _make_tool_manager_with_channel()
-        result = await set_brightness(50, tool_manager=tm)
+        with _plugin_ctx("system_basic", ["device"]):
+            result = await set_brightness(50, tool_manager=tm)
         assert "50%" in result
         sent = tm.channel.send_json.call_args.args[0]
         assert sent["command_id"] == "set_brightness"
@@ -190,16 +213,17 @@ class TestSetBrightness:
 
     async def test_without_channel(self):
         result = await set_brightness(50, tool_manager=None)
-        assert "未连接设备" in result
+        assert "设备未连接" in result
 
     async def test_clamps_values(self):
         tm = _make_tool_manager_with_channel()
-        result = await set_brightness(200, tool_manager=tm)
+        with _plugin_ctx("system_basic", ["device"]):
+            result = await set_brightness(200, tool_manager=tm)
         assert "100%" in result
 
 
 # ============================================================
-# standby 待机
+# standby 待机（system_basic）
 # ============================================================
 
 
@@ -208,8 +232,9 @@ class TestStandby:
 
     async def test_with_channel_raises_stop_pipeline(self):
         tm = _make_tool_manager_with_channel()
-        with pytest.raises(StopPipeline):
-            await standby(tool_manager=tm)
+        with _plugin_ctx("system_basic", ["device"]):
+            with pytest.raises(StopPipeline):
+                await standby(tool_manager=tm)
         # 应发送 session_end 和 send_text
         tm.channel.send_json.assert_awaited()
         tm.channel.send_text.assert_awaited_with("session_end")
@@ -220,7 +245,51 @@ class TestStandby:
 
 
 # ============================================================
-# parse_lrc 歌词解析
+# 设备状态查询（system_basic）
+# ============================================================
+
+
+class TestGetVolume:
+    """get_volume：获取设备当前音量"""
+
+    async def test_with_device_reply(self):
+        tm = _make_tool_manager_with_channel()
+        with _plugin_ctx("system_basic", ["device"]), \
+                patch("src.plugins.system_basic.plugin.request_device_result",
+                      AsyncMock(return_value=("volume=80", "ok", ""))):
+            result = await get_volume(tool_manager=tm)
+        assert "80%" in result
+
+    async def test_offline(self):
+        tm = _make_tool_manager_with_channel()
+        with patch("src.plugins.system_basic.plugin.request_device_result",
+                   AsyncMock(return_value=("", "offline", "设备未连接"))):
+            result = await get_volume(tool_manager=tm)
+        assert "设备未连接" in result
+
+    async def test_timeout(self):
+        tm = _make_tool_manager_with_channel()
+        with _plugin_ctx("system_basic", ["device"]), \
+                patch("src.plugins.system_basic.plugin.request_device_result",
+                      AsyncMock(return_value=("", "timeout", "设备未在 5 秒内响应"))):
+            result = await get_volume(tool_manager=tm)
+        assert "5 秒" in result
+
+
+class TestGetBrightness:
+    """get_brightness：获取设备屏幕亮度"""
+
+    async def test_with_device_reply(self):
+        tm = _make_tool_manager_with_channel()
+        with _plugin_ctx("system_basic", ["device"]), \
+                patch("src.plugins.system_basic.plugin.request_device_result",
+                      AsyncMock(return_value=("brightness=60", "ok", ""))):
+            result = await get_brightness(tool_manager=tm)
+        assert "60%" in result
+
+
+# ============================================================
+# parse_lrc 歌词解析（media_player）
 # ============================================================
 
 
@@ -282,90 +351,88 @@ class TestParseLrc:
 
 
 # ============================================================
-# fetch_lyrics 歌词下载
+# fetch_lyrics 歌词下载（media_player）
 # ============================================================
+
+
+def _fake_http_response(text=""):
+    resp = MagicMock()
+    resp.text = text
+    return resp
 
 
 class TestFetchLyrics:
     """fetch_lyrics：下载并解析歌词"""
 
-    def test_success(self):
+    async def test_success(self):
         lrc_text = "[00:01.00]第一行\n[00:02.00]第二行"
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = lrc_text.encode("utf-8")
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=None)
-
-        with patch("urllib.request.urlopen", return_value=mock_resp):
-            result = fetch_lyrics("http://example.com/lyrics.lrc")
+        with _plugin_ctx("media_player", ["network"]), \
+                patch("src.plugins.media_player.plugin.http_request",
+                      AsyncMock(return_value=(_fake_http_response(lrc_text), None))):
+            result = await fetch_lyrics("http://example.com/lyrics.lrc")
         assert len(result) == 2
 
-    def test_failure_returns_empty(self):
-        with patch("urllib.request.urlopen", side_effect=RuntimeError("network error")):
-            result = fetch_lyrics("http://example.com/bad")
+    async def test_failure_returns_empty(self):
+        with _plugin_ctx("media_player", ["network"]), \
+                patch("src.plugins.media_player.plugin.http_request",
+                      AsyncMock(return_value=(None, RuntimeError("network error")))):
+            result = await fetch_lyrics("http://example.com/bad")
         assert result == []
 
 
 # ============================================================
-# play_music 音乐播放
+# play_music 音乐播放（media_player）
 # ============================================================
 
 
 class TestPlayMusic:
     """play_music：搜索并播放歌曲"""
 
-    def _make_tm_with_music_config(self, api_url="http://music.api", lyrics_offset=0):
+    def _make_tm_with_music_config(self):
         tm = MagicMock()
         tm.channel = MagicMock()
         tm.channel.send_json = AsyncMock()
         tm.user_config = MagicMock()
-        tm.user_config.music_config = {
-            "api_url": api_url,
-            "lyrics_offset": lyrics_offset,
-        }
+        tm.user_config.music_config = {"api_url": "http://music.api"}
+        tm.get_plugin_config = MagicMock(return_value="http://music.api")
         return tm
+
+    def _patch_api(self, data):
+        resp = MagicMock()
+        resp.json.return_value = data
+        return patch("src.plugins.media_player.plugin.http_request",
+                     AsyncMock(return_value=(resp, None)))
 
     async def test_no_api_url_returns_message(self):
         tm = MagicMock()
         tm.channel = None
         tm.user_config = None
+        tm.get_plugin_config = MagicMock(return_value="")
         settings = MagicMock()
         settings.music.api_url = ""
         settings.music.lyrics_offset = 0
-        with patch("src.use_cases.builtin_tools.get_settings", return_value=settings):
+        with patch("src.plugins.media_player.plugin.get_settings", return_value=settings):
             result = await play_music("歌", tool_manager=tm)
-        assert "未配置" in result or "音乐服务" in result
+        assert "音乐服务" in result
 
     async def test_api_request_failure_returns_message(self):
         tm = self._make_tm_with_music_config()
-        with patch("urllib.request.urlopen", side_effect=Exception("network error")):
-            result = await play_music("歌", tool_manager=tm)
-        assert "不可用" in result
-
-    async def test_url_error_returns_message(self):
-        import urllib.error
-        tm = self._make_tm_with_music_config()
-        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("fail")):
+        with patch("src.plugins.media_player.plugin.http_request",
+                   AsyncMock(return_value=(None, Exception("network error")))), \
+                _plugin_ctx("media_player", ["network"]):
             result = await play_music("歌", tool_manager=tm)
         assert "不可用" in result
 
     async def test_song_not_found(self):
         tm = self._make_tm_with_music_config()
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"success": False}).encode("utf-8")
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=None)
-        with patch("urllib.request.urlopen", return_value=mock_resp):
+        with self._patch_api({"success": False}), _plugin_ctx("media_player", ["network"]):
             result = await play_music("不存在的歌", tool_manager=tm)
         assert "未找到" in result
 
     async def test_no_audio_url(self):
         tm = self._make_tm_with_music_config()
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"success": True, "audio_url": ""}).encode("utf-8")
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=None)
-        with patch("urllib.request.urlopen", return_value=mock_resp):
+        with self._patch_api({"success": True, "audio_url": ""}), \
+                _plugin_ctx("media_player", ["network"]):
             result = await play_music("歌", tool_manager=tm)
         assert "没有可播放" in result
 
@@ -379,12 +446,8 @@ class TestPlayMusic:
             "lyric_url": "",
             "duration": 180,
         }
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps(api_data).encode("utf-8")
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=None)
-        with patch("urllib.request.urlopen", return_value=mock_resp), \
-                patch("src.use_cases.builtin_tools.fetch_lyrics", return_value=[]):
+        with self._patch_api(api_data), _plugin_ctx("media_player", ["network", "device"]), \
+                patch("src.plugins.media_player.plugin.fetch_lyrics", AsyncMock(return_value=[])):
             with pytest.raises(StopPipeline):
                 await play_music("歌", tool_manager=tm)
         # 应发送 play_music 和 music_meta 指令
@@ -393,7 +456,7 @@ class TestPlayMusic:
         assert "music_meta" in sent_commands
 
     async def test_success_with_lyrics(self):
-        tm = self._make_tm_with_music_config(lyrics_offset=100)
+        tm = self._make_tm_with_music_config()
         api_data = {
             "success": True,
             "audio_url": "http://audio.url",
@@ -402,13 +465,9 @@ class TestPlayMusic:
             "lyric_url": "http://lyric.url",
             "duration": 180,
         }
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps(api_data).encode("utf-8")
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=None)
         lyrics = [{"time": 1000, "text": "第一行"}, {"time": 2000, "text": "第二行"}]
-        with patch("urllib.request.urlopen", return_value=mock_resp), \
-                patch("src.use_cases.builtin_tools.fetch_lyrics", return_value=lyrics):
+        with self._patch_api(api_data), _plugin_ctx("media_player", ["network", "device"]), \
+                patch("src.plugins.media_player.plugin.fetch_lyrics", AsyncMock(return_value=lyrics)):
             with pytest.raises(StopPipeline):
                 await play_music("歌", tool_manager=tm)
         # 应发送 lyric_line 指令
@@ -419,6 +478,7 @@ class TestPlayMusic:
         tm = MagicMock()
         tm.channel = None
         tm.user_config = None
+        tm.get_plugin_config = MagicMock(return_value="")
         settings = MagicMock()
         settings.music.api_url = "http://music.api"
         settings.music.lyrics_offset = 0
@@ -430,19 +490,14 @@ class TestPlayMusic:
             "lyric_url": "",
             "duration": 180,
         }
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps(api_data).encode("utf-8")
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=None)
-        with patch("src.use_cases.builtin_tools.get_settings", return_value=settings), \
-                patch("urllib.request.urlopen", return_value=mock_resp), \
-                patch("src.use_cases.builtin_tools.fetch_lyrics", return_value=[]):
+        with patch("src.plugins.media_player.plugin.get_settings", return_value=settings), \
+                self._patch_api(api_data), _plugin_ctx("media_player", ["network"]):
             result = await play_music("歌", tool_manager=tm)
         assert "未连接设备" in result
 
 
 # ============================================================
-# test_device 设备测试
+# test_device 设备测试（device_control）
 # ============================================================
 
 
@@ -481,7 +536,7 @@ class TestTestDevice:
 
 
 # ============================================================
-# Lua 控制工具
+# Lua 控制工具（device_control）
 # ============================================================
 
 
@@ -490,21 +545,34 @@ class TestExecuteLua:
 
     async def test_with_channel_sends_code(self):
         tm = _make_tool_manager_with_channel()
-        result = await execute_lua("print('hello')", tool_manager=tm)
-        assert "已发送" in result or "成功" in result
-        sent = tm.channel.send_json.call_args.args[0]
-        assert sent["command_id"] == "execute_lua"
-        assert sent["data"] == "print('hello')"
+        with _plugin_ctx("device_control", ["device"]), \
+                patch("src.plugins.device_control.plugin.request_device_result",
+                      AsyncMock(return_value=("print('hello')", "ok", ""))):
+            result = await execute_lua("print('hello')", tool_manager=tm)
+        assert "成功" in result
+        assert "print('hello')" in result
 
     async def test_without_channel(self):
-        result = await execute_lua("code", tool_manager=None)
+        with patch("src.plugins.device_control.plugin.request_device_result",
+                   AsyncMock(return_value=("", "offline", "设备未连接"))):
+            result = await execute_lua("code", tool_manager=None)
         assert "未连接设备" in result
 
     async def test_send_exception(self):
         tm = _make_tool_manager_with_channel()
-        tm.channel.send_json = AsyncMock(side_effect=RuntimeError("fail"))
-        result = await execute_lua("code", tool_manager=tm)
+        with _plugin_ctx("device_control", ["device"]), \
+                patch("src.plugins.device_control.plugin.request_device_result",
+                      AsyncMock(return_value=("", "error", "发送失败: fail"))):
+            result = await execute_lua("code", tool_manager=tm)
         assert "失败" in result
+
+    async def test_timeout(self):
+        tm = _make_tool_manager_with_channel()
+        with _plugin_ctx("device_control", ["device"]), \
+                patch("src.plugins.device_control.plugin.request_device_result",
+                      AsyncMock(return_value=("", "timeout", "设备未在 8 秒内响应"))):
+            result = await execute_lua("code", tool_manager=tm)
+        assert "8 秒" in result
 
 
 class TestStopLua:
@@ -512,19 +580,21 @@ class TestStopLua:
 
     async def test_with_channel(self):
         tm = _make_tool_manager_with_channel()
-        result = await stop_lua(tool_manager=tm)
+        with _plugin_ctx("device_control", ["device"]):
+            result = await stop_lua(tool_manager=tm)
         assert "停止" in result
         sent = tm.channel.send_json.call_args.args[0]
         assert sent["command_id"] == "stop_lua"
 
     async def test_without_channel(self):
         result = await stop_lua(tool_manager=None)
-        assert "未连接设备" in result
+        assert "设备未连接" in result
 
     async def test_send_exception(self):
         tm = _make_tool_manager_with_channel()
         tm.channel.send_json = AsyncMock(side_effect=RuntimeError("fail"))
-        result = await stop_lua(tool_manager=tm)
+        with _plugin_ctx("device_control", ["device"]):
+            result = await stop_lua(tool_manager=tm)
         assert "失败" in result
 
 
@@ -533,34 +603,36 @@ class TestClearScreen:
 
     async def test_with_channel(self):
         tm = _make_tool_manager_with_channel()
-        result = await clear_screen(tool_manager=tm)
+        with _plugin_ctx("device_control", ["device"]):
+            result = await clear_screen(tool_manager=tm)
         assert "清屏" in result
         sent = tm.channel.send_json.call_args.args[0]
         assert sent["command_id"] == "clear_screen"
 
     async def test_without_channel(self):
         result = await clear_screen(tool_manager=None)
-        assert "未连接设备" in result
+        assert "设备未连接" in result
 
     async def test_send_exception(self):
         tm = _make_tool_manager_with_channel()
         tm.channel.send_json = AsyncMock(side_effect=RuntimeError("fail"))
-        result = await clear_screen(tool_manager=tm)
+        with _plugin_ctx("device_control", ["device"]):
+            result = await clear_screen(tool_manager=tm)
         assert "失败" in result
 
 
 # ============================================================
-# 长期记忆工具
+# 长期记忆工具（memory）
 # ============================================================
 
 
-def _make_tm_with_ltm(device_id="d1"):
+def _make_tm_with_ltm(device_key="bound_d1"):
     """构造一个带 ltm_service 的 mock tool_manager"""
     tm = MagicMock()
     tm.channel = None
     tm.user_config = MagicMock()
-    tm.user_config.device_id = device_id
-    tm.user_config.key = device_id
+    tm.user_config.device_id = None
+    tm.user_config.key = device_key
     tm.ltm_service = MagicMock()
     tm.ltm_service.store = AsyncMock()
     tm.ltm_service.recall = AsyncMock()
@@ -570,99 +642,36 @@ def _make_tm_with_ltm(device_id="d1"):
     return tm
 
 
-class TestResolveDeviceId:
-    """_resolve_device_id：自动填充 device_id"""
-
-    def test_returns_explicit_device_id(self):
-        assert _resolve_device_id("explicit", None) == "explicit"
-
-    def test_from_user_config_device_id(self):
-        tm = MagicMock()
-        tm.user_config = MagicMock()
-        tm.user_config.device_id = "from_config"
-        tm.user_config.key = None
-        assert _resolve_device_id("", tm) == "from_config"
-
-    def test_from_user_config_key(self):
-        tm = MagicMock()
-        tm.user_config = MagicMock()
-        tm.user_config.device_id = None
-        tm.user_config.key = "from_key"
-        assert _resolve_device_id("", tm) == "from_key"
-
-    def test_returns_empty_when_no_config(self):
-        assert _resolve_device_id("", None) == ""
-
-    def test_returns_empty_when_config_has_no_id(self):
-        tm = MagicMock()
-        tm.user_config = MagicMock()
-        tm.user_config.device_id = None
-        tm.user_config.key = None
-        assert _resolve_device_id("", tm) == ""
-
-
-class TestGetLtmService:
-    """_get_ltm_service：获取 LTM 服务"""
-
-    def test_returns_from_tool_manager(self):
-        tm = MagicMock()
-        tm.ltm_service = "injected_service"
-        assert _get_ltm_service(tm) == "injected_service"
-
-    def test_returns_default_when_no_tm(self):
-        with patch("src.use_cases.builtin_tools._get_default_ltm_service", return_value="default"):
-            assert _get_ltm_service(None) == "default"
-
-    def test_returns_default_when_no_ltm_attr(self):
-        tm = MagicMock(spec=[])  # 无 ltm_service 属性
-        with patch("src.use_cases.builtin_tools._get_default_ltm_service", return_value="default"):
-            assert _get_ltm_service(tm) == "default"
-
-    def test_returns_default_when_ltm_none(self):
-        tm = MagicMock()
-        tm.ltm_service = None
-        with patch("src.use_cases.builtin_tools._get_default_ltm_service", return_value="default"):
-            assert _get_ltm_service(tm) == "default"
-
-
-class TestGetDefaultLtmService:
-    """_get_default_ltm_service：创建默认 LTM 服务单例"""
-
-    def test_returns_singleton(self):
-        # 重置单例
-        import src.use_cases.builtin_tools as bt
-        bt._ltm_service = None
-        s1 = _get_default_ltm_service()
-        s2 = _get_default_ltm_service()
-        assert s1 is s2
-
-
 class TestMemoryStore:
     """memory_store：存储长期记忆"""
 
     async def test_no_device_id_returns_error(self):
         tm = MagicMock()
         tm.user_config = None
-        result = await memory_store("内容", tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            result = await memory_store("内容", tool_manager=tm)
         assert "无法获取设备ID" in result
 
     async def test_store_new(self):
         tm = _make_tm_with_ltm()
         tm.ltm_service.store = AsyncMock(return_value=("mem-1", True))
-        result = await memory_store("我喜欢蓝色", tags="颜色", keywords="蓝色", tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            result = await memory_store("我喜欢蓝色", tags="颜色", keywords="蓝色", tool_manager=tm)
         assert "已记住" in result
         tm.ltm_service.store.assert_awaited_once()
 
     async def test_store_dedup(self):
         tm = _make_tm_with_ltm()
         tm.ltm_service.store = AsyncMock(return_value=("mem-1", False))
-        result = await memory_store("我喜欢蓝色", tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            result = await memory_store("我喜欢蓝色", tool_manager=tm)
         assert "已存在" in result
 
     async def test_tags_and_keywords_parsed(self):
         tm = _make_tm_with_ltm()
         tm.ltm_service.store = AsyncMock(return_value=("mem-1", True))
-        await memory_store("内容", tags="a,b,c", keywords="x,y,z", tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            await memory_store("内容", tags="a,b,c", keywords="x,y,z", tool_manager=tm)
         item = tm.ltm_service.store.call_args.args[0]
         assert item.tags == ["a", "b", "c"]
         assert item.keywords == ["x", "y", "z"]
@@ -670,7 +679,8 @@ class TestMemoryStore:
     async def test_explicit_device_id_overrides_config(self):
         tm = _make_tm_with_ltm("config_id")
         tm.ltm_service.store = AsyncMock(return_value=("mem-1", True))
-        await memory_store("内容", device_id="explicit_id", tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            await memory_store("内容", device_id="explicit_id", tool_manager=tm)
         item = tm.ltm_service.store.call_args.args[0]
         assert item.device_id == "explicit_id"
 
@@ -681,7 +691,8 @@ class TestMemoryRecall:
     async def test_no_device_id_returns_error(self):
         tm = MagicMock()
         tm.user_config = None
-        result = await memory_recall("标签", tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            result = await memory_recall("标签", tool_manager=tm)
         assert "无法获取设备ID" in result
 
     async def test_recall_found(self):
@@ -691,20 +702,23 @@ class TestMemoryRecall:
         item.content = "记忆内容"
         item.tags = ["标签"]
         tm.ltm_service.recall = AsyncMock(return_value=[item])
-        result = await memory_recall("标签", tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            result = await memory_recall("标签", tool_manager=tm)
         assert "1 条" in result
         assert "记忆内容" in result
 
     async def test_recall_not_found(self):
         tm = _make_tm_with_ltm()
         tm.ltm_service.recall = AsyncMock(return_value=[])
-        result = await memory_recall("标签", tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            result = await memory_recall("标签", tool_manager=tm)
         assert "未找到" in result
 
     async def test_labels_parsed(self):
         tm = _make_tm_with_ltm()
         tm.ltm_service.recall = AsyncMock(return_value=[])
-        await memory_recall("a,b,c", tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            await memory_recall("a,b,c", tool_manager=tm)
         query = tm.ltm_service.recall.call_args.args[0]
         assert tuple(query.summary_labels) == ("a", "b", "c")
 
@@ -715,7 +729,8 @@ class TestMemoryList:
     async def test_no_device_id_returns_error(self):
         tm = MagicMock()
         tm.user_config = None
-        result = await memory_list(tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            result = await memory_list(tool_manager=tm)
         assert "无法获取设备ID" in result
 
     async def test_list_with_items(self):
@@ -725,14 +740,16 @@ class TestMemoryList:
         item.content = "内容"
         item.source = "manual"
         tm.ltm_service.list_all = AsyncMock(return_value=[item])
-        result = await memory_list(tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            result = await memory_list(tool_manager=tm)
         assert "1 条" in result
         assert "内容" in result
 
     async def test_list_empty(self):
         tm = _make_tm_with_ltm()
         tm.ltm_service.list_all = AsyncMock(return_value=[])
-        result = await memory_list(tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            result = await memory_list(tool_manager=tm)
         assert "暂无" in result
 
 
@@ -742,13 +759,15 @@ class TestMemoryUpdate:
     async def test_no_device_id_returns_error(self):
         tm = MagicMock()
         tm.user_config = None
-        result = await memory_update("mem-1", tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            result = await memory_update("mem-1", tool_manager=tm)
         assert "无法获取设备ID" in result
 
     async def test_update_success(self):
         tm = _make_tm_with_ltm()
         tm.ltm_service.update = AsyncMock(return_value=True)
-        result = await memory_update("mem-1", content="新内容", tags="a,b", tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            result = await memory_update("mem-1", content="新内容", tags="a,b", tool_manager=tm)
         assert "已更新" in result
         patch_dict = tm.ltm_service.update.call_args.args[1]
         assert patch_dict["content"] == "新内容"
@@ -757,13 +776,15 @@ class TestMemoryUpdate:
     async def test_update_not_found(self):
         tm = _make_tm_with_ltm()
         tm.ltm_service.update = AsyncMock(return_value=False)
-        result = await memory_update("mem-1", tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            result = await memory_update("mem-1", tool_manager=tm)
         assert "未找到" in result
 
     async def test_partial_update_only_content(self):
         tm = _make_tm_with_ltm()
         tm.ltm_service.update = AsyncMock(return_value=True)
-        await memory_update("mem-1", content="新内容", tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            await memory_update("mem-1", content="新内容", tool_manager=tm)
         patch_dict = tm.ltm_service.update.call_args.args[1]
         assert patch_dict == {"content": "新内容"}
 
@@ -774,7 +795,8 @@ class TestMemoryForget:
     async def test_no_device_id_returns_error(self):
         tm = MagicMock()
         tm.user_config = None
-        result = await memory_forget("mem-1", tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            result = await memory_forget("mem-1", tool_manager=tm)
         assert "无法获取设备ID" in result
 
     async def test_forget_success(self):
@@ -782,11 +804,13 @@ class TestMemoryForget:
         item = MagicMock()
         item.content = "被删除的内容"
         tm.ltm_service.forget = AsyncMock(return_value=item)
-        result = await memory_forget("mem-1", tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            result = await memory_forget("mem-1", tool_manager=tm)
         assert "已删除" in result
 
     async def test_forget_not_found(self):
         tm = _make_tm_with_ltm()
         tm.ltm_service.forget = AsyncMock(return_value=None)
-        result = await memory_forget("mem-1", tool_manager=tm)
+        with _plugin_ctx("memory", ["ltm"]):
+            result = await memory_forget("mem-1", tool_manager=tm)
         assert "未找到" in result

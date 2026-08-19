@@ -17,7 +17,7 @@
 |------|------|------|
 | 设备标识 | `get_device_key()` / `resolve_device_key()` | 拿到当前设备的 `bound_xxx` 标识，查询内部表必备 |
 | 指令下发 | `send_instruct()` / `send_device_command()` | 向设备发一条 `instruct` 指令 |
-| 指令回执 | `request_device_result()` | 下发指令并**等待设备回复结果**（Lua 返回、状态查询） |
+| 指令回执 | `request_device_result()` / `send_device_command_ack()` | 下发指令并**等待设备回复结果**（Lua 返回、状态查询、指令 ack） |
 | 配置读取 | `get_plugin_config_or_env()` | 插件配置 → 环境变量 → 默认值，三级回退 |
 | HTTP 请求 | `http_request()` / `http_get_json()` | 统一超时与错误处理的外部 API 调用 |
 | LTM 记忆 | `get_ltm_service()` / `get_default_ltm_service()` | 访问长期记忆服务（注入优先） |
@@ -80,6 +80,7 @@ await send_instruct(ch, "music_meta", json.dumps({...}, ensure_ascii=False))
 推荐在大多数工具中使用。内置两级防护：
 
 - 设备未连接 → 返回 `"设备未连接"`
+- 未声明 `device` 权限 → 返回 `"设备指令权限未声明"`
 - 发送抛异常 → 返回 `"发送失败: xxx"`
 - 发送成功 → 返回 `None`
 
@@ -163,6 +164,10 @@ if status == "busy":
     return detail
 ```
 
+### `send_device_command_ack(tool_manager, command_id, data="", timeout=8.0)`
+
+下发指令并等待设备返回 **ack 确认回执**（`instruct_ack` 消息）。返回三元组 `(result, status, detail)`，status 取值集合为 `{ok, offline, timeout, error}`。适用于设备侧"收到即回执"的指令确认场景，无需像 `request_device_result` 那样手动指定 `future_attr`。
+
 ---
 
 ## 四、插件配置读取：配置 → 环境变量 → 默认值
@@ -180,6 +185,15 @@ amap_key = get_plugin_config_or_env(
 ```
 
 **优先级**：`tool_manager.get_plugin_config()`（设备插件配置）→ 环境变量 → 默认值。
+
+::: warning 环境变量有白名单限制
+环境变量回退**不是随便什么变量都能读**。出于安全（沙箱机制的一部分），只允许读取：
+- 以 `<插件id>_` 开头（如插件 `quote` 可用 `QUOTE_API_URL`）
+- 或 `PLUGIN_` 开头
+- 或通过环境变量 `PLUGIN_ENV_ALLOWLIST`（逗号分隔）显式放行
+
+不符合规则的变量名会被拒绝，直接落到默认值。建议插件环境变量一律用 `<插件id>_` 前缀命名。
+:::
 
 替换之前常见的 `_get_xxx_key` 手写回退逻辑：
 

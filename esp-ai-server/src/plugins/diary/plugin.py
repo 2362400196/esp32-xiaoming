@@ -1,5 +1,3 @@
-from datetime import datetime
-
 from src.use_cases.tools_system import tool
 from src.use_cases._plugin_helpers import resolve_device_key, get_diary_repository
 
@@ -14,8 +12,6 @@ async def read_diary(days: int = 7, tool_manager=None) -> str:
     if not device_id:
         return "错误：无法获取设备ID"
 
-    from src.infrastructure.db.repositories.growth_repositories import DiaryRepository
-    repo = DiaryRepository()
     repo = get_diary_repository()
     entries = await repo.get_recent(device_id, limit=days)
     if not entries:

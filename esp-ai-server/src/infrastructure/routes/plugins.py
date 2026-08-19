@@ -25,7 +25,7 @@ async def reload_plugins(request: Request, _admin=Depends(require_admin)):
     用法: curl -X POST http://<server>:8088/api/v1/plugins/reload"""
     from src.infrastructure.plugin_loader import reload_plugins
 
-    result = reload_plugins()
+    result = await reload_plugins()
 
     # 失效工具 schema 缓存（下次 LLM 会话自动重建，使新工具对模型可见）
     tm = getattr(request.app.state, "tool_manager", None)
@@ -330,14 +330,21 @@ async def install_plugin(
         if not file.filename or not file.filename.lower().endswith(".zip"):
             return {"code": 1, "message": "请上传 .zip 格式的插件包", "data": None}
 
-        # 1. 保存上传的 zip 到缓存目录
+        # 1. 保存上传的 zip 到缓存目录（限大小，防 zip 炸弹）
+        from src.infrastructure.plugin_manager import MAX_PLUGIN_ZIP_BYTES
         PLUGINS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         # 使用原始文件名，避免冲突加时间戳后缀
         import time
         safe_name = Path(file.filename).name  # 防路径穿越
         cache_path = PLUGINS_CACHE_DIR / f"{int(time.time())}_{safe_name}"
 
-        content = await file.read()
+        content = await file.read(MAX_PLUGIN_ZIP_BYTES + 1)
+        if len(content) > MAX_PLUGIN_ZIP_BYTES:
+            return {
+                "code": 1,
+                "message": f"插件包过大（>{MAX_PLUGIN_ZIP_BYTES // (1024 * 1024)}MB），拒绝安装",
+                "data": None,
+            }
         cache_path.write_bytes(content)
         logger.info(f"[插件] 上传 zip 已保存: {cache_path}（{len(content)} 字节）")
 
@@ -509,7 +516,7 @@ async def update_local_plugin_source(
         else:
             return {"code": 1, "message": "没有可写入的内容", "data": None}
 
-        success = reload_single_plugin(name)
+        success = await reload_single_plugin(name)
         _invalidate_tool_schema_cache(request)
 
         logger.info(f"[插件] 源码已更新: {name}, 热重载: {'成功' if success else '失败'}")
@@ -601,7 +608,7 @@ async def create_local_plugin(
             (plugin_dir / "plugin.py").write_text(body.plugin_code, encoding="utf-8")
 
         # 热重载
-        success = reload_single_plugin(slug)
+        success = await reload_single_plugin(slug)
         _invalidate_tool_schema_cache(request)
 
         logger.info(f"[插件] 本地创建: {slug}, 热重载: {'成功' if success else '失败'}")

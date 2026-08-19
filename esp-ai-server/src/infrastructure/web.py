@@ -132,7 +132,7 @@ async def lifespan(app: FastAPI):
         # （@tool() 注册进全局工具表，LLM 会话前生效）
         try:
             from src.infrastructure.plugin_loader import load_plugins
-            loaded = load_plugins()
+            loaded = await load_plugins()
             logger.info(f"[插件] 启动加载完成，共 {len(loaded)} 个插件: {loaded}")
         except Exception as pe:
             logger.warning(f"[插件] 加载失败: {pe}")

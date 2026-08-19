@@ -120,16 +120,18 @@ manifest.json 字段分为两类：**基础字段**（本地加载器 `PluginMan
 
 | 字段 | 必填 | 默认值 | 说明 |
 |------|:----:|--------|------|
-| `id` | 是 | — | 英文标识符，仅小写字母/数字/下划线/短横线 |
+| `id` | 是 | — | 标识符，仅字母/数字/下划线/短横线 |
 | `name` | 是 | — | 显示名称（中文） |
-| `version` | 是 | `1.0.0` | 语义化版本 `x.y.z` |
+| `version` | 否 | `1.0.0` | 版本号 `x.y` 或 `x.y.z`（至少两段，每段以数字开头） |
 | `description` | 否 | `""` | 一句话描述 |
 | `author` | 否 | `""` | 作者名 |
 | `api_version` | 否 | `1.0` | API 兼容版本，加载时校验是否与当前系统兼容 |
 | `requires` | 否 | `[]` | 能力要求，如 `["display"]` 表示需屏幕，无屏设备自动隐藏 |
 | `config_fields` | 否 | `[]` | 用户配置字段声明，详见[插件配置](#插件配置) |
-| `permissions` | 否 | `[]` | 权限声明，如 `["network", "file_read"]` |
-| `signature` | 否 | `""` | 开发者签名（base64），用于市场验签 |
+| `permissions` | 否 | `[]` | 权限声明，如 `["network", "file_read"]`。声明哪些权限决定插件能调用哪些 SDK 能力，未声明的调用会被沙箱拒绝，详见[插件沙箱机制](./sandbox.md) |
+| `dependencies` | 否 | `[]` | Python 依赖声明（预留） |
+| `file_hashes` | 否 | `[]` | 包内文件 SHA-256 哈希列表，安装时校验，防文件被篡改/夹带 |
+| `signature` | 否 | `""` | 开发者数字签名（base64），管理员配置 `PLUGIN_SIGN_PUBLIC_KEY` 后强制本地安装验签 |
 
 **市场字段**（仅 `/api/v1/marketplace/plugins/upload` 上传时读取，本地安装时忽略）：
 
@@ -148,7 +150,11 @@ manifest.json 字段分为两类：**基础字段**（本地加载器 `PluginMan
 | `data/plugins/installed/` | 从市场下载或 zip 安装的插件 |
 | `src/plugins/` | 随源码分发的内置插件 |
 
-加载时：动态 import `plugin.py` → `@tool()` 装饰器自动注册工具到全局工具表 → LLM 会话中即可调用。热加载时先注销旧工具再重新执行模块，支持改代码不重启服务器。
+加载时：**内置插件**在进程内动态 import `plugin.py` → `@tool()` 装饰器自动注册工具到全局工具表 → LLM 会话中即可调用；**已安装插件**则在独立子进程沙箱中加载，与主服务隔离。热加载时先注销旧工具再重新加载，支持改代码不重启服务器。
+
+::: tip 已安装插件跑在沙箱里
+第三方插件（来自市场或 zip 上传）运行在**独立子进程沙箱**中：环境变量被擦除、import 被白名单限制、危险系统调用被拦截、SDK 能力按 `permissions` 权限裁决。插件代码拿不到服务器密钥、连不上内网、写不了任意文件。完整机制见[插件沙箱机制](./sandbox.md)。
+:::
 
 ## 工具定义
 
@@ -437,11 +443,11 @@ PluginManager.update_plugin(name)
 | `/api/v1/marketplace/plugins/upload` | POST | 上传 zip 到市场 |
 | `/api/v1/marketplace/categories` | GET | 分类列表 |
 
-**本地插件管理端点**（需管理员认证）：
+**本地插件管理端点**（`/api/v1/plugins` 需登录即可，其余需管理员认证）：
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/api/v1/plugins` | GET | 所有已加载插件列表 |
+| `/api/v1/plugins` | GET | 所有已加载插件列表（任意登录用户） |
 | `/api/v1/plugins/installed` | GET | 已安装插件（含版本/来源/工具） |
 | `/api/v1/plugins/install` | POST | 从 zip 安装（multipart 上传） |
 | `/api/v1/plugins/{name}` | DELETE | 卸载插件（内置不可卸载） |
@@ -479,9 +485,11 @@ PluginManager.update_plugin(name)
 |------|------|
 | `src/use_cases/_plugin_helpers.py` | 插件公共工具库（Plugin SDK），详见[插件公共工具库（Plugin SDK）](./plugin-sdk.md) |
 | `src/use_cases/tools_system.py` | 工具系统：`@tool` 装饰器、`StopPipeline`、`PerUserToolManager` |
-| `src/infrastructure/plugin_loader.py` | 插件加载器：扫描目录、动态加载、热加载 |
+| `src/infrastructure/plugin_loader.py` | 插件加载器：扫描目录、进程内加载内置插件、子进程沙箱加载已安装插件、热加载 |
 | `src/infrastructure/plugin_manager.py` | 插件包管理器：安装、卸载、更新、版本检查 |
-| `src/infrastructure/plugin_manifest.py` | manifest.json 模型：字段校验、兼容性检查 |
+| `src/infrastructure/plugin_manifest.py` | manifest.json 模型：字段校验、兼容性检查、签名与文件哈希校验 |
+| `src/infrastructure/plugin_host/` | 插件沙箱运行时：子进程 runner、supervisor、SDK 权限裁决器、SDK 桩 |
+| `src/infrastructure/plugin_security.py` | 插件权限上下文、环境变量白名单、AST 静态审计 |
 | `src/infrastructure/routes/marketplace.py` | 云市场路由：上传、搜索、评论、下载 |
 | `src/infrastructure/routes/plugins.py` | 本地插件路由：热加载、设备级插件控制、安装/卸载 |
 | `src/plugins/weather/plugin.py` | 天气插件示例（含 show_card 卡片 + config_fields 配置） |

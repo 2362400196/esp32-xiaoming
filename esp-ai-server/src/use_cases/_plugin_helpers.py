@@ -19,6 +19,7 @@ from typing import Any
 
 import httpx
 
+from src.infrastructure.plugin_security import mask_secret, require_permission  # noqa: F401
 
 # ════════════════════════════════════════════════════════════
 # 设备标识解析
@@ -50,9 +51,10 @@ def resolve_device_key(device_key: str, tool_manager) -> str:
         if cfg_id:
             # 统一映射：通过 devices 表将 MAC 地址转为 bound_xxx 格式
             try:
+                from sqlalchemy import select
+
                 from src.infrastructure.db.compat.sync_session import get_sync_session
                 from src.infrastructure.db.models.device import DeviceModel
-                from sqlalchemy import select
                 with get_sync_session() as session:
                     result = session.execute(
                         select(DeviceModel.device_key).where(DeviceModel.device_id == cfg_id)
@@ -73,6 +75,7 @@ def resolve_device_key(device_key: str, tool_manager) -> str:
 
 async def send_instruct(channel, command_id, data="") -> None:
     """向设备通道发送一条 instruct 指令（不检查连接状态）。"""
+    require_permission("device", f"下发设备指令 {command_id}")
     await channel.send_json({"type": "instruct", "command_id": command_id, "data": data})
 
 
@@ -87,8 +90,46 @@ async def send_device_command(tool_manager, command_id, data="") -> str | None:
     try:
         await send_instruct(tool_manager.channel, command_id, data)
         return None
+    except PermissionError:
+        return "设备指令权限未声明"
     except Exception as e:
         return f"发送失败: {e}"
+
+
+async def send_device_command_ack(tool_manager, command_id, data="", timeout=8.0) -> tuple:
+    """下发设备指令并等待设备 ack 确认（instruct_ack 消息）。
+
+    相比 send_device_command 的 fire-and-forget，此函数会等待设备端回发
+    {"type": "instruct_ack", "command_id": ..., "data": ...}，从而确认设备
+    真实收到了指令并开始执行。
+
+    Returns:
+        (result, status, detail)：
+          - status="ok"     → 设备已 ack，result 为 ack 携带的 data（或空字符串）
+          - status="offline"→ 设备未连接
+          - status="timeout"→ 超时未收到 ack
+          - status="error"  → 发送异常
+    """
+    if not tool_manager or not tool_manager.channel:
+        return None, "offline", "设备未连接"
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    tool_manager._pending_command_ack_future = future
+    try:
+        await send_instruct(tool_manager.channel, command_id, data)
+    except PermissionError as e:
+        tool_manager._pending_command_ack_future = None
+        return None, "error", str(e)
+    except Exception as e:
+        tool_manager._pending_command_ack_future = None
+        return None, "error", f"发送失败: {e}"
+    try:
+        result = await asyncio.wait_for(future, timeout=timeout)
+        return result, "ok", ""
+    except asyncio.TimeoutError:
+        return None, "timeout", f"设备未在 {timeout} 秒内确认指令 {command_id}"
+    finally:
+        tool_manager._pending_command_ack_future = None
 
 
 async def request_device_result(tool_manager, command_id, future_attr, timeout=8.0, data="", if_busy=None):
@@ -111,6 +152,7 @@ async def request_device_result(tool_manager, command_id, future_attr, timeout=8
     """
     if not tool_manager or not tool_manager.channel:
         return None, "offline", "设备未连接"
+    require_permission("device", f"下发设备指令 {command_id} 并等待结果")
     if if_busy is not None:
         busy_future = getattr(tool_manager, future_attr, None)
         if busy_future is not None and not busy_future.done():
@@ -139,15 +181,20 @@ async def request_device_result(tool_manager, command_id, future_attr, timeout=8
 
 def get_plugin_config_or_env(tool_manager, plugin: str, key: str, env_var: str | None = None, default: str = "") -> str:
     """读取插件配置：优先设备插件商店配置（tool_manager.get_plugin_config），
-    其次环境变量，最后默认值。"""
+    其次环境变量（仅限白名单），最后默认值。"""
     if tool_manager is not None and hasattr(tool_manager, "get_plugin_config"):
         cfg = tool_manager.get_plugin_config(plugin, key, "")
         if cfg:
             return cfg
     if env_var:
-        val = os.environ.get(env_var, "")
-        if val:
-            return val
+        # 环境变量读取白名单：防止读取任意敏感环境变量（绕过 env_read 权限）
+        from src.infrastructure.plugin_security import current_plugin, env_var_allowed
+        ctx = current_plugin()
+        plugin_id = ctx.plugin if ctx else plugin
+        if env_var_allowed(plugin_id, env_var):
+            val = os.environ.get(env_var, "")
+            if val:
+                return val
     return default
 
 
@@ -159,6 +206,7 @@ def get_plugin_config_or_env(tool_manager, plugin: str, key: str, env_var: str |
 async def http_request(method: str, url: str, *, params: dict | None = None, headers: dict | None = None,
                        content=None, timeout: float = 10.0):
     """发起 HTTP 请求。成功返回 (response, None)；失败返回 (None, error)。"""
+    require_permission("network", f"发起 HTTP {method.upper()} 请求 {url}")
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.request(method, url, params=params, headers=headers, content=content)
@@ -189,6 +237,7 @@ _ltm_service: Any = None
 
 def get_default_ltm_service():
     """创建默认 LTM 服务（模块级单例，无注入时的回退）"""
+    require_permission("ltm", "访问长期记忆")
     global _ltm_service
     if _ltm_service is None:
         from src.infrastructure.db.repositories.ltm_repository import SqlLongTermMemoryRepository
@@ -200,6 +249,7 @@ def get_default_ltm_service():
 
 def get_ltm_service(tool_manager=None):
     """获取 LTM 服务：优先从 tool_manager 注入获取，无则用默认单例"""
+    require_permission("ltm", "访问长期记忆")
     if tool_manager and hasattr(tool_manager, 'ltm_service') and tool_manager.ltm_service:
         return tool_manager.ltm_service
     return get_default_ltm_service()
@@ -212,12 +262,14 @@ def get_ltm_service(tool_manager=None):
 
 def get_diary_repository():
     """获取日记仓储实例（延迟导入避免插件启动时加载 DB 依赖）。"""
+    require_permission("db", "访问日记数据库")
     from src.infrastructure.db.repositories.growth_repositories import DiaryRepository
     return DiaryRepository()
 
 
 def get_device_repository():
     """获取设备仓储实例（延迟导入避免插件启动时加载 DB 依赖）。"""
+    require_permission("db", "访问设备数据库")
     from src.infrastructure.db.repositories.device_repository import DeviceRepository
     return DeviceRepository()
 
