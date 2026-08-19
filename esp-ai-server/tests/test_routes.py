@@ -1,0 +1,1449 @@
+"""
+routes 路由模块单元测试
+
+覆盖范围：
+- routes/system.py：health/live、health/ready、metrics、stats、api/health
+- routes/devices.py：设备列表、详情、唤醒、播放、停止、工具查询
+- routes/emos.py：表情包列表、CRUD、设备激活
+- routes/growth.py：日记、用户画像、情绪历史
+- routes/mcp.py：MCP 配置管理、工具查询、启停
+- routes/skills.py：技能查询、CRUD、启停、重载
+"""
+import json
+import os
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+
+# ════════════════════════════════════════════════════════════════
+# system 路由测试
+# ════════════════════════════════════════════════════════════════
+
+class TestSystemRoutes:
+    """系统路由测试"""
+
+    @pytest.fixture
+    def app(self):
+        from src.infrastructure.routes.system import register_routes
+        application = FastAPI()
+        register_routes(application)
+        return application
+
+    @pytest.fixture
+    def client(self, app):
+        return TestClient(app)
+
+    def test_liveness(self, client):
+        """健康检查 live"""
+        resp = client.get("/health/live")
+        assert resp.status_code == 200
+        assert resp.json()["data"]["status"] == "alive"
+
+    def test_readiness_no_gateways(self, client, app):
+        """无 gateway 时 readiness 返回 503 + not_ready"""
+        resp = client.get("/health/ready")
+        assert resp.status_code == 503
+        data = resp.json()["data"]
+        assert data["status"] == "not_ready"
+        assert data["components"]["asr_gateway"] == "down"
+        assert data["components"]["llm_gateway"] == "down"
+        assert data["components"]["tts_gateway"] == "down"
+        assert data["components"]["device_registry"] == "down"
+        assert "asr_gateway" in data["critical"]
+
+    def test_readiness_partial_gateways(self, client, app):
+        """仅部分关键 gateway 就绪时返回 503 + not_ready"""
+        app.state.llm_gateway = MagicMock()
+        resp = client.get("/health/ready")
+        assert resp.status_code == 503
+        data = resp.json()["data"]
+        assert data["status"] == "not_ready"
+        assert data["components"]["llm_gateway"] == "up"
+        assert data["components"]["asr_gateway"] == "down"
+
+    def test_readiness_with_gateways(self, client, app):
+        """三个关键 gateway 均就绪时返回 200 + ready"""
+        app.state.asr_gateway = MagicMock()
+        app.state.llm_gateway = MagicMock()
+        app.state.tts_gateway = MagicMock()
+        resp = client.get("/health/ready")
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["status"] == "ready"
+        assert data["components"]["llm_gateway"] == "up"
+        assert data["components"]["asr_gateway"] == "up"
+        assert data["components"]["tts_gateway"] == "up"
+
+    def test_read_ready_with_registry(self, client, app):
+        """关键 gateway + device_registry 均就绪时 registry 标记为 up"""
+        app.state.asr_gateway = MagicMock()
+        app.state.llm_gateway = MagicMock()
+        app.state.tts_gateway = MagicMock()
+        app.state.device_registry = MagicMock()
+        resp = client.get("/health/ready")
+        assert resp.status_code == 200
+        assert resp.json()["data"]["components"]["device_registry"] == "up"
+
+    def test_metrics(self, client):
+        """metrics 端点应返回 prometheus 格式"""
+        resp = client.get("/metrics")
+        assert resp.status_code == 200
+
+    def test_stats_no_registry(self, client, app):
+        """无 device_registry 时 stats 返回 0"""
+        resp = client.get("/stats")
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["devices"]["total"] == 0
+        assert data["devices"]["online"] == 0
+        assert data["gateways"]["asr"] is False
+
+    def test_stats_with_registry(self, client, app):
+        """有 device_registry 时 stats 返回正确计数"""
+        registry = MagicMock()
+        registry.count.return_value = 5
+        app.state.device_registry = registry
+        app.state.asr_gateway = MagicMock()
+        app.state.llm_gateway = MagicMock()
+        app.state.tts_gateway = MagicMock()
+        resp = client.get("/stats")
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["devices"]["total"] == 5
+        assert data["devices"]["online"] == 5
+        assert data["gateways"]["asr"] is True
+
+    def test_api_health(self, client):
+        resp = client.get("/api/health")
+        assert resp.status_code == 200
+        assert resp.json()["data"]["status"] == "healthy"
+
+
+# ════════════════════════════════════════════════════════════════
+# devices 路由测试
+# ════════════════════════════════════════════════════════════════
+
+class TestDevicesRoutes:
+    """设备路由测试"""
+
+    @pytest.fixture
+    def app(self):
+        from src.infrastructure.routes.devices import register_routes
+        from src.infrastructure.security import verify_admin_api_key
+        application = FastAPI()
+        register_routes(application)
+        # 路由单元测试跳过 API key 认证（认证逻辑由 security 层单独覆盖）
+        application.dependency_overrides[verify_admin_api_key] = lambda: True
+        return application
+
+    @pytest.fixture
+    def client(self, app):
+        return TestClient(app)
+
+    def test_get_devices_no_registry(self, client):
+        """无 registry 时返回错误"""
+        with patch("src.infrastructure.routes.devices.get_device_registry", return_value=None):
+            resp = client.get("/api/v1/devices")
+        assert resp.status_code == 200
+        assert resp.json()["code"] == 1
+
+    def test_get_devices_success(self, client):
+        """获取设备列表"""
+        registry = MagicMock()
+        registry.get_all_ids.return_value = ["dev1"]
+        fsm = MagicMock()
+        fsm.get.return_value = "idle"
+        session = MagicMock()
+        session.session_id = "sid1"
+        channel = MagicMock()
+        channel.connected = True
+        user_config = MagicMock()
+        user_config.name = "设备1"
+        registry.get.return_value = {
+            "mac": "AA:BB", "session": session, "fsm": fsm,
+            "channel": channel, "user_config": user_config,
+        }
+        with patch("src.infrastructure.routes.devices.get_device_registry", return_value=registry):
+            resp = client.get("/api/v1/devices")
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["count"] == 1
+        assert data["devices"][0]["device_id"] == "AA:BB"
+        assert data["devices"][0]["name"] == "设备1"
+        assert data["devices"][0]["connected"] is True
+
+    def test_get_device_not_found(self, client):
+        """设备不存在"""
+        registry = MagicMock()
+        registry.resolve.return_value = None
+        with patch("src.infrastructure.routes.devices.get_device_registry", return_value=registry):
+            resp = client.get("/api/v1/devices/dev1")
+        assert resp.json()["code"] == 1
+
+    def test_get_device_success(self, client):
+        """获取设备详情"""
+        registry = MagicMock()
+        fsm = MagicMock()
+        fsm.get.return_value = "listening"
+        session = MagicMock()
+        session.session_id = "sid1"
+        session.tts_playing = True
+        channel = MagicMock()
+        channel.connected = True
+        user_config = MagicMock()
+        user_config.name = "设备1"
+        registry.resolve.return_value = {
+            "mac": "AA:BB", "session": session, "fsm": fsm,
+            "channel": channel, "user_config": user_config,
+        }
+        with patch("src.infrastructure.routes.devices.get_device_registry", return_value=registry):
+            resp = client.get("/api/v1/devices/dev1")
+        assert resp.json()["code"] == 0
+        data = resp.json()["data"]
+        assert data["state"] == "listening"
+        assert data["tts_playing"] is True
+
+    # ============================================================
+    # 创建设备 API 测试
+    # ============================================================
+
+    def test_create_device_minimal(self, client):
+        """最简参数创建设备成功"""
+        mock_repo = MagicMock()
+        mock_repo.find_by_mac = AsyncMock(return_value=None)
+        mock_repo.find_by_key = AsyncMock(return_value=None)
+        mock_repo.upsert_device = AsyncMock()
+        with patch("src.infrastructure.db.repositories.device_repository.DeviceRepository", return_value=mock_repo), \
+             patch("src.infrastructure.web.get_app", return_value=None):
+            resp = client.post("/api/v1/devices", json={
+                "mac": "AA:BB:CC:DD:EE:FF",
+                "key": "secret_key_123",
+                "name": "卧室的设备",
+            })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["code"] == 0
+        assert data["data"]["device_id"] == "AA:BB:CC:DD:EE:FF"
+        assert data["data"]["name"] == "卧室的设备"
+        mock_repo.upsert_device.assert_called_once()
+        # 验证传入 upsert_device 的配置
+        call_args = mock_repo.upsert_device.call_args
+        assert call_args[0][0] == "AA:BB:CC:DD:EE:FF"
+        config = call_args[0][1]
+        assert config["name"] == "卧室的设备"
+        assert config["key"] == "secret_key_123"
+        assert config["mac"] == "AA:BB:CC:DD:EE:FF"
+
+    def test_create_device_with_full_config(self, client):
+        """带完整配置创建设备"""
+        mock_repo = MagicMock()
+        mock_repo.find_by_mac = AsyncMock(return_value=None)
+        mock_repo.find_by_key = AsyncMock(return_value=None)
+        mock_repo.upsert_device = AsyncMock()
+        with patch("src.infrastructure.db.repositories.device_repository.DeviceRepository", return_value=mock_repo), \
+             patch("src.infrastructure.web.get_app", return_value=None):
+            resp = client.post("/api/v1/devices", json={
+                "mac": "AA:BB:CC:DD:EE:FF",
+                "key": "secret_key_123",
+                "name": "卧室的设备",
+                "asr_provider": "volcengine",
+                "llm_api_key": "sk-xxx",
+                "llm_base_url": "https://api.deepseek.com/v1",
+                "llm_model": "deepseek-v4-flash",
+                "llm_system_prompt": "你的名字叫小智",
+                "tts_voice_type": "zh_female_wanwanxiaohe_moon_bigtts",
+                "rate_limit_rpm": 60,
+                "mcp_servers": {"amap-maps": {"type": "streamable_http", "url": "http://example.com"}},
+            })
+        assert resp.status_code == 200
+        assert resp.json()["code"] == 0
+        config = mock_repo.upsert_device.call_args[0][1]
+        assert config["llm"]["api_key"] == "sk-xxx"
+        assert config["llm"]["model"] == "deepseek-v4-flash"
+        assert config["tts_config"]["voice_type"] == "zh_female_wanwanxiaohe_moon_bigtts"
+        assert config["mcp_servers"]["amap-maps"]["url"] == "http://example.com"
+        assert config["rate_limit_rpm"] == 60
+
+    def test_create_device_mac_exists(self, client):
+        """MAC 已存在时返回错误"""
+        mock_repo = MagicMock()
+        mock_repo.find_by_mac = AsyncMock(return_value=("existing_id", {}))
+        mock_repo.find_by_key = AsyncMock(return_value=None)
+        mock_repo.upsert_device = AsyncMock()
+        with patch("src.infrastructure.db.repositories.device_repository.DeviceRepository", return_value=mock_repo):
+            resp = client.post("/api/v1/devices", json={
+                "mac": "AA:BB:CC:DD:EE:FF",
+                "key": "new_key",
+                "name": "新设备",
+            })
+        assert resp.json()["code"] == 1
+        assert "已存在" in resp.json()["message"]
+        mock_repo.upsert_device.assert_not_called()
+
+    def test_create_device_key_exists(self, client):
+        """密钥已存在时返回错误"""
+        mock_repo = MagicMock()
+        mock_repo.find_by_mac = AsyncMock(return_value=None)
+        mock_repo.find_by_key = AsyncMock(return_value=("existing_id", {}))
+        mock_repo.upsert_device = AsyncMock()
+        with patch("src.infrastructure.db.repositories.device_repository.DeviceRepository", return_value=mock_repo):
+            resp = client.post("/api/v1/devices", json={
+                "mac": "AA:BB:CC:DD:EE:FF",
+                "key": "duplicate_key",
+                "name": "新设备",
+            })
+        assert resp.json()["code"] == 1
+        assert "密钥已存在" in resp.json()["message"]
+        mock_repo.upsert_device.assert_not_called()
+
+    def test_create_device_missing_mac(self, client):
+        """缺少必填字段 mac 时返回 422"""
+        resp = client.post("/api/v1/devices", json={
+            "key": "some_key",
+            "name": "设备",
+        })
+        assert resp.status_code == 422
+
+    def test_create_device_missing_key(self, client):
+        """缺少必填字段 key 时返回 422"""
+        resp = client.post("/api/v1/devices", json={
+            "mac": "AA:BB",
+            "name": "设备",
+        })
+        assert resp.status_code == 422
+
+    def test_create_device_missing_name(self, client):
+        """缺少必填字段 name 时返回 422"""
+        resp = client.post("/api/v1/devices", json={
+            "mac": "AA:BB",
+            "key": "some_key",
+        })
+        assert resp.status_code == 422
+
+    def test_create_device_db_error(self, client):
+        """DB 写入异常时返回错误"""
+        mock_repo = MagicMock()
+        mock_repo.find_by_mac = AsyncMock(return_value=None)
+        mock_repo.find_by_key = AsyncMock(return_value=None)
+        mock_repo.upsert_device = AsyncMock(side_effect=RuntimeError("DB connection lost"))
+        with patch("src.infrastructure.db.repositories.device_repository.DeviceRepository", return_value=mock_repo), \
+             patch("src.infrastructure.web.get_app", return_value=None):
+            resp = client.post("/api/v1/devices", json={
+                "mac": "AA:BB:CC:DD:EE:FF",
+                "key": "key123",
+                "name": "设备",
+            })
+        assert resp.json()["code"] == 1
+        assert "创建设备失败" in resp.json()["message"]
+
+    def test_create_device_hot_reload(self, client):
+        """创建成功后热重载 auth 配置"""
+        mock_repo = MagicMock()
+        mock_repo.find_by_mac = AsyncMock(return_value=None)
+        mock_repo.find_by_key = AsyncMock(return_value=None)
+        mock_repo.upsert_device = AsyncMock()
+        mock_app = MagicMock()
+        mock_auth = MagicMock()
+        mock_app.state.auth_service = mock_auth
+        with patch("src.infrastructure.db.repositories.device_repository.DeviceRepository", return_value=mock_repo), \
+             patch("src.infrastructure.web.get_app", return_value=mock_app):
+            resp = client.post("/api/v1/devices", json={
+                "mac": "AA:BB:CC:DD:EE:FF",
+                "key": "key123",
+                "name": "设备",
+            })
+        assert resp.json()["code"] == 0
+        mock_auth.reload_users_config.assert_called_once()
+
+    def test_create_device_no_auth(self, app):
+        """未认证时拒绝访问"""
+        from src.infrastructure.security import verify_admin_api_key
+        # 覆盖认证为拒绝
+        app.dependency_overrides[verify_admin_api_key] = lambda: (_ for _ in ()).throw(
+            __import__("fastapi").HTTPException(status_code=403, detail="Forbidden")
+        )
+        client = TestClient(app)
+        resp = client.post("/api/v1/devices", json={
+            "mac": "AA:BB",
+            "key": "key",
+            "name": "设备",
+        })
+        assert resp.status_code == 403
+        # 恢复认证 override
+        app.dependency_overrides[verify_admin_api_key] = lambda: True
+
+    def test_wakeup_no_speaker(self, client):
+        with patch("src.infrastructure.routes.devices.get_speaker", return_value=None):
+            resp = client.post("/api/v1/wakeup", json={"device_id": "dev1"})
+        assert resp.json()["code"] == 1
+
+    def test_wakeup_success(self, client):
+        speaker = AsyncMock()
+        speaker.wakeup.return_value = True
+        with patch("src.infrastructure.routes.devices.get_speaker", return_value=speaker):
+            resp = client.post("/api/v1/wakeup", json={"device_id": "dev1"})
+        assert resp.json()["code"] == 0
+
+    def test_wakeup_failed(self, client):
+        speaker = AsyncMock()
+        speaker.wakeup.return_value = False
+        with patch("src.infrastructure.routes.devices.get_speaker", return_value=speaker):
+            resp = client.post("/api/v1/wakeup", json={"device_id": "dev1"})
+        assert resp.json()["code"] == 1
+
+    def test_wakeup_all_no_speaker(self, client):
+        with patch("src.infrastructure.routes.devices.get_speaker", return_value=None):
+            resp = client.post("/api/v1/wakeup/all")
+        assert resp.json()["code"] == 1
+
+    def test_wakeup_all_no_devices(self, client):
+        speaker = AsyncMock()
+        registry = MagicMock()
+        registry.count.return_value = 0
+        with patch("src.infrastructure.routes.devices.get_speaker", return_value=speaker), \
+             patch("src.infrastructure.routes.devices.get_device_registry", return_value=registry):
+            resp = client.post("/api/v1/wakeup/all")
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["count"] == 0
+
+    def test_wakeup_all_success(self, client):
+        speaker = AsyncMock()
+        registry = MagicMock()
+        registry.count.return_value = 2
+        registry.get_all_ids.return_value = ["dev1", "dev2"]
+        with patch("src.infrastructure.routes.devices.get_speaker", return_value=speaker), \
+             patch("src.infrastructure.routes.devices.get_device_registry", return_value=registry):
+            resp = client.post("/api/v1/wakeup/all")
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["count"] == 2
+
+    def test_speak_no_speaker(self, client):
+        with patch("src.infrastructure.routes.devices.get_speaker", return_value=None):
+            resp = client.post("/api/v1/speak", json={"device_id": "dev1", "text": "hello"})
+        assert resp.json()["code"] == 1
+
+    def test_speak_success(self, client):
+        speaker = AsyncMock()
+        speaker.speak.return_value = True
+        with patch("src.infrastructure.routes.devices.get_speaker", return_value=speaker):
+            resp = client.post("/api/v1/speak", json={"device_id": "dev1", "text": "hello"})
+        assert resp.json()["code"] == 0
+
+    def test_speak_failed(self, client):
+        speaker = AsyncMock()
+        speaker.speak.return_value = False
+        with patch("src.infrastructure.routes.devices.get_speaker", return_value=speaker):
+            resp = client.post("/api/v1/speak", json={"device_id": "dev1", "text": "hello"})
+        assert resp.json()["code"] == 1
+
+    def test_speak_all_success(self, client):
+        speaker = AsyncMock()
+        registry = MagicMock()
+        registry.count.return_value = 3
+        registry.get_all_ids.return_value = ["d1", "d2", "d3"]
+        with patch("src.infrastructure.routes.devices.get_speaker", return_value=speaker), \
+             patch("src.infrastructure.routes.devices.get_device_registry", return_value=registry):
+            resp = client.post("/api/v1/speak/all", json={"text": "broadcast"})
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["count"] == 3
+
+    def test_stop_no_speaker(self, client):
+        with patch("src.infrastructure.routes.devices.get_speaker", return_value=None):
+            resp = client.post("/api/v1/stop", json={"device_id": "dev1"})
+        assert resp.json()["code"] == 1
+
+    def test_stop_success(self, client):
+        speaker = AsyncMock()
+        speaker.stop.return_value = True
+        with patch("src.infrastructure.routes.devices.get_speaker", return_value=speaker):
+            resp = client.post("/api/v1/stop", json={"device_id": "dev1"})
+        assert resp.json()["code"] == 0
+
+    def test_stop_all_success(self, client):
+        speaker = AsyncMock()
+        registry = MagicMock()
+        registry.count.return_value = 2
+        registry.get_all_ids.return_value = ["d1", "d2"]
+        with patch("src.infrastructure.routes.devices.get_speaker", return_value=speaker), \
+             patch("src.infrastructure.routes.devices.get_device_registry", return_value=registry):
+            resp = client.post("/api/v1/stop/all")
+        assert resp.json()["code"] == 0
+
+    def test_list_tools_success(self, client):
+        """工具列表查询"""
+        fake_schema = [
+            {"function": {"name": "tool1", "description": "desc1", "parameters": {}}},
+        ]
+        with patch("src.use_cases.tools_system.get_openai_tools_schema", return_value=iter(fake_schema)):
+            resp = client.get("/api/v1/tools")
+        assert resp.json()["code"] == 0
+        data = resp.json()["data"]
+        assert len(data) == 1
+        assert data[0]["name"] == "tool1"
+
+    def test_list_tools_exception(self, client):
+        """工具查询异常"""
+        with patch("src.use_cases.tools_system.get_openai_tools_schema", side_effect=RuntimeError("err")):
+            resp = client.get("/api/v1/tools")
+        assert resp.json()["code"] == 1
+
+
+# ════════════════════════════════════════════════════════════════
+# emos 路由测试
+# ════════════════════════════════════════════════════════════════
+
+
+def _get_endpoint(app, path, method):
+    """从 FastAPI app 中获取路由处理函数（用于直接调用测试）"""
+    for route in app.router.routes:
+        if hasattr(route, "path") and route.path == path and method in route.methods:
+            return route.endpoint
+    raise ValueError(f"路由未找到: {method} {path}")
+
+
+class TestEmosRoutes:
+    """表情包路由测试"""
+
+    @pytest.fixture
+    def app(self):
+        from src.infrastructure.routes.emos import register_routes
+        from src.infrastructure.security import verify_admin_api_key
+        application = FastAPI()
+        register_routes(application)
+        # 路由单元测试跳过 API key 认证（认证逻辑由 security 层单独覆盖）
+        application.dependency_overrides[verify_admin_api_key] = lambda: True
+        return application
+
+    @pytest.fixture
+    def client(self, app):
+        return TestClient(app)
+
+    def test_list_emos_compat(self, client):
+        """兼容接口列出表情"""
+        with patch("src.infrastructure.routes.emos.list_pack_emos", return_value=[{"name": "happy"}]):
+            resp = client.get("/api/v1/emos")
+        assert resp.json()["code"] == 0
+        assert len(resp.json()["data"]) == 1
+
+    def test_list_device_emos(self, client):
+        """设备表情列表"""
+        with patch("src.infrastructure.device_api.resolve_device_id", return_value=None), \
+             patch("src.infrastructure.routes.emos.get_active_pack", new_callable=AsyncMock, return_value="default"), \
+             patch("src.infrastructure.routes.emos.list_pack_emos", return_value=[{"name": "happy"}]):
+            resp = client.get("/api/v1/emos/dev1")
+        assert resp.json()["code"] == 0
+        assert resp.json()["active_pack"] == "default"
+
+    def test_list_device_emos_fallback_default(self, client):
+        """设备无表情包时回退到 default"""
+        with patch("src.infrastructure.device_api.resolve_device_id", return_value=None), \
+             patch("src.infrastructure.routes.emos.get_active_pack", new_callable=AsyncMock, return_value="custom"), \
+             patch("src.infrastructure.routes.emos.list_pack_emos", side_effect=[[], [{"name": "happy"}]]):
+            resp = client.get("/api/v1/emos/dev1")
+        assert resp.json()["code"] == 0
+        assert len(resp.json()["data"]) == 1
+
+    def test_list_packs(self, client):
+        with patch("src.infrastructure.routes.emos.list_packs", new_callable=AsyncMock, return_value=[{"name": "default"}]):
+            resp = client.get("/api/v1/emos/packs/list")
+        assert resp.json()["code"] == 0
+
+    def test_get_pack_not_found(self, client):
+        with patch("src.infrastructure.routes.emos.list_pack_emos", return_value=None):
+            resp = client.get("/api/v1/emos/packs/nonexistent")
+        assert resp.json()["code"] == 1
+
+    def test_get_pack_success(self, client):
+        with patch("src.infrastructure.routes.emos.list_pack_emos", return_value=[{"name": "happy"}]):
+            resp = client.get("/api/v1/emos/packs/default")
+        assert resp.json()["code"] == 0
+
+    def test_create_pack_no_name(self, client):
+        resp = client.post("/api/v1/emos/packs/create")
+        assert resp.json()["code"] == 1
+
+    def test_create_pack_success(self, client):
+        with patch("src.infrastructure.routes.emos.create_pack", new_callable=AsyncMock, return_value={
+            "ok": True, "message": "ok", "name": "pack1", "display_name": "测试"
+        }):
+            resp = client.post("/api/v1/emos/packs/create", params={"name": "测试"})
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["name"] == "pack1"
+
+    def test_create_pack_failed(self, client):
+        with patch("src.infrastructure.routes.emos.create_pack", new_callable=AsyncMock, return_value={
+            "ok": False, "message": "已存在"
+        }):
+            resp = client.post("/api/v1/emos/packs/create", params={"name": "测试"})
+        assert resp.json()["code"] == 1
+
+    def test_delete_pack_success(self, client):
+        with patch("src.infrastructure.routes.emos.delete_pack", new_callable=AsyncMock, return_value={
+            "ok": True, "message": "删除成功"
+        }):
+            resp = client.delete("/api/v1/emos/packs/pack1")
+        assert resp.json()["code"] == 0
+
+    def test_get_active_pack(self, client):
+        with patch("src.infrastructure.device_api.resolve_device_id", return_value=None), \
+             patch("src.infrastructure.routes.emos.get_active_pack", new_callable=AsyncMock, return_value="custom"):
+            resp = client.get("/api/v1/emos/active/dev1")
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["active_pack"] == "custom"
+
+    def test_set_active_pack_no_name(self, client):
+        with patch("src.infrastructure.device_api.resolve_device_id", return_value=None):
+            resp = client.post("/api/v1/emos/active/dev1")
+        assert resp.json()["code"] == 1
+
+    def test_set_active_pack_success(self, client):
+        with patch("src.infrastructure.device_api.resolve_device_id", return_value=None), \
+             patch("src.infrastructure.device_api.get_device_registry", return_value=None), \
+             patch("src.infrastructure.routes.emos.set_active_pack", new_callable=AsyncMock, return_value={
+                 "ok": True, "message": "ok"
+             }):
+            resp = client.post("/api/v1/emos/active/dev1", params={"pack": "pack1"})
+        assert resp.json()["code"] == 0
+
+    def test_set_active_pack_failed(self, client):
+        with patch("src.infrastructure.device_api.resolve_device_id", return_value=None), \
+             patch("src.infrastructure.routes.emos.set_active_pack", new_callable=AsyncMock, return_value={
+                 "ok": False, "message": "表情包不存在"
+             }):
+            resp = client.post("/api/v1/emos/active/dev1", params={"pack": "nonexistent"})
+        assert resp.json()["code"] == 1
+
+    # ── 上传表情 gif 文件 ──
+
+    def test_upload_to_pack_success(self, client, tmp_path):
+        """上传 gif 到表情包成功"""
+        with patch("src.infrastructure.routes.emos.get_or_create_pack_dir", return_value=tmp_path):
+            resp = client.post(
+                "/api/v1/emos/packs/pack1/upload",
+                files={"file": ("happy.gif", b"gifdata", "image/gif")},
+            )
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["name"] == "happy"
+        assert resp.json()["data"]["filename"] == "happy.gif"
+        assert resp.json()["data"]["pack"] == "pack1"
+        assert (tmp_path / "happy.gif").exists()
+
+    def test_upload_to_pack_wrong_type(self, client):
+        """非 gif 文件被拒绝"""
+        resp = client.post(
+            "/api/v1/emos/packs/pack1/upload",
+            files={"file": ("test.txt", b"text", "text/plain")},
+        )
+        assert resp.json()["code"] == 1
+        assert "gif" in resp.json()["message"]
+
+    async def test_upload_to_pack_too_large_size(self, app):
+        """文件 size 超过 10MB（直接调用端点）"""
+        handler = _get_endpoint(app, "/api/v1/emos/packs/{pack_name}/upload", "POST")
+        mock_file = MagicMock()
+        mock_file.filename = "big.gif"
+        mock_file.size = 11 * 1024 * 1024
+        result = await handler(pack_name="pack1", file=mock_file)
+        assert result["code"] == 1
+        assert "文件过大" in result["message"]
+
+    async def test_upload_to_pack_too_large_content(self, app, tmp_path):
+        """文件内容超过 10MB（size 为 None 但内容过大）"""
+        handler = _get_endpoint(app, "/api/v1/emos/packs/{pack_name}/upload", "POST")
+        mock_file = MagicMock()
+        mock_file.filename = "big.gif"
+        mock_file.size = None
+        mock_file.read = AsyncMock(return_value=b"x" * (11 * 1024 * 1024))
+        with patch("src.infrastructure.routes.emos.get_or_create_pack_dir", return_value=tmp_path):
+            result = await handler(pack_name="pack1", file=mock_file)
+        assert result["code"] == 1
+        assert "文件过大" in result["message"]
+
+    def test_upload_emo_compat_success(self, client, tmp_path):
+        """兼容接口上传 gif 成功"""
+        with patch("src.infrastructure.routes.emos.get_or_create_pack_dir", return_value=tmp_path):
+            resp = client.post(
+                "/api/v1/emos/upload",
+                files={"file": ("smile.gif", b"gifdata", "image/gif")},
+            )
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["pack"] == "default"
+        assert (tmp_path / "smile.gif").exists()
+
+    def test_upload_emo_compat_wrong_type(self, client):
+        """兼容接口非 gif 被拒绝"""
+        resp = client.post(
+            "/api/v1/emos/upload",
+            files={"file": ("test.png", b"data", "image/png")},
+        )
+        assert resp.json()["code"] == 1
+
+    async def test_upload_emo_compat_too_large_size(self, app):
+        """兼容接口文件 size 超过 10MB"""
+        handler = _get_endpoint(app, "/api/v1/emos/upload", "POST")
+        mock_file = MagicMock()
+        mock_file.filename = "big.gif"
+        mock_file.size = 11 * 1024 * 1024
+        result = await handler(file=mock_file, device_key="")
+        assert result["code"] == 1
+        assert "文件过大" in result["message"]
+
+    async def test_upload_emo_compat_too_large_content(self, app, tmp_path):
+        """兼容接口文件内容超过 10MB"""
+        handler = _get_endpoint(app, "/api/v1/emos/upload", "POST")
+        mock_file = MagicMock()
+        mock_file.filename = "big.gif"
+        mock_file.size = None
+        mock_file.read = AsyncMock(return_value=b"x" * (11 * 1024 * 1024))
+        with patch("src.infrastructure.routes.emos.get_or_create_pack_dir", return_value=tmp_path):
+            result = await handler(file=mock_file, device_key="")
+        assert result["code"] == 1
+        assert "文件过大" in result["message"]
+
+    def test_delete_pack_failed(self, client):
+        """删除不存在的表情包"""
+        with patch("src.infrastructure.routes.emos.delete_pack", new_callable=AsyncMock, return_value={
+            "ok": False, "message": "表情包不存在"
+        }):
+            resp = client.delete("/api/v1/emos/packs/nonexistent")
+        assert resp.json()["code"] == 1
+
+    # ── 设备激活表情包通知 ──
+
+    def test_set_active_pack_with_device_notification(self, client):
+        """设置激活表情包并通知设备刷新"""
+        channel = MagicMock()
+        channel.send_json = AsyncMock()
+        registry = MagicMock()
+        registry.resolve.return_value = {"channel": channel}
+        with patch("src.infrastructure.device_api.resolve_device_id", return_value=None), \
+             patch("src.infrastructure.device_api.get_device_registry", return_value=registry), \
+             patch("src.infrastructure.routes.emos.set_active_pack", new_callable=AsyncMock, return_value={
+                 "ok": True, "message": "ok"
+             }):
+            resp = client.post("/api/v1/emos/active/dev1", params={"pack": "pack1"})
+        assert resp.json()["code"] == 0
+        channel.send_json.assert_called_once()
+        instruct = channel.send_json.call_args[0][0]
+        assert instruct["command_id"] == "refresh_emo"
+
+    def test_set_active_pack_notification_exception(self, client):
+        """设备通知失败时不影响设置结果"""
+        channel = MagicMock()
+        channel.send_json = AsyncMock(side_effect=RuntimeError("连接断开"))
+        registry = MagicMock()
+        registry.resolve.return_value = {"channel": channel}
+        with patch("src.infrastructure.device_api.resolve_device_id", return_value=None), \
+             patch("src.infrastructure.device_api.get_device_registry", return_value=registry), \
+             patch("src.infrastructure.routes.emos.set_active_pack", new_callable=AsyncMock, return_value={
+                 "ok": True, "message": "ok"
+             }):
+            resp = client.post("/api/v1/emos/active/dev1", params={"pack": "pack1"})
+        assert resp.json()["code"] == 0
+
+    def test_set_active_pack_no_channel(self, client):
+        """设备无 channel 时跳过通知"""
+        registry = MagicMock()
+        registry.resolve.return_value = {}
+        with patch("src.infrastructure.device_api.resolve_device_id", return_value=None), \
+             patch("src.infrastructure.device_api.get_device_registry", return_value=registry), \
+             patch("src.infrastructure.routes.emos.set_active_pack", new_callable=AsyncMock, return_value={
+                 "ok": True, "message": "ok"
+             }):
+            resp = client.post("/api/v1/emos/active/dev1", params={"pack": "pack1"})
+        assert resp.json()["code"] == 0
+
+    def test_set_active_pack_device_not_found(self, client):
+        """设备不存在时跳过通知"""
+        registry = MagicMock()
+        registry.resolve.return_value = None
+        with patch("src.infrastructure.device_api.resolve_device_id", return_value=None), \
+             patch("src.infrastructure.device_api.get_device_registry", return_value=registry), \
+             patch("src.infrastructure.routes.emos.set_active_pack", new_callable=AsyncMock, return_value={
+                 "ok": True, "message": "ok"
+             }):
+            resp = client.post("/api/v1/emos/active/dev1", params={"pack": "pack1"})
+        assert resp.json()["code"] == 0
+
+
+# ════════════════════════════════════════════════════════════════
+# growth 路由测试
+# ════════════════════════════════════════════════════════════════
+
+class TestGrowthRoutes:
+    """成长系统路由测试"""
+
+    @pytest.fixture
+    def app(self):
+        from src.infrastructure.routes.growth import register_routes
+        from src.infrastructure.security import verify_admin_api_key
+        application = FastAPI()
+        register_routes(application)
+        # 路由单元测试跳过 API key 认证（认证逻辑由 security 层单独覆盖）
+        application.dependency_overrides[verify_admin_api_key] = lambda: True
+        return application
+
+    @pytest.fixture
+    def client(self, app):
+        return TestClient(app)
+
+    async def test_get_diary_list(self, client):
+        """获取日记列表"""
+        mock_service = MagicMock()
+        entry = MagicMock()
+        entry.date = "2026-05-29"
+        entry.content = "今天很开心"
+        entry.created_at = "2026-05-29T10:00:00"
+        mock_service.get_all_entries = AsyncMock(return_value=[entry])
+        with patch("src.infrastructure.device_api.verify_api_key", new_callable=AsyncMock), \
+             patch("src.use_cases.growth.DiaryService", return_value=mock_service), \
+             patch("src.infrastructure.routes.growth._resolve_device_key", return_value="key1"), \
+             patch("src.infrastructure.routes.growth._get_data_dir", return_value="/data"):
+            resp = client.get("/api/v1/growth/diary/dev1")
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["count"] == 1
+
+    async def test_get_diary_by_date(self, client):
+        """获取指定日期日记"""
+        mock_service = MagicMock()
+        mock_service.get_diary_content = AsyncMock(return_value="日记内容")
+        with patch("src.infrastructure.device_api.verify_api_key", new_callable=AsyncMock), \
+             patch("src.use_cases.growth.DiaryService", return_value=mock_service), \
+             patch("src.infrastructure.routes.growth._resolve_device_key", return_value="key1"), \
+             patch("src.infrastructure.routes.growth._get_data_dir", return_value="/data"):
+            resp = client.get("/api/v1/growth/diary/dev1", params={"date": "2026-05-29"})
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["content"] == "日记内容"
+
+    async def test_get_diary_by_date_not_found(self, client):
+        """指定日期无日记"""
+        mock_service = MagicMock()
+        mock_service.get_diary_content = AsyncMock(return_value=None)
+        with patch("src.infrastructure.device_api.verify_api_key", new_callable=AsyncMock), \
+             patch("src.use_cases.growth.DiaryService", return_value=mock_service), \
+             patch("src.infrastructure.routes.growth._resolve_device_key", return_value="key1"), \
+             patch("src.infrastructure.routes.growth._get_data_dir", return_value="/data"):
+            resp = client.get("/api/v1/growth/diary/dev1", params={"date": "2026-05-29"})
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["content"] is None
+
+    async def test_get_diary_exception(self, client):
+        """获取日记异常"""
+        with patch("src.use_cases.growth.DiaryService", side_effect=RuntimeError("err")), \
+             patch("src.infrastructure.routes.growth._resolve_device_key", return_value="key1"), \
+             patch("src.infrastructure.routes.growth._get_data_dir", return_value="/data"):
+            resp = client.get("/api/v1/growth/diary/dev1")
+        assert resp.json()["code"] == 1
+
+    async def test_get_diary_by_date_path(self, client):
+        """通过路径参数获取日记"""
+        mock_service = MagicMock()
+        mock_service.get_diary_content = AsyncMock(return_value="内容")
+        with patch("src.infrastructure.device_api.verify_api_key", new_callable=AsyncMock), \
+             patch("src.use_cases.growth.DiaryService", return_value=mock_service), \
+             patch("src.infrastructure.routes.growth._resolve_device_key", return_value="key1"), \
+             patch("src.infrastructure.routes.growth._get_data_dir", return_value="/data"):
+            resp = client.get("/api/v1/growth/diary/dev1/2026-05-29")
+        assert resp.json()["code"] == 0
+
+    async def test_get_growth_profile(self, client):
+        """获取用户画像"""
+        mock_profile = MagicMock()
+        mock_profile.to_dict.return_value = {"name": "用户1"}
+        mock_profile_service = MagicMock()
+        mock_profile_service.get_profile = AsyncMock(return_value=mock_profile)
+        mock_emotion_service = MagicMock()
+        mock_emotion_service.get_emotion_summary = AsyncMock(return_value={"happy": 5})
+
+        with patch("src.infrastructure.device_api.verify_api_key", new_callable=AsyncMock), \
+             patch("src.use_cases.growth.user_profile.UserProfileService", return_value=mock_profile_service), \
+             patch("src.use_cases.growth.emotion_analyzer.EmotionAnalyzer", return_value=mock_emotion_service), \
+             patch("src.infrastructure.routes.growth._resolve_device_key", return_value="key1"), \
+             patch("src.infrastructure.routes.growth._get_data_dir", return_value="/data"):
+            resp = client.get("/api/v1/growth/profile/dev1")
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["profile"]["name"] == "用户1"
+
+    async def test_get_growth_profile_exception(self, client):
+        with patch("src.infrastructure.device_api.verify_api_key", new_callable=AsyncMock, side_effect=RuntimeError("err")):
+            resp = client.get("/api/v1/growth/profile/dev1")
+        assert resp.json()["code"] == 1
+
+    async def test_get_emotions(self, client):
+        """获取情绪历史"""
+        emotion = MagicMock()
+        emotion.timestamp = 1234567890
+        emotion.emotion = "happy"
+        emotion.intensity = 0.8
+        emotion.trigger = "user"
+        emotion.context = "chat"
+        mock_service = MagicMock()
+        mock_service.get_recent_emotions = AsyncMock(return_value=[emotion])
+        with patch("src.infrastructure.device_api.verify_api_key", new_callable=AsyncMock), \
+             patch("src.use_cases.growth.emotion_analyzer.EmotionAnalyzer", return_value=mock_service), \
+             patch("src.infrastructure.routes.growth._resolve_device_key", return_value="key1"), \
+             patch("src.infrastructure.routes.growth._get_data_dir", return_value="/data"):
+            resp = client.get("/api/v1/growth/emotions/dev1")
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["count"] == 1
+
+    async def test_get_emotions_exception(self, client):
+        with patch("src.infrastructure.device_api.verify_api_key", new_callable=AsyncMock, side_effect=RuntimeError("err")):
+            resp = client.get("/api/v1/growth/emotions/dev1")
+        assert resp.json()["code"] == 1
+
+
+# ════════════════════════════════════════════════════════════════
+# mcp 路由测试
+# ════════════════════════════════════════════════════════════════
+
+class TestMCPRoutes:
+    """MCP 路由测试
+
+    数据源为 DB（DeviceRepository），测试 mock DeviceRepository 的方法。
+    """
+
+    @pytest.fixture
+    def app(self, tmp_path):
+        from src.infrastructure.routes.mcp import register_routes
+        from src.infrastructure.security import verify_admin_api_key
+        application = FastAPI()
+        register_routes(application)
+        # 路由单元测试跳过 API key 认证（认证逻辑由 security 层单独覆盖）
+        application.dependency_overrides[verify_admin_api_key] = lambda: True
+        return application
+
+    @pytest.fixture
+    def client(self, app):
+        return TestClient(app)
+
+    def _make_mock_repo(self, device_config=None, mcp_servers=None,
+                        found_device_id="dev1", device_found=True):
+        """创建 mock DeviceRepository。
+
+        device_config: 设备完整配置 dict（用于 find_by_mac/find_by_key 返回）
+        mcp_servers: MCP 服务器配置 dict（用于 get_mcp_servers 返回）
+        device_found: 设备是否存在于 DB
+        """
+        mock_repo = MagicMock()
+        cfg = device_config if device_config is not None else {}
+        mock_repo.get_mcp_servers = AsyncMock(
+            return_value=mcp_servers if mcp_servers is not None
+            else (cfg.get("mcp_servers", {}) if device_found else {})
+        )
+        found = (found_device_id, cfg) if device_found else None
+        mock_repo.find_by_mac = AsyncMock(return_value=found)
+        mock_repo.find_by_key = AsyncMock(return_value=found)
+        mock_repo.set_mcp_server = AsyncMock(return_value=None)
+        mock_repo.delete_mcp_server = AsyncMock(return_value=None)
+        mock_repo.update_device_partial = AsyncMock(return_value=cfg if device_found else None)
+        mock_repo.get_device_config = AsyncMock(return_value=cfg if device_found else None)
+        return mock_repo
+
+    def test_get_device_mcp_no_file(self, client):
+        """设备不存在时返回 code 1"""
+        mock_repo = self._make_mock_repo(device_found=False)
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.get("/api/v1/devices/dev1/mcp")
+        assert resp.json()["code"] == 1
+
+    def test_get_device_mcp_success(self, client, tmp_path):
+        mock_repo = self._make_mock_repo(
+            device_config={"mcp_servers": {"s1": {"url": "http://x"}}},
+            mcp_servers={"s1": {"url": "http://x"}},
+        )
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.get("/api/v1/devices/dev1/mcp")
+        assert resp.json()["code"] == 0
+        assert "s1" in resp.json()["data"]
+
+    def test_get_device_mcp_not_found(self, client, tmp_path):
+        mock_repo = self._make_mock_repo(device_found=False)
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.get("/api/v1/devices/nonexistent/mcp")
+        assert resp.json()["code"] == 1
+
+    def test_update_device_mcp_success(self, client, tmp_path):
+        mock_repo = self._make_mock_repo(
+            device_config={"mcp_servers": {}},
+            mcp_servers={},
+        )
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
+             patch("src.infrastructure.routes.mcp._hot_reload_device_config"):
+            resp = client.put("/api/v1/devices/dev1/mcp/s1", json={
+                "type": "streamable_http", "url": "http://new", "headers": {}, "auth": {}
+            })
+        assert resp.json()["code"] == 0
+
+    def test_update_device_mcp_no_file(self, client):
+        mock_repo = self._make_mock_repo(device_found=False)
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.put("/api/v1/devices/dev1/mcp/s1", json={
+                "url": "http://x"
+            })
+        assert resp.json()["code"] == 1
+
+    def test_delete_device_mcp_success(self, client, tmp_path):
+        mock_repo = self._make_mock_repo(
+            device_config={"mcp_servers": {"s1": {"url": "http://x"}}},
+            mcp_servers={"s1": {"url": "http://x"}},
+        )
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
+             patch("src.infrastructure.routes.mcp._hot_reload_device_config"):
+            resp = client.delete("/api/v1/devices/dev1/mcp/s1")
+        assert resp.json()["code"] == 0
+
+    def test_delete_device_mcp_not_found(self, client, tmp_path):
+        mock_repo = self._make_mock_repo(
+            device_config={"mcp_servers": {}},
+            mcp_servers={},
+        )
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.delete("/api/v1/devices/dev1/mcp/s1")
+        assert resp.json()["code"] == 1
+
+    def test_get_mcp_disabled(self, client, tmp_path):
+        mock_repo = self._make_mock_repo(
+            device_config={"disabled_mcp_servers": ["s1"], "disabled_mcp_tools": {"s1": ["t1"]}},
+        )
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.get("/api/v1/devices/dev1/mcp/disabled")
+        assert resp.json()["code"] == 0
+        assert "s1" in resp.json()["data"]["disabled_servers"]
+
+    def test_get_mcp_disabled_not_found(self, client, tmp_path):
+        mock_repo = self._make_mock_repo(device_found=False)
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.get("/api/v1/devices/nonexistent/mcp/disabled")
+        assert resp.json()["code"] == 1
+
+    def test_toggle_mcp_server(self, client, tmp_path):
+        mock_repo = self._make_mock_repo(
+            device_config={"disabled_mcp_servers": []},
+        )
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
+             patch("src.infrastructure.routes.mcp._hot_reload_device_config"):
+            resp = client.post("/api/v1/devices/dev1/mcp/s1/toggle", params={"disabled": True})
+        assert resp.json()["code"] == 0
+
+    def test_toggle_mcp_tool(self, client, tmp_path):
+        mock_repo = self._make_mock_repo(
+            device_config={"disabled_mcp_tools": {}},
+        )
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
+             patch("src.infrastructure.routes.mcp._hot_reload_device_config"):
+            resp = client.post("/api/v1/devices/dev1/mcp/s1/tools/t1/toggle", params={"disabled": True})
+        assert resp.json()["code"] == 0
+
+    # ── MCP 配置查询补充 ──
+
+    def test_get_device_mcp_by_key(self, client, tmp_path):
+        """通过 key 匹配设备"""
+        mock_repo = self._make_mock_repo(
+            device_config={"key": "mac1", "mcp_servers": {"s1": {"url": "http://x"}}},
+            mcp_servers={"s1": {"url": "http://x"}},
+        )
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.get("/api/v1/devices/mac1/mcp")
+        assert resp.json()["code"] == 0
+        assert "s1" in resp.json()["data"]
+
+    def test_get_device_mcp_no_mcp_servers(self, client, tmp_path):
+        """设备无 MCP 配置"""
+        mock_repo = self._make_mock_repo(
+            device_config={},
+            mcp_servers={},
+        )
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.get("/api/v1/devices/dev1/mcp")
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"] == {}
+
+    # ── MCP 配置更新补充 ──
+
+    def test_update_device_mcp_not_found(self, client, tmp_path):
+        """更新不存在的设备的 MCP 配置"""
+        mock_repo = self._make_mock_repo(device_found=False)
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.put("/api/v1/devices/nonexistent/mcp/s1", json={"url": "http://x"})
+        assert resp.json()["code"] == 1
+
+    def test_update_device_mcp_by_key(self, client, tmp_path):
+        """通过 key 匹配设备并更新"""
+        mock_repo = self._make_mock_repo(
+            device_config={"key": "mac1", "mcp_servers": {}},
+            mcp_servers={},
+        )
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
+             patch("src.infrastructure.routes.mcp._hot_reload_device_config"):
+            resp = client.put("/api/v1/devices/mac1/mcp/s1", json={"url": "http://new"})
+        assert resp.json()["code"] == 0
+
+    def test_update_device_mcp_with_headers_auth(self, client, tmp_path):
+        """更新 MCP 配置时保存 headers 和 auth"""
+        mock_repo = self._make_mock_repo(
+            device_config={"mcp_servers": {}},
+            mcp_servers={},
+        )
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
+             patch("src.infrastructure.routes.mcp._hot_reload_device_config"):
+            resp = client.put("/api/v1/devices/dev1/mcp/s1", json={
+                "url": "http://x",
+                "headers": {"Authorization": "Bearer token"},
+                "auth": {"type": "bearer"},
+            })
+        assert resp.json()["code"] == 0
+        data = resp.json()["data"]
+        assert data["headers"]["Authorization"] == "Bearer token"
+        assert data["auth"]["type"] == "bearer"
+
+    # ── MCP 配置删除补充 ──
+
+    def test_delete_device_mcp_no_file(self, client, tmp_path):
+        """设备不存在时删除"""
+        mock_repo = self._make_mock_repo(device_found=False)
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.delete("/api/v1/devices/dev1/mcp/s1")
+        assert resp.json()["code"] == 1
+
+    # ── MCP 工具查询 ──
+
+    def test_get_device_mcp_tools_success(self, client, tmp_path):
+        """获取设备 MCP 工具列表成功"""
+        mock_repo = self._make_mock_repo(
+            device_config={"mcp_servers": {"s1": {"url": "http://x"}}},
+            mcp_servers={"s1": {"url": "http://x"}},
+        )
+        mock_client = MagicMock()
+        mock_client.connect = AsyncMock()
+        mock_client.disconnect = AsyncMock()
+        mock_client.get_tools_schema.return_value = [
+            {"function": {"name": "tool1", "description": "desc1"}},
+            {"function": {"name": "tool2", "description": "desc2"}},
+        ]
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
+             patch("src.use_cases.tools_system.MCPClient", return_value=mock_client):
+            resp = client.get("/api/v1/devices/dev1/mcp/s1/tools")
+        assert resp.json()["code"] == 0
+        assert len(resp.json()["data"]) == 2
+        assert resp.json()["data"][0]["name"] == "tool1"
+
+    def test_get_device_mcp_tools_no_file(self, client, tmp_path):
+        """设备不存在"""
+        mock_repo = self._make_mock_repo(device_found=False)
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.get("/api/v1/devices/dev1/mcp/s1/tools")
+        assert resp.json()["code"] == 1
+        assert "不存在" in resp.json()["message"]
+
+    def test_get_device_mcp_tools_device_not_found(self, client, tmp_path):
+        """设备不存在"""
+        mock_repo = self._make_mock_repo(device_found=False)
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.get("/api/v1/devices/nonexistent/mcp/s1/tools")
+        assert resp.json()["code"] == 1
+        assert "设备不存在" in resp.json()["message"]
+
+    def test_get_device_mcp_tools_server_not_found(self, client, tmp_path):
+        """MCP 服务器不存在"""
+        mock_repo = self._make_mock_repo(
+            device_config={"mcp_servers": {}},
+            mcp_servers={},
+        )
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.get("/api/v1/devices/dev1/mcp/s1/tools")
+        assert resp.json()["code"] == 1
+        assert "MCP 服务器不存在" in resp.json()["message"]
+
+    def test_get_device_mcp_tools_empty_url(self, client, tmp_path):
+        """MCP 服务器 URL 为空"""
+        mock_repo = self._make_mock_repo(
+            device_config={"mcp_servers": {"s1": {"url": ""}}},
+            mcp_servers={"s1": {"url": ""}},
+        )
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.get("/api/v1/devices/dev1/mcp/s1/tools")
+        assert resp.json()["code"] == 1
+        assert "URL 为空" in resp.json()["message"]
+
+    def test_get_device_mcp_tools_connect_exception(self, client, tmp_path):
+        """MCP 连接异常"""
+        mock_repo = self._make_mock_repo(
+            device_config={"mcp_servers": {"s1": {"url": "http://x"}}},
+            mcp_servers={"s1": {"url": "http://x"}},
+        )
+        mock_client = MagicMock()
+        mock_client.connect = AsyncMock(side_effect=RuntimeError("connect failed"))
+        mock_client.disconnect = AsyncMock()
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
+             patch("src.use_cases.tools_system.MCPClient", return_value=mock_client):
+            resp = client.get("/api/v1/devices/dev1/mcp/s1/tools")
+        assert resp.json()["code"] == 1
+        assert "获取工具列表失败" in resp.json()["message"]
+
+    def test_get_device_all_tools_success(self, client, tmp_path):
+        """获取设备所有工具（内置 + MCP）"""
+        mock_repo = self._make_mock_repo(
+            device_config={"mcp_servers": {"s1": {"url": "http://x"}}},
+            mcp_servers={"s1": {"url": "http://x"}},
+        )
+        mock_client = MagicMock()
+        mock_client.connect = AsyncMock()
+        mock_client.disconnect = AsyncMock()
+        mock_client.get_tools_schema.return_value = [
+            {"function": {"name": "mcp_tool", "description": "mcp desc"}}
+        ]
+        builtin_tools = [
+            {"function": {"name": "builtin_tool", "description": "builtin desc"}}
+        ]
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
+             patch("src.use_cases.tools_system.get_openai_tools_schema", return_value=iter(builtin_tools)), \
+             patch("src.use_cases.tools_system.MCPClient", return_value=mock_client):
+            resp = client.get("/api/v1/devices/dev1/tools")
+        assert resp.json()["code"] == 0
+        names = [t["name"] for t in resp.json()["data"]]
+        assert "builtin_tool" in names
+        assert "mcp_tool" in names
+
+    def test_get_device_all_tools_no_file(self, client, tmp_path):
+        """无设备时仅返回内置工具"""
+        mock_repo = self._make_mock_repo(device_found=False)
+        with patch("src.use_cases.tools_system.get_openai_tools_schema",
+                   return_value=iter([{"function": {"name": "t1", "description": "d"}}])), \
+             patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.get("/api/v1/devices/dev1/tools")
+        assert resp.json()["code"] == 0
+        assert len(resp.json()["data"]) == 1
+        assert resp.json()["data"][0]["type"] == "global"
+
+    def test_get_device_all_tools_mcp_error(self, client, tmp_path):
+        """MCP 服务器获取工具失败时继续返回内置工具"""
+        mock_repo = self._make_mock_repo(
+            device_config={"mcp_servers": {"s1": {"url": "http://x"}}},
+            mcp_servers={"s1": {"url": "http://x"}},
+        )
+        mock_client = MagicMock()
+        mock_client.connect = AsyncMock(side_effect=RuntimeError("connect failed"))
+        mock_client.disconnect = AsyncMock()
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
+             patch("src.use_cases.tools_system.get_openai_tools_schema",
+                   return_value=iter([{"function": {"name": "t1", "description": "d"}}])), \
+             patch("src.use_cases.tools_system.MCPClient", return_value=mock_client):
+            resp = client.get("/api/v1/devices/dev1/tools")
+        assert resp.json()["code"] == 0
+        data = resp.json()["data"]
+        assert len(data) == 1
+        assert data[0]["type"] == "global"
+
+    def test_get_device_all_tools_device_not_found(self, client, tmp_path):
+        """设备不存在时仅返回内置工具"""
+        mock_repo = self._make_mock_repo(device_found=False)
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
+             patch("src.use_cases.tools_system.get_openai_tools_schema",
+                   return_value=iter([{"function": {"name": "t1", "description": "d"}}])):
+            resp = client.get("/api/v1/devices/dev1/tools")
+        assert resp.json()["code"] == 0
+        assert len(resp.json()["data"]) == 1
+
+    # ── MCP 启停补充 ──
+
+    def test_toggle_mcp_server_enable(self, client, tmp_path):
+        """启用 MCP 服务器（disabled=False）"""
+        mock_repo = self._make_mock_repo(
+            device_config={"disabled_mcp_servers": ["s1", "s2"]},
+        )
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
+             patch("src.infrastructure.routes.mcp._hot_reload_device_config"):
+            resp = client.post("/api/v1/devices/dev1/mcp/s1/toggle", params={"disabled": False})
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["disabled"] is False
+
+    def test_toggle_mcp_server_not_found(self, client, tmp_path):
+        """设备不存在时切换 MCP 服务器"""
+        mock_repo = self._make_mock_repo(device_found=False)
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.post("/api/v1/devices/nonexistent/mcp/s1/toggle", params={"disabled": True})
+        assert resp.json()["code"] == 1
+
+    def test_toggle_mcp_tool_enable(self, client, tmp_path):
+        """启用 MCP 工具（disabled=False）"""
+        mock_repo = self._make_mock_repo(
+            device_config={"disabled_mcp_tools": {"s1": ["t1", "t2"]}},
+        )
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
+             patch("src.infrastructure.routes.mcp._hot_reload_device_config"):
+            resp = client.post("/api/v1/devices/dev1/mcp/s1/tools/t1/toggle", params={"disabled": False})
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["disabled"] is False
+
+    def test_toggle_mcp_tool_not_found(self, client, tmp_path):
+        """设备不存在时切换 MCP 工具"""
+        mock_repo = self._make_mock_repo(device_found=False)
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.post("/api/v1/devices/nonexistent/mcp/s1/tools/t1/toggle", params={"disabled": True})
+        assert resp.json()["code"] == 1
+
+    def test_get_mcp_disabled_no_file(self, client, tmp_path):
+        """设备不存在时获取禁用列表"""
+        mock_repo = self._make_mock_repo(device_found=False)
+        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
+            resp = client.get("/api/v1/devices/dev1/mcp/disabled")
+        assert resp.json()["code"] == 1
+
+
+# ════════════════════════════════════════════════════════════════
+# skills 路由测试
+# ════════════════════════════════════════════════════════════════
+
+class TestSkillsRoutes:
+    """技能路由测试"""
+
+    @pytest.fixture
+    def app(self):
+        from src.infrastructure.routes.skills import register_routes
+        from src.infrastructure.security import verify_admin_api_key
+        application = FastAPI()
+        register_routes(application)
+        # 路由单元测试跳过 API key 认证（认证逻辑由 security 层单独覆盖）
+        application.dependency_overrides[verify_admin_api_key] = lambda: True
+        return application
+
+    @pytest.fixture
+    def client(self, app):
+        return TestClient(app)
+
+    def test_list_skills_no_filter(self, client):
+        """列出所有技能"""
+        skill = MagicMock()
+        skill.id = "skill1"
+        skill.description = "desc"
+        skill.category = ["cat"]
+        skill.tags = ["tag"]
+        skill.device_id = ""
+        with patch("src.use_cases.skill_system.get_catalog", return_value=[skill]):
+            resp = client.get("/api/v1/skills")
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["count"] == 1
+
+    def test_list_skills_exception(self, client):
+        with patch("src.use_cases.skill_system.get_catalog", side_effect=RuntimeError("err")):
+            resp = client.get("/api/v1/skills")
+        assert resp.json()["code"] == 1
+
+    def test_list_skills_with_device_id(self, client):
+        """按 device_id 过滤技能"""
+        skill = MagicMock()
+        skill.id = "skill1"
+        skill.description = "desc"
+        skill.category = []
+        skill.tags = []
+        skill.device_id = "dev1"
+        mock_dm = MagicMock()
+        cfg = MagicMock()
+        cfg.skills = None
+        cfg.disabled_skills = []
+        mock_dm.devices = {"dev1": cfg}
+        mock_dm.resolve.return_value = cfg
+        with patch("src.use_cases.auxiliary_services.load_devices", return_value=mock_dm), \
+             patch("src.use_cases.skill_system.get_catalog", return_value=[skill]):
+            resp = client.get("/api/v1/skills", params={"device_id": "dev1"})
+        assert resp.json()["code"] == 0
+
+    def test_toggle_skill_no_device_id(self, client):
+        """无 device_id 时报错"""
+        resp = client.post("/api/v1/skills/skill1/toggle")
+        assert resp.json()["code"] == 1
+
+    def test_toggle_skill_success(self, client, tmp_path):
+        """成功切换技能状态"""
+        mock_repo = MagicMock()
+        mock_repo.get_device_config = AsyncMock(return_value={"key": "k1", "disabled_skills": []})
+        mock_repo.toggle_skill = AsyncMock(return_value=None)
+        with patch("src.infrastructure.routes.skills._get_repo", return_value=mock_repo), \
+             patch("src.infrastructure.routes.skills._hot_reload_device_config"):
+            resp = client.post("/api/v1/skills/skill1/toggle", params={"device_id": "dev1", "disabled": True})
+        assert resp.json()["code"] == 0
+
+    def test_get_skill_detail_not_found(self, client):
+        with patch("src.use_cases.skill_system.get_skill", return_value=None):
+            resp = client.get("/api/v1/skills/nonexistent")
+        assert resp.json()["code"] == 1
+
+    def test_get_skill_detail_success(self, client):
+        entry = MagicMock()
+        entry.id = "skill1"
+        entry.metadata.description = "desc"
+        entry.metadata.category = ["cat"]
+        entry.metadata.tags = ["tag"]
+        entry.metadata.cap_groups = []
+        with patch("src.use_cases.skill_system.get_skill", return_value=entry), \
+             patch("src.use_cases.skill_system.get_skill_document", return_value="doc content"):
+            resp = client.get("/api/v1/skills/skill1")
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["document"] == "doc content"
+
+    def test_create_skill_success(self, client):
+        entry = MagicMock()
+        entry.id = "new_skill"
+        entry.metadata.description = "desc"
+        entry.metadata.category = []
+        entry.metadata.tags = []
+        entry.file_path = "/path"
+        with patch("src.use_cases.skill_system.create_skill", return_value=entry), \
+             patch("src.infrastructure.routes.skills._add_skill_to_device", new_callable=AsyncMock):
+            resp = client.post("/api/v1/skills", json={
+                "name": "test", "description": "d", "instructions": "i", "device_id": "dev1"
+            })
+        assert resp.json()["code"] == 0
+
+    def test_create_skill_value_error(self, client):
+        with patch("src.use_cases.skill_system.create_skill", side_effect=ValueError("invalid")):
+            resp = client.post("/api/v1/skills", json={
+                "name": "test", "description": "d", "instructions": "i"
+            })
+        assert resp.json()["code"] == 1
+
+    def test_update_skill_success(self, client):
+        entry = MagicMock()
+        entry.id = "skill1"
+        entry.metadata.description = "updated"
+        entry.metadata.category = []
+        entry.metadata.tags = []
+        with patch("src.use_cases.skill_system.update_skill", return_value=entry):
+            resp = client.put("/api/v1/skills/skill1", json={
+                "name": "test", "description": "d", "instructions": "i"
+            })
+        assert resp.json()["code"] == 0
+
+    def test_update_skill_value_error(self, client):
+        with patch("src.use_cases.skill_system.update_skill", side_effect=ValueError("not found")):
+            resp = client.put("/api/v1/skills/skill1", json={
+                "name": "test", "description": "d", "instructions": "i"
+            })
+        assert resp.json()["code"] == 1
+
+    def test_delete_skill_success(self, client):
+        with patch("src.use_cases.skill_system.delete_skill", return_value=True), \
+             patch("src.infrastructure.routes.skills._remove_skill_from_all_devices", new_callable=AsyncMock):
+            resp = client.delete("/api/v1/skills/skill1")
+        assert resp.json()["code"] == 0
+
+    def test_delete_skill_not_found(self, client):
+        with patch("src.use_cases.skill_system.delete_skill", return_value=False):
+            resp = client.delete("/api/v1/skills/skill1")
+        assert resp.json()["code"] == 1
+
+    def test_reload_skills(self, client):
+        with patch("src.use_cases.skill_system.reload"), \
+             patch("src.use_cases.skill_system._skills_by_id", {"s1": {}, "s2": {}}):
+            resp = client.post("/api/v1/skills/reload")
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["count"] == 2
+
+    def test_reload_skills_exception(self, client):
+        with patch("src.use_cases.skill_system.reload", side_effect=RuntimeError("err")):
+            resp = client.post("/api/v1/skills/reload")
+        assert resp.json()["code"] == 1

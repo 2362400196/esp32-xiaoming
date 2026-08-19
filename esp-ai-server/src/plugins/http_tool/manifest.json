@@ -1,0 +1,11 @@
+{
+    "id": "http_tool",
+    "name": "HTTP 请求",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "发起 GET/POST 网络请求获取接口数据",
+    "api_version": "1.0",
+    "requires": [],
+    "config_fields": [],
+    "permissions": ["network"]
+}

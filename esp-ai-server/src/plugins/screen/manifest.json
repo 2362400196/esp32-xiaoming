@@ -1,0 +1,11 @@
+{
+    "id": "screen",
+    "name": "屏幕控制",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "旋转屏幕方向、控制显示输出",
+    "api_version": "1.0",
+    "requires": ["display"],
+    "config_fields": [],
+    "permissions": []
+}

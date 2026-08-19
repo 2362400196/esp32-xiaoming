@@ -1,0 +1,1 @@
+export const siteData = JSON.parse("{\"base\":\"/\",\"lang\":\"zh-CN\",\"title\":\"小明同学\",\"description\":\"小明同学智能语音助手 - 服务端 · 客户端 · 硬件\",\"head\":[],\"locales\":{\"/\":{\"lang\":\"zh-CN\",\"title\":\"小明同学\",\"description\":\"小明同学智能语音助手 - 服务端 · 客户端 · 硬件\"}}}")

@@ -1,0 +1,615 @@
+"""插件管理路由：热加载、插件列表、设备级插件启用控制、插件包安装/卸载/更新"""
+
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from pydantic import BaseModel
+
+from src.infrastructure.logging import get_logger
+from src.infrastructure.security_jwt import get_current_user, require_admin
+
+logger = get_logger(__name__)
+
+router = APIRouter()
+
+
+class DevicePluginsRequest(BaseModel):
+    """设备启用插件列表（空列表 = 全部启用，与未配置一致）"""
+    enabled_plugins: list[str] = []
+
+
+@router.post("/api/v1/plugins/reload")
+async def reload_plugins(request: Request, _admin=Depends(require_admin)):
+    """热加载全部插件：卸载旧工具 → 重新加载（改插件代码后调用，无需重启服务器）。
+    管理员专属（影响所有设备的工具列表）。
+    用法: curl -X POST http://<server>:8088/api/v1/plugins/reload"""
+    from src.infrastructure.plugin_loader import reload_plugins
+
+    result = reload_plugins()
+
+    # 失效工具 schema 缓存（下次 LLM 会话自动重建，使新工具对模型可见）
+    tm = getattr(request.app.state, "tool_manager", None)
+    if tm is not None and hasattr(tm, "invalidate_schema_cache"):
+        tm.invalidate_schema_cache()
+    from src.use_cases.tools_system import _shared_tool_manager
+    if _shared_tool_manager is not None and hasattr(_shared_tool_manager, "invalidate_schema_cache"):
+        _shared_tool_manager.invalidate_schema_cache()
+
+    logger.info(f"[插件] 热加载完成: {result}")
+    return {"code": 0, "message": "ok", "data": result}
+
+
+def _available_plugins() -> list[dict]:
+    """可用插件列表（含中文名、简介、工具与能力要求），供设备插件管理展示"""
+    from src.infrastructure.plugin_loader import (
+        get_loaded_plugins,
+        get_plugin_requires,
+        get_plugin_source,
+        get_plugin_version,
+        _loaded_tools,
+        _plugin_meta,
+    )
+    from src.use_cases.tools_system import get_tool
+
+    out = []
+    for name in sorted(get_loaded_plugins()):
+        meta = _plugin_meta.get(name, {})
+        tools = []
+        for tname in _loaded_tools.get(name, []):
+            td = get_tool(tname)
+            desc = (td.description or "").strip().split("\n")[0] if td else ""
+            tools.append({"name": tname, "description": desc})
+        out.append({
+            "name": name,
+            "title": meta.get("name") or name,          # 中文名
+            "icon": meta.get("icon") or "🧩",            # 商品图标（emoji）
+            "description": meta.get("description") or "",  # 中文简介
+            "tools": tools,
+            "requires": get_plugin_requires(name),
+            "config_fields": meta.get("config_fields") or [],  # 需用户配置的字段声明
+            "source": get_plugin_source(name),   # built-in / installed
+            "version": get_plugin_version(name),  # 插件版本号
+        })
+    return out
+
+
+async def _check_device_owner(device_id: str, user) -> bool:
+    """校验设备归属当前用户（兼容 mac_address / device_id / device_key 查找）"""
+    from src.infrastructure.db.session import get_session_ctx
+    from src.infrastructure.db.models.device import DeviceModel
+    from sqlalchemy import select, or_
+
+    async with get_session_ctx() as session:
+        result = await session.execute(
+            select(DeviceModel).where(
+                or_(
+                    DeviceModel.device_id == device_id,
+                    DeviceModel.mac_address == device_id,
+                    DeviceModel.device_key == device_id,
+                ),
+                DeviceModel.user_id == user.id,
+            )
+        )
+        return result.scalar_one_or_none() is not None
+
+
+@router.get("/api/v1/plugins")
+async def list_plugins(user=Depends(get_current_user)):
+    """列出所有已加载插件（名称、工具列表、能力要求）。"""
+    try:
+        return {"code": 0, "message": "ok", "data": _available_plugins()}
+    except Exception as e:
+        return {"code": 1, "message": str(e), "data": None}
+
+
+@router.get("/api/v1/devices/{device_id}/plugins")
+async def get_device_plugins(device_id: str, user=Depends(get_current_user)):
+    """查询设备当前启用的插件白名单。
+    返回 enabled_plugins（null/空 = 全部启用）及可用插件列表。"""
+    try:
+        if not await _check_device_owner(device_id, user):
+            raise HTTPException(403, "Device not bound to you")
+        from src.infrastructure.db.repositories.device_repository import DeviceRepository
+        config = await DeviceRepository().get_device_config(device_id)
+        if config is None:
+            return {"code": 1, "message": f"设备不存在: {device_id}", "data": None}
+        return {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "device_id": device_id,
+                "enabled_plugins": config.get("enabled_plugins"),
+                "plugin_configs": config.get("plugin_configs") or {},
+                "available_plugins": _available_plugins(),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"code": 1, "message": str(e), "data": None}
+
+
+class PluginConfigRequest(BaseModel):
+    """插件配置项值（仅接受插件声明过的字段）"""
+    config: dict = {}
+
+
+@router.put("/api/v1/devices/{device_id}/plugins/{plugin_name}/config")
+async def set_plugin_config(
+    device_id: str,
+    plugin_name: str,
+    body: PluginConfigRequest,
+    user=Depends(get_current_user),
+):
+    """保存设备级插件配置（如天气插件的高德 API Key）。
+    用法: PUT /api/v1/devices/<device_id>/plugins/weather/config
+      {"config": {"amap_key": "xxx"}}"""
+    try:
+        if not await _check_device_owner(device_id, user):
+            raise HTTPException(403, "Device not bound to you")
+
+        # 校验插件存在 + 只接受声明过的配置字段
+        plugins = {p["name"]: p for p in _available_plugins()}
+        if plugin_name not in plugins:
+            return {"code": 1, "message": f"未知插件: {plugin_name}", "data": None}
+        declared = {f["key"] for f in plugins[plugin_name].get("config_fields", [])}
+        unknown = [k for k in body.config.keys() if k not in declared]
+        if unknown:
+            return {"code": 1, "message": f"未知配置项: {unknown}（本插件支持: {sorted(declared)}）", "data": None}
+
+        from src.infrastructure.db.repositories.device_repository import DeviceRepository
+        repo = DeviceRepository()
+        found = await repo.find_by_mac(device_id)
+        if found is None:
+            found = await repo.find_by_key(device_id)
+        if found is None:
+            return {"code": 1, "message": f"设备不存在: {device_id}", "data": None}
+        real_device_id = found[0]
+
+        # 合并到该插件的配置（保留其他插件的配置）
+        config_dict = await repo.get_device_config(real_device_id) or {}
+        merged_plugin_configs = dict(config_dict.get("plugin_configs") or {})
+        merged_plugin_configs[plugin_name] = {**merged_plugin_configs.get(plugin_name, {}), **body.config}
+        updated = await repo.update_device_partial(
+            real_device_id, {"plugin_configs": merged_plugin_configs}
+        )
+        if updated is None:
+            return {"code": 1, "message": f"设备不存在: {device_id}", "data": None}
+
+        # 热重载在线设备（同步 tool_mgr.plugin_configs，立即生效）
+        from src.infrastructure.web import _hot_reload_device_config
+        _hot_reload_device_config(device_id)
+
+        logger.info(f"[插件] 设备 {device_id} 插件「{plugin_name}」配置已保存: {body.config} -> DB: {merged_plugin_configs.get(plugin_name)}")
+        return {"code": 0, "message": "ok", "data": {"plugin": plugin_name, "saved_keys": sorted(body.config.keys())}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"code": 1, "message": str(e), "data": None}
+
+
+@router.put("/api/v1/devices/{device_id}/plugins")
+async def set_device_plugins(
+    device_id: str,
+    body: DevicePluginsRequest,
+    user=Depends(get_current_user),
+):
+    """设置设备启用哪些插件（设备级插件白名单）。
+    用法: PUT /api/v1/devices/<device_id>/plugins
+      {"enabled_plugins": ["weather", "system_basic"]}   # 只启用这两个插件
+      {"enabled_plugins": []}                            # 全部启用（清除白名单）
+    校验插件名存在；设置后在线设备立即生效（热重载）。"""
+    try:
+        if not await _check_device_owner(device_id, user):
+            raise HTTPException(403, "Device not bound to you")
+
+        # 校验插件名是否真实存在（空列表 = 清除白名单，跳过校验）
+        if body.enabled_plugins:
+            loaded = {p["name"] for p in _available_plugins()}
+            unknown = [p for p in body.enabled_plugins if p not in loaded]
+            if unknown:
+                return {"code": 1, "message": f"未知插件: {unknown}（可用: {sorted(loaded)}）", "data": None}
+
+        from src.infrastructure.db.repositories.device_repository import DeviceRepository
+        repo = DeviceRepository()
+        # 兼容 mac / device_key / device_id 查找，解析出 DB 真实 device_id 再更新
+        found = await repo.find_by_mac(device_id)
+        if found is None:
+            found = await repo.find_by_key(device_id)
+        if found is None:
+            return {"code": 1, "message": f"设备不存在: {device_id}", "data": None}
+        real_device_id = found[0]
+        # 空列表写 []（不能用 None——_deep_merge 会跳过 None 导致卸载全部不生效）
+        updated = await repo.update_device_partial(
+            real_device_id, {"enabled_plugins": body.enabled_plugins or []}
+        )
+        if updated is None:
+            return {"code": 1, "message": f"设备不存在: {device_id}", "data": None}
+
+        # 热重载在线设备（更新 tool_manager 白名单，立即生效）
+        from src.infrastructure.web import _hot_reload_device_config
+        _hot_reload_device_config(device_id)
+
+        logger.info(f"[插件] 设备 {device_id} 启用插件白名单: {body.enabled_plugins}")
+        return {"code": 0, "message": "ok", "data": {"device_id": device_id, "enabled_plugins": body.enabled_plugins}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"code": 1, "message": str(e), "data": None}
+
+
+# ════════════════════════════════════════════════════════════
+# 插件包管理 API（安装 / 卸载 / 更新 / 已安装列表）
+# ════════════════════════════════════════════════════════════
+
+def _invalidate_tool_schema_cache(request: Request) -> None:
+    """失效工具 schema 缓存（安装/卸载/更新后调用，使变更对 LLM 可见）。
+
+    需要同时失效三层缓存：
+    1. 全局 tool_manager（app.state）
+    2. 共享 _shared_tool_manager
+    3. 每个设备的 PerUserToolManager（独立的 schema 缓存）
+    """
+    # 1. 全局 tool_manager
+    tm = getattr(request.app.state, "tool_manager", None)
+    if tm is not None and hasattr(tm, "invalidate_schema_cache"):
+        tm.invalidate_schema_cache()
+
+    # 2. 共享 _shared_tool_manager
+    from src.use_cases.tools_system import _shared_tool_manager
+    if _shared_tool_manager is not None and hasattr(_shared_tool_manager, "invalidate_schema_cache"):
+        _shared_tool_manager.invalidate_schema_cache()
+
+    # 3. 所有设备的 PerUserToolManager（关键：设备级缓存也需失效）
+    registry = getattr(request.app.state, "device_registry", None)
+    if registry is not None:
+        invalidated = 0
+        for device_id, device_info in registry._devices.items():
+            device_tm = device_info.get("tool_manager")
+            if device_tm is not None and hasattr(device_tm, "invalidate_schema_cache"):
+                device_tm.invalidate_schema_cache()
+                invalidated += 1
+        if invalidated:
+            logger.info(f"[插件] 已失效 {invalidated} 个设备的工具 schema 缓存")
+
+
+@router.get("/api/v1/plugins/installed")
+async def list_installed_plugins(_admin=Depends(require_admin)):
+    """列出所有已安装插件（含版本、来源、工具列表）。
+
+    扫描 data/plugins/installed/ 目录，读取每个插件的 manifest.json。
+    返回 data 为数组，每项含 name/version/source/tools/loaded 等字段。
+    """
+    try:
+        from src.infrastructure.plugin_manager import get_plugin_manager
+        manager = get_plugin_manager()
+        installed = manager.list_installed()
+        return {"code": 0, "message": "ok", "data": installed}
+    except Exception as e:
+        return {"code": 1, "message": str(e), "data": None}
+
+
+@router.get("/api/v1/plugins/updates")
+async def check_plugin_updates(_admin=Depends(require_admin)):
+    """检查所有已安装插件是否有可更新的新版本。
+
+    向市场 API 查询每个已安装插件的最新版本，与本地版本比较。
+    返回 data 为数组，每项含 name/current_version/latest_version/has_update。
+    """
+    try:
+        from src.infrastructure.plugin_manager import get_plugin_manager
+        manager = get_plugin_manager()
+        updates = await manager.check_updates()
+        return {"code": 0, "message": "ok", "data": updates}
+    except Exception as e:
+        return {"code": 1, "message": str(e), "data": None}
+
+
+@router.post("/api/v1/plugins/install")
+async def install_plugin(
+    request: Request,
+    file: UploadFile = File(..., description="插件 zip 包"),
+    _admin=Depends(require_admin),
+):
+    """从上传的 zip 包安装插件。
+
+    接受 multipart/form-data 上传的 zip 文件，安装流程：
+    1. 保存 zip 到 CACHE_DIR
+    2. 读取并验证 manifest.json
+    3. 校验 zip 内含 plugin.py
+    4. 解压到 INSTALLED_DIR/{plugin_id}/
+    5. 调用 plugin_loader 加载插件
+    6. 返回安装结果
+
+    用法: curl -X POST -F "file=@weather.zip" http://<server>:8088/api/v1/plugins/install
+    """
+    try:
+        from src.infrastructure.plugin_manager import get_plugin_manager
+        from src.infrastructure.plugin_loader import PLUGINS_CACHE_DIR
+
+        if not file.filename or not file.filename.lower().endswith(".zip"):
+            return {"code": 1, "message": "请上传 .zip 格式的插件包", "data": None}
+
+        # 1. 保存上传的 zip 到缓存目录
+        PLUGINS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        # 使用原始文件名，避免冲突加时间戳后缀
+        import time
+        safe_name = Path(file.filename).name  # 防路径穿越
+        cache_path = PLUGINS_CACHE_DIR / f"{int(time.time())}_{safe_name}"
+
+        content = await file.read()
+        cache_path.write_bytes(content)
+        logger.info(f"[插件] 上传 zip 已保存: {cache_path}（{len(content)} 字节）")
+
+        # 2. 安装
+        manager = get_plugin_manager()
+        result = await manager.install_from_zip(cache_path)
+
+        # 3. 清理缓存 zip
+        try:
+            if cache_path.exists():
+                cache_path.unlink()
+        except OSError:
+            pass
+
+        if result.get("success"):
+            # 失效工具 schema 缓存
+            _invalidate_tool_schema_cache(request)
+            return {"code": 0, "message": result.get("message", "安装成功"), "data": result}
+        else:
+            return {"code": 1, "message": result.get("message", "安装失败"), "data": result}
+    except Exception as e:
+        logger.error(f"[插件] 安装异常: {e}")
+        return {"code": 1, "message": str(e), "data": None}
+
+
+@router.delete("/api/v1/plugins/{name}")
+async def uninstall_plugin(name: str, request: Request, _admin=Depends(require_admin)):
+    """卸载插件。
+
+    流程：
+    1. 校验非内置插件（内置插件不可卸载）
+    2. 注销插件工具
+    3. 删除 INSTALLED_DIR/{name}/ 目录
+
+    用法: curl -X DELETE http://<server>:8088/api/v1/plugins/weather
+    """
+    try:
+        from src.infrastructure.plugin_manager import get_plugin_manager
+        manager = get_plugin_manager()
+        result = await manager.uninstall(name)
+
+        if result.get("success"):
+            # 失效工具 schema 缓存
+            _invalidate_tool_schema_cache(request)
+            return {"code": 0, "message": result.get("message", "卸载成功"), "data": result}
+        else:
+            return {"code": 1, "message": result.get("message", "卸载失败"), "data": result}
+    except Exception as e:
+        logger.error(f"[插件] 卸载异常: {e}")
+        return {"code": 1, "message": str(e), "data": None}
+
+
+@router.post("/api/v1/plugins/{name}/update")
+async def update_plugin(
+    name: str, request: Request, _admin=Depends(require_admin)
+):
+    """更新插件到最新版本。
+
+    从市场下载最新版 zip → 卸载旧版 → 安装新版。
+    用法: curl -X POST http://<server>:8088/api/v1/plugins/weather/update
+    """
+    try:
+        from src.infrastructure.plugin_manager import get_plugin_manager
+        manager = get_plugin_manager()
+        result = await manager.update_plugin(name)
+
+        if result.get("success"):
+            # 失效工具 schema 缓存
+            _invalidate_tool_schema_cache(request)
+            return {"code": 0, "message": result.get("message", "更新成功"), "data": result}
+        else:
+            return {"code": 1, "message": result.get("message", "更新失败"), "data": result}
+    except Exception as e:
+        logger.error(f"[插件] 更新异常: {e}")
+        return {"code": 1, "message": str(e), "data": None}
+
+
+class PluginCodeReq(BaseModel):
+    """插件源码更新请求"""
+    plugin_code: str = ""
+    files: list[dict] = []
+
+
+@router.get("/api/v1/plugins/{name}/source")
+async def get_local_plugin_source(name: str, _admin=Depends(require_admin)):
+    """获取本地插件的源码（所有文本文件，含 plugin.py 和 manifest.json）。"""
+    try:
+        from src.infrastructure.plugin_loader import _resolve_plugin_dir
+
+        plugin_dir, source = _resolve_plugin_dir(name)
+        if plugin_dir is None:
+            return {"code": 1, "message": f"插件不存在: {name}", "data": None}
+
+        files = []
+        for f in sorted(plugin_dir.rglob("*")):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(plugin_dir).as_posix()
+            try:
+                content = f.read_text(encoding="utf-8")
+                files.append({"name": rel, "content": content})
+            except UnicodeDecodeError:
+                continue  # 跳过二进制文件
+
+        plugin_file = plugin_dir / "plugin.py"
+        manifest_file = plugin_dir / "manifest.json"
+
+        plugin_code = plugin_file.read_text(encoding="utf-8") if plugin_file.is_file() else ""
+        manifest_raw = manifest_file.read_text(encoding="utf-8") if manifest_file.is_file() else "{}"
+
+        try:
+            import json
+            manifest = json.loads(manifest_raw)
+        except Exception:
+            manifest = {}
+
+        return {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "name": name,
+                "source": source,
+                "files": files,
+                "plugin_code": plugin_code,
+                "manifest_raw": manifest_raw,
+                "manifest": manifest,
+            },
+        }
+    except Exception as e:
+        logger.error(f"[插件] 获取源码失败: {e}")
+        return {"code": 1, "message": str(e), "data": None}
+
+
+@router.put("/api/v1/plugins/{name}/source")
+async def update_local_plugin_source(
+    name: str,
+    body: PluginCodeReq,
+    request: Request,
+    _admin=Depends(require_admin),
+):
+    """更新本地插件的源码（plugin.py / manifest.json / 任意文本文件）并热重载。
+
+    仅支持已安装插件（data/plugins/installed/），不支持修改内置插件源码。
+    修改后自动热重载，无需重启服务器。
+    """
+    try:
+        from src.infrastructure.plugin_loader import INSTALLED_PLUGINS_DIR, reload_single_plugin
+
+        plugin_dir = INSTALLED_PLUGINS_DIR / name
+        if not plugin_dir.is_dir():
+            return {"code": 1, "message": f"已安装插件不存在: {name}（仅支持修改已安装插件）", "data": None}
+
+        # 兼容旧调用：只有 plugin_code 时视为仅更新 plugin.py
+        if body.files:
+            plugin_dir.mkdir(parents=True, exist_ok=True)
+            for item in body.files:
+                fname = str(item.get("name") or "").strip().lstrip("/")
+                content = str(item.get("content") or "")
+                if not fname or ".." in Path(fname).parts:
+                    return {"code": 1, "message": f"非法文件名: {fname}", "data": None}
+                target = (plugin_dir / fname).resolve()
+                if not str(target).startswith(str(plugin_dir.resolve())):
+                    return {"code": 1, "message": f"非法文件名: {fname}", "data": None}
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+        elif body.plugin_code:
+            plugin_file = plugin_dir / "plugin.py"
+            plugin_file.write_text(body.plugin_code, encoding="utf-8")
+        else:
+            return {"code": 1, "message": "没有可写入的内容", "data": None}
+
+        success = reload_single_plugin(name)
+        _invalidate_tool_schema_cache(request)
+
+        logger.info(f"[插件] 源码已更新: {name}, 热重载: {'成功' if success else '失败'}")
+        return {
+            "code": 0,
+            "message": "源码已保存并热重载" if success else "源码已保存，但热重载失败，请检查代码语法",
+            "data": {"name": name, "reloaded": success},
+        }
+    except Exception as e:
+        logger.error(f"[插件] 更新源码失败: {e}")
+        return {"code": 1, "message": str(e), "data": None}
+
+
+class CreateLocalPluginReq(BaseModel):
+    """从代码创建本地插件（不上架市场）"""
+    slug: str
+    name: str
+    description: str = ""
+    version: str = "1.0.0"
+    plugin_code: str = ""
+    manifest: dict = {}
+    files: list[dict] = []
+
+
+@router.post("/api/v1/plugins/create-local")
+async def create_local_plugin(
+    body: CreateLocalPluginReq,
+    request: Request,
+    _admin=Depends(require_admin),
+):
+    """从代码直接创建本地插件（无需上传 zip，不上架市场）。
+
+    在 data/plugins/installed/{slug}/ 下创建目录，写入 manifest.json 和 plugin.py，
+    然后热重载。适用于开发者先本地测试，测试完毕后再上架市场。
+    """
+    try:
+        import json
+        import re
+
+        from src.infrastructure.plugin_loader import INSTALLED_PLUGINS_DIR, reload_single_plugin
+        from src.infrastructure.plugin_manifest import PluginManifest
+
+        slug = body.slug.lower().strip()
+        if not re.match(r'^[a-z][a-z0-9_-]*$', slug):
+            return {"code": 1, "message": f"slug 非法（需以字母开头，仅含小写字母/数字/_/-）: {body.slug}", "data": None}
+
+        if not body.name.strip():
+            return {"code": 1, "message": "插件名称不能为空", "data": None}
+
+        if not body.plugin_code.strip() and not body.files:
+            return {"code": 1, "message": "plugin.py 代码不能为空", "data": None}
+
+        plugin_dir = INSTALLED_PLUGINS_DIR / slug
+        if plugin_dir.exists():
+            return {"code": 1, "message": f"插件已存在: {slug}（如需更新请使用编辑功能）", "data": None}
+
+        # 构建 manifest
+        manifest = body.manifest or {}
+        manifest["id"] = slug
+        manifest["name"] = body.name.strip()
+        manifest["version"] = body.version or "1.0.0"
+        manifest["description"] = body.description or ""
+        manifest.setdefault("api_version", "1.0")
+
+        # 校验 manifest
+        try:
+            m = PluginManifest(**manifest)
+            m.validate_compatibility()
+        except Exception as e:
+            return {"code": 1, "message": f"manifest 校验失败: {e}", "data": None}
+
+        # 创建目录和文件
+        plugin_dir.mkdir(parents=True, exist_ok=True)
+        (plugin_dir / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        if body.files:
+            for item in body.files:
+                fname = str(item.get("name") or "").strip().lstrip("/")
+                content = str(item.get("content") or "")
+                if not fname or ".." in Path(fname).parts:
+                    return {"code": 1, "message": f"非法文件名: {fname}", "data": None}
+                target = (plugin_dir / fname).resolve()
+                if not str(target).startswith(str(plugin_dir.resolve())):
+                    return {"code": 1, "message": f"非法文件名: {fname}", "data": None}
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+        else:
+            (plugin_dir / "plugin.py").write_text(body.plugin_code, encoding="utf-8")
+
+        # 热重载
+        success = reload_single_plugin(slug)
+        _invalidate_tool_schema_cache(request)
+
+        logger.info(f"[插件] 本地创建: {slug}, 热重载: {'成功' if success else '失败'}")
+        return {
+            "code": 0,
+            "message": f"插件已创建并{'热重载成功' if success else '已创建（热重载失败，请检查代码语法）'}",
+            "data": {"slug": slug, "name": body.name, "reloaded": success},
+        }
+    except Exception as e:
+        logger.error(f"[插件] 本地创建失败: {e}")
+        return {"code": 1, "message": str(e), "data": None}

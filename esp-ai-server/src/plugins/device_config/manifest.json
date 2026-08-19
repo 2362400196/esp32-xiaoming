@@ -1,0 +1,11 @@
+{
+    "id": "device_config",
+    "name": "设备配置",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "读取和修改 WiFi、音量、API Key 等设备配置项",
+    "api_version": "1.0",
+    "requires": [],
+    "config_fields": [],
+    "permissions": []
+}

@@ -1,0 +1,9 @@
+# ESP32-C3 4MB Flash 分区表（无 OTA 双槽，工厂单槽）
+# 适配 ESP32-C3 SuperMini（4MB Flash，固件约 1.8MB）
+# 由 sdkconfig.defaults.esp32c3 指定
+# Name,   Type, SubType, Offset,  Size, Flags
+nvs,      data, nvs,     0x9000,    0x4000,
+phy_init, data, phy,     0xf000,    0x1000,
+model,    data, undefined,  0x10000,   0x30000,
+storage,  data, spiffs,    0x40000,   0x20000,
+factory,  app,  factory, 0x60000,   0x390000,

@@ -1,0 +1,28 @@
+# =============================================================
+# Kconfig.gen - 板型选择菜单（自动生成，请勿手动编辑）
+# 由 gen_boards.py 扫描 boards/defs/ 目录生成
+# =============================================================
+
+choice BOARD_TYPE
+    prompt "选择开发板型号"
+    default BOARD_BREADBOARD
+
+    # --- ESP32C3 ---
+    config BOARD_ESP32C3_SUPERMINI
+        bool "[ESP32C3] esp32c3_supermini - ESP32-C3 SuperMini (ES8311 全双工, 无屏)"
+        depends on IDF_TARGET_ESP32C3
+
+    # --- ESP32S3 ---
+    config BOARD_BREADBOARD
+        bool "[ESP32S3] breadboard - ESP32-S3 面包板 (无屏幕)"
+        depends on IDF_TARGET_ESP32S3
+
+    config BOARD_BREADBOARD_1_54_LCD
+        bool "[ESP32S3] breadboard_1.54_lcd - ESP32-S3 面包板 (1.54寸 LCD)"
+        depends on IDF_TARGET_ESP32S3
+
+    config BOARD_BREADBOARD_1_54_LCD_OFFICIAL
+        bool "[ESP32S3] breadboard_1.54_lcd_official - ESP32-S3 面包板 (1.54寸 LCD, 官方服务版)"
+        depends on IDF_TARGET_ESP32S3
+
+endchoice

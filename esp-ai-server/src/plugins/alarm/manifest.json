@@ -1,0 +1,11 @@
+{
+    "id": "alarm",
+    "name": "闹钟定时",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "设置闹钟、定时提醒，支持重复模式",
+    "api_version": "1.0",
+    "requires": [],
+    "config_fields": [],
+    "permissions": []
+}

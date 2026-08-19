@@ -1,0 +1,134 @@
+[project]
+name = "espai-server"
+version = "0.1.0"
+description = "ESP-AI FastAPI server"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "websockets==14.2",
+    "websocket-client",
+    "gtts",
+    "numpy>=2.2.6",
+    "torch>=2.0.0",
+    "torchaudio>=2.0.0",
+    "openai>=1.0.0",
+    "colorama>=0.4.6",
+    "mcp>=1.27.0",
+    "fastmcp>=2.12.4",
+    "python-dotenv>=1.2.2",
+    "pydantic-settings>=2.0",
+    "prometheus-fastapi-instrumentator>=7.0",
+    "pillow>=12.2.0",
+    "packaging>=26.2",
+    "sqlalchemy>=2.0.0",
+    "aiosqlite>=0.20.0",
+    "passlib>=1.7.4",
+    "pyjwt>=2.12.1",
+    "bcrypt>=5.0.0",
+    "qrcode[pil]>=8.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=4.0",
+    "httpx>=0.27",
+    "mypy>=1.0",
+    "ruff>=0.6",
+    "types-requests>=2.0",
+]
+
+# ============================================================
+# pytest
+# ============================================================
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+# ============================================================
+# ruff — unified linter + formatter (replaces flake8/isort/black)
+# ============================================================
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+exclude = [
+    ".git",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "docs",
+]
+
+[tool.ruff.lint]
+select = [
+    "F",     # Pyflakes
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "N",     # pep8-naming
+    "C4",    # flake8-comprehensions
+]
+ignore = [
+    "B904",   # Use raise from (noisy on existing code)
+    "SIM108", # Use ternary operator (style preference)
+    "SIM110", # Use any() (style preference)
+    "N818",   # Exception class name suffix
+]
+fixable = ["ALL"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "B011"]
+"src/infrastructure/config.py" = ["E501"]
+"src/__init__.py" = ["F401"]
+"src/infrastructure/__init__.py" = ["F401"]
+"src/domain/__init__.py" = ["F401"]
+"src/use_cases/__init__.py" = ["F401"]
+"src/interfaces/__init__.py" = ["F401"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+docstring-code-format = true
+
+# ============================================================
+# coverage.py 配置
+# ============================================================
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = [
+    "src/docs/*",
+    "src/*/__init__.py",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+
+# ============================================================
+# mypy 回迁路线图
+# ============================================================
+# [tool.mypy]
+# 当前 mypy 配置在 mypy.ini 中。逐步迁移到 pyproject.toml：
+# 阶段 1 (当前):  strict=false + check_untyped_defs + no_implicit_optional
+# 阶段 2 (目标): disallow_untyped_defs=true
+# 阶段 3 (目标): disallow_incomplete_defs=true
+# 阶段 4 (目标): disallow_untyped_decorators=true
+# 阶段 5 (目标): strict=true

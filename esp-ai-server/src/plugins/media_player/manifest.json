@@ -1,0 +1,19 @@
+{
+    "id": "media_player",
+    "name": "音乐播放",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "搜索和播放音乐，支持随机推荐和指定歌曲",
+    "api_version": "1.0",
+    "requires": [],
+    "config_fields": [
+        {
+            "key": "api_url",
+            "label": "音乐服务地址",
+            "type": "text",
+            "required": false,
+            "placeholder": "如 http://192.168.31.176:2233，留空用全局配置"
+        }
+    ],
+    "permissions": ["network"]
+}

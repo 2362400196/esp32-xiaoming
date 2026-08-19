@@ -1,0 +1,11 @@
+# ESP-IDF Partition Table
+# Name,   Type, SubType, Offset,  Size, Flags
+nvs,      data, nvs,     0x9000,    0x4000,
+otadata,  data, ota,     0xd000,    0x2000,
+phy_init, data, phy,     0xf000,    0x1000,
+model,    data, undefined,  0x10000,   0x50000,
+ota_0,    app,  ota_0,   0x100000,  6M,
+ota_1,    app,  ota_1,   0x700000,  6M,
+# storage 扩至 3MB 并挪到 flash 尾部（0xD00000，ota_1 之后）：
+# 用于 GIF 表情 SPIFFS 缓存（避免每次开机重复下载 ~600KB）
+storage,  data, spiffs,    0xD00000,   0x300000,

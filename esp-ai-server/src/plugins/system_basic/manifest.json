@@ -1,0 +1,11 @@
+{
+    "id": "system_basic",
+    "name": "系统基础",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "时间查询、音量调节、亮度控制等基础功能",
+    "api_version": "1.0",
+    "requires": [],
+    "config_fields": [],
+    "permissions": []
+}

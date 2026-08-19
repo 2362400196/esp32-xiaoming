@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "esp-idf-mcp": {
+      "command": "D:\\idf\\.espressif\\v6.0.2\\tools\\python\\v6.0.2\\venv\\Scripts\\python.exe",
+      "args": [
+        "D:\\idf\\.espressif\\v6.0.2\\esp-idf\\tools\\idf.py",
+        "mcp-server"
+      ],
+      "env": {
+        "IDF_PATH": "D:\\idf\\.espressif\\v6.0.2\\esp-idf",
+        "IDF_MCP_WORKSPACE_FOLDER": "C:\\Users\\23624\\Desktop\\esp-ai\\esp-ai-idf-client"
+      }
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+    "id": "diary",
+    "name": "日记",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "自动记录对话摘要，支持回顾历史日记",
+    "api_version": "1.0",
+    "requires": [],
+    "config_fields": [],
+    "permissions": []
+}

@@ -1,0 +1,11 @@
+{
+    "id": "memory",
+    "name": "长期记忆",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "存储和回忆对话中的重要信息和偏好",
+    "api_version": "1.0",
+    "requires": [],
+    "config_fields": [],
+    "permissions": []
+}

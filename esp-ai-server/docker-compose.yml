@@ -1,0 +1,65 @@
+# ============================================================
+# ESP-AI Server - Docker Compose
+# ============================================================
+# 与多阶段 Dockerfile 对齐：
+#   - WORKDIR /app
+#   - 源码在 /app/src
+#   - 虚拟环境在 /app/.venv
+#   - 入口: uvicorn src.main:app
+# ============================================================
+
+services:
+  esp-ai-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: esp-ai-server:latest
+    container_name: esp-ai-server
+    restart: unless-stopped
+
+    ports:
+      - "8088:8088"
+
+    env_file:
+      - .env
+
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8088
+
+    # 持久化卷：配置、数据、日志、固件
+    # 注意：users.json 代码会读写（保存设备配置），不能 :ro
+    volumes:
+      - ./users.json:/app/users.json
+      - esp-ai-data:/app/src/data
+      - esp-ai-logs:/app/logs
+      - esp-ai-firmware:/app/src/firmware
+
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+        reservations:
+          memory: 512M
+
+    # 日志驱动配置
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    # 健康检查（与 Dockerfile HEALTHCHECK 对齐）
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8088/health/live').read()"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  esp-ai-data:
+  esp-ai-logs:
+  esp-ai-firmware:

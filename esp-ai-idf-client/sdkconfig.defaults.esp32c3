@@ -1,0 +1,54 @@
+# ==================== ESP32-C3 目标专属默认配置 ====================
+# 仅当 idf.py set-target esp32c3 时生效（叠加在 sdkconfig.defaults 之上）
+# 与 ESP32-S3 构建互不影响
+
+CONFIG_IDF_TARGET="esp32c3"
+
+# C3 最高 160MHz（单核）
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+
+# 4MB Flash + C3 分区表（无 OTA 双槽）
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_c3.csv"
+
+# 默认板型：ESP32-C3 SuperMini（无屏，ES8311 全双工）
+CONFIG_BOARD_ESP32C3_SUPERMINI=y
+CONFIG_AUDIO_CODEC_ES8311=y
+
+# C3 无 PSRAM：NimBLE 内存走内部 RAM（S3 默认的 external 分配在 C3 上不可用）
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL=y
+CONFIG_NIMBLE_MEM_ALLOC_MODE_INTERNAL=y
+
+# 无 PSRAM，收紧 WiFi 动态缓冲区与 LWIP 缓冲，给 esp-sr AFE 留出堆
+# （对齐 xiaozhi-esp32 的 C3 已验证配置：static rx 3 / dynamic rx 6 / BA win 3）
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=3
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_RX_BA_WIN=3
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
+CONFIG_LWIP_TCP_WND_DEFAULT=16384
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
+# C3 省内存：关闭 IPv6（家庭/办公网络均为 IPv4，xiaozhi C3 同款配置）
+CONFIG_LWIP_IPV6=n
+# mbedTLS 握手完成后释放配置数据（省 ~10KB）
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+# FreeRTOS idle 任务栈收紧（对齐 xiaozhi C3）
+CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=768
+
+# 功耗管理：CPU 动态降频（DFS，空闲 80MHz / 忙时 160MHz）
+# 由 power_manager 在启动时 esp_pm_configure 配置；语音唤醒（纯 WakeNet）持续运行，
+# 不受降频影响，保证待机任意时长都能立即唤醒。
+CONFIG_PM_ENABLE=y
+
+# 语音唤醒模型放 Flash 分区（model），C3 用 wn9s 系列
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_SR_WN_WN9S_NIHAOXIAOZHI=y
+
+# 日志级别 INFO（无 DEBUG 刷屏，省串口 + 省时间）
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# WebSocket 动态缓冲：init 时不预分配 rx/tx 缓冲，按消息大小分配，省初始化内存
+CONFIG_ESP_WS_CLIENT_ENABLE_DYNAMIC_BUFFER=y

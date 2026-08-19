@@ -1,0 +1,116 @@
+import fs from 'node:fs'
+import { plumeTheme } from 'vuepress-theme-plume'
+import { defineUserConfig } from 'vuepress'
+import { viteBundler } from '@vuepress/bundler-vite'
+
+export default defineUserConfig({
+  lang: 'zh-CN',
+
+  title: '小明同学',
+  description: '小明同学智能语音助手 - 服务端 · 客户端 · 硬件',
+
+  theme: plumeTheme({
+    navbar: [
+      { text: '首页', link: '/' },
+      { text: '用户文档', link: '/guide/intro' },
+      { text: '开发者文档', link: '/dev/api' },
+      { text: '插件开发', link: '/plugin/plugin-dev' },
+    ],
+    sidebar: {
+      '/guide/': [
+        {
+          text: '项目',
+          collapsed: false,
+          items: [
+            { text: '项目简介', link: '/guide/intro' },
+            { text: '全功能总览', link: '/guide/features' },
+          ],
+        },
+        {
+          text: '客户端',
+          collapsed: false,
+          items: [
+            { text: '默认接线', link: '/guide/client/wiring' },
+            { text: '烧录固件', link: '/guide/client/flash' },
+          ],
+        },
+        {
+          text: '服务端',
+          collapsed: false,
+          items: [
+            { text: '快速开始', link: '/guide/server/get-started' },
+            { text: '最小配置', link: '/guide/server/config' },
+          ],
+        },
+        {
+          text: 'App 操作',
+          collapsed: false,
+          items: [
+            { text: '操作指南', link: '/guide/app/guide' },
+          ],
+        },
+      ],
+      '/dev/': [
+        {
+          text: '客户端 · IDF',
+          collapsed: false,
+          items: [
+            { text: 'IDF 客户端简介', link: '/dev/client/idf-intro' },
+            { text: '编译固件', link: '/dev/client/idf-compile' },
+            { text: '切换开发板', link: '/dev/client/idf-board-switch' },
+            { text: '适配自己的开发板', link: '/dev/client/idf-board-adaptation' },
+            { text: 'ES8311 开发指南', link: '/dev/client/idf-es8311' },
+          ],
+        },
+        {
+          text: '服务端',
+          collapsed: false,
+          items: [
+            { text: '简介', link: '/dev/server/intro' },
+            { text: '配置文档', link: '/dev/server/config' },
+            { text: '会话引擎与状态机', link: '/dev/server/session-engine' },
+            { text: 'Pipeline 流式处理', link: '/dev/server/pipeline' },
+            { text: '记忆系统', link: '/dev/server/memory-system' },
+            { text: '技能系统', link: '/dev/server/skill-system' },
+            { text: '数据库设计', link: '/dev/server/database' },
+            { text: 'WebSocket 通信', link: '/dev/server/ws' },
+            { text: '音乐播放协议', link: '/dev/music' },
+            { text: '服务端编程接口', link: '/dev/server/sdk' },
+            { text: '权限体系（角色与 API 分级）', link: '/dev/server/permissions' },
+            { text: 'MCP 工具集成', link: '/dev/server/mcp' },
+            { text: '扩展 ASR/LLM/TTS', link: '/dev/server/extend' },
+            { text: 'API 文档', link: '/dev/api' },
+          ],
+        },
+      ],
+      '/plugin/': [
+        {
+          text: '入门',
+          collapsed: false,
+          items: [
+            { text: '插件开发教程', link: '/plugin/plugin-dev' },
+            { text: '编写第一个插件', link: '/plugin/writing-first-plugin' },
+          ],
+        },
+        {
+          text: '插件 SDK',
+          collapsed: false,
+          items: [
+            { text: '公共工具库（Plugin SDK）', link: '/plugin/plugin-sdk' },
+          ],
+        },
+      ],
+    },
+  }),
+
+  bundler: viteBundler({
+    vuePluginOptions: {
+      script: {
+        fs: {
+          fileExists: (file) => fs.existsSync(file),
+          readFile: (file) => fs.readFileSync(file, 'utf-8'),
+        },
+      },
+    },
+  }),
+})

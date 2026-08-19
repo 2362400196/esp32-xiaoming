@@ -1,0 +1,113 @@
+"""系统路由
+
+健康检查、指标、统计信息等系统级路由。
+"""
+from __future__ import annotations
+
+import time
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
+from sqlalchemy import text
+
+from src.infrastructure.logging import get_logger
+from src.infrastructure.web import get_device_registry
+
+logger = get_logger(__name__)
+
+
+async def _check_db_health() -> bool:
+    """检查数据库连通性（执行 SELECT 1）"""
+    try:
+        from src.infrastructure.db.engine import get_engine
+        engine = get_engine()
+        async with engine.connect() as conn:
+            result = await conn.execute(text("SELECT 1"))
+            return result.scalar() == 1
+    except Exception as e:
+        logger.warning(f"[Health] DB check failed: {e}")
+        return False
+
+
+def register_routes(app: FastAPI) -> None:
+    """注册系统级路由"""
+
+    @app.get("/health/live", tags=["system"])
+    async def liveness():
+        return {"code": 0, "message": "ok", "data": {"status": "alive"}}
+
+    @app.get("/health/ready", tags=["system"])
+    async def readiness():
+        """就绪检查：验证关键组件（ASR/LLM/TTS 网关 + 数据库）与设备注册表是否初始化完成。
+
+        - 关键组件（asr_gateway / llm_gateway / tts_gateway / database）任一缺失即视为未就绪，返回 HTTP 503。
+        - device_registry 为辅助组件，缺失不影响就绪状态，但在 components 中标记为 down。
+        - 返回 JSON 格式的各组件详细状态。
+        """
+        asr_ok = getattr(app.state, "asr_gateway", None) is not None
+        llm_ok = getattr(app.state, "llm_gateway", None) is not None
+        tts_ok = getattr(app.state, "tts_gateway", None) is not None
+        registry_ok = getattr(app.state, "device_registry", None) is not None
+        db_ok = await _check_db_health()
+
+        components = {
+            "asr_gateway": "up" if asr_ok else "down",
+            "llm_gateway": "up" if llm_ok else "down",
+            "tts_gateway": "up" if tts_ok else "down",
+            "database": "up" if db_ok else "down",
+            "device_registry": "up" if registry_ok else "down",
+        }
+
+        # 关键组件：ASR/LLM/TTS 三个 gateway + 数据库 缺一不可
+        critical_ready = asr_ok and llm_ok and tts_ok and db_ok
+        status = "ready" if critical_ready else "not_ready"
+
+        data = {
+            "status": status,
+            "components": components,
+            "critical": ["asr_gateway", "llm_gateway", "tts_gateway", "database"],
+        }
+
+        if critical_ready:
+            return {"code": 0, "message": "ok", "data": data}
+        return JSONResponse(
+            status_code=503,
+            content={"code": 1, "message": "not ready", "data": data},
+        )
+
+    @app.get("/metrics", tags=["system"])
+    async def metrics_endpoint():
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        # 在导出指标前，采集连接池使用率等动态指标
+        try:
+            from src.infrastructure.monitoring import update_pool_metrics
+            update_pool_metrics()
+        except Exception:
+            pass
+        content = generate_latest()
+        return Response(content=content, media_type=CONTENT_TYPE_LATEST)
+
+    @app.get("/stats", tags=["system"])
+    async def get_stats():
+        stats = {
+            "server": {"version": "3.0.0-clean-arch", "architecture": "Clean Architecture"},
+            "sessions": {"active": 0},
+            "devices": {"total": 0, "online": 0},
+            "gateways": {"asr": False, "llm": False, "tts": False},
+            "timestamp": time.time(),
+        }
+
+        if hasattr(app.state, 'device_registry') and app.state.device_registry:
+            registry = app.state.device_registry
+            stats["devices"]["total"] = registry.count()
+            stats["devices"]["online"] = registry.count()
+
+        stats["gateways"]["asr"] = hasattr(app.state, 'asr_gateway') and app.state.asr_gateway is not None
+        stats["gateways"]["llm"] = hasattr(app.state, 'llm_gateway') and app.state.llm_gateway is not None
+        stats["gateways"]["tts"] = hasattr(app.state, 'tts_gateway') and app.state.tts_gateway is not None
+
+        return {"code": 0, "message": "ok", "data": stats}
+
+    @app.get("/api/health", tags=["system"])
+    async def api_health():
+        return {"code": 0, "message": "ok", "data": {"status": "healthy"}}

@@ -1,0 +1,48 @@
+# ==================== 配网方式选择 ====================
+choice PROV_TYPE
+    prompt "配网方式"
+    default PROV_TYPE_BLE
+
+    config PROV_TYPE_BLE
+        bool "BLE 蓝牙配网 (NimBLE)"
+
+    config PROV_TYPE_AP
+        bool "AP 热点配网"
+
+endchoice
+
+# ==================== 板型选择（由 gen_boards.py 自动生成）====================
+rsource "boards/Kconfig.gen"
+
+# ==================== 音频编解码器选择 ====================
+# ES8311 等编解码器作为独立配置项，与板型解耦
+# 选择后板型定义中的 es8311_cfg 引脚配置生效
+choice AUDIO_CODEC
+    prompt "音频编解码器"
+    default AUDIO_CODEC_NONE
+
+    config AUDIO_CODEC_NONE
+        bool "I2S 直连 (INMP441 + MAX98357)"
+        help
+            不使用外置编解码器，麦克风和扬声器各自通过独立 I2S 总线直连。
+
+    config AUDIO_CODEC_ES8311
+        bool "ES8311 (全双工 I2S)"
+        help
+            使用 ES8311 编解码器，单 I2S 总线全双工驱动 ADC（麦克风）和 DAC（扬声器）。
+            需要板型定义中提供 es8311_cfg 引脚配置。
+
+endchoice
+
+# ==================== 日志级别 ====================
+choice LOG_LEVEL_CHOICE
+    prompt "日志级别"
+    default LOG_LEVEL_PRODUCTION
+
+    config LOG_LEVEL_PRODUCTION
+        bool "生产模式 (仅 Warning + Error)"
+
+    config LOG_LEVEL_DEBUG
+        bool "调试模式 (全部输出)"
+
+endchoice
