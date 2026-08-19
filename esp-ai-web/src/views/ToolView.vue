@@ -3,7 +3,7 @@
     <!-- WebSerial 支持检测 -->
     <div v-if="!serialSupported" class="warn-card card card-in">
       <div class="warn-inner">
-        <span class="warn-orb">⚠️</span>
+        <span class="warn-orb"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
         <div class="warn-text">
           <p class="warn-title">当前浏览器不支持 WebSerial</p>
           <p class="warn-sub">固件烧录与串口日志需要 <b>Chrome / Edge 等 Chromium 内核浏览器</b>，且页面需通过 <b>HTTPS</b> 或 <b>localhost</b> 访问（浏览器安全策略）。</p>
@@ -15,10 +15,10 @@
       <!-- 分段切换 -->
       <div class="seg glass card-in">
         <button class="seg-item" :class="{ active: section === 'flash' }" @click="switchSection('flash')">
-          <span class="seg-ico">⚡</span> 固件烧录
+          <span class="seg-ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span> 固件烧录
         </button>
         <button class="seg-item" :class="{ active: section === 'serial' }" @click="switchSection('serial')">
-          <span class="seg-ico">🖥️</span> 串口日志
+          <span class="seg-ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span> 串口日志
         </button>
       </div>
 
@@ -805,7 +805,7 @@ onBeforeUnmount(() => {
   cursor: pointer;
   transition: all 0.3s var(--ease);
 }
-.seg-ico { font-size: 14px; }
+.seg-ico { font-size: 14px; display: inline-flex; align-items: center; }
 .seg-item:hover { color: var(--text-main); }
 .seg-item.active {
   color: #fff;

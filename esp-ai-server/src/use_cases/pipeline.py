@@ -263,20 +263,15 @@ class ConversationPipeline:
         _llm_sp = llm.system_prompt if hasattr(llm, "system_prompt") else ""
         sp = system_prompt or _user_sp or _llm_sp
 
-        # 注入设备能力边界（插件商店语义）：未安装插件的功能不可用，禁止 LLM 猜测/编造答案
+        # 注入设备能力边界（插件商店语义）：设置过插件白名单的设备，未列入的插件功能不可用
         try:
             _tm = getattr(llm, "tool_manager", None)
             if _tm is not None and hasattr(_tm, "_enabled_plugins"):
                 _installed = _tm._enabled_plugins
-                if _installed:
-                    _cap_note = (f"\n\n【设备能力边界】本设备已安装插件: {'、'.join(sorted(_installed))}。"
+                if _installed is not None and len(_installed) > 0:
+                    _cap_note = (f"\n\n【设备能力边界】本设备仅启用插件: {'、'.join(sorted(_installed))}。"
                                  "用户询问的功能如果不在上述插件能力或系统自带能力范围内，"
                                  "直接回答\"该功能未安装/设备暂不支持\"，"
-                                 "绝不可以用猜测、编造或历史经验回答，也不要假装执行了操作。")
-                else:
-                    _cap_note = ("\n\n【设备能力边界】本设备未安装任何功能插件，"
-                                 "查天气、播放音乐、设置闹钟、读写日记等插件类功能均不可用。"
-                                 "用户询问此类功能时直接回答\"该功能未安装/设备暂不支持\"，"
                                  "绝不可以用猜测、编造或历史经验回答，也不要假装执行了操作。")
                 sp = (sp + _cap_note) if sp else _cap_note
         except Exception:

@@ -136,12 +136,12 @@ class WebSocketSessionHandler:
         if user_config:
             if getattr(user_config, "disabled_tools", None):
                 tool_mgr._disabled_tools = set(user_config.disabled_tools)
-            # 设备级插件"已安装"列表：None = 未安装任何插件（商店语义，插件默认不生效）
+            # 设备级插件白名单：None/空 = 无限制（插件全部启用），非空 = 仅白名单内生效
             if getattr(user_config, "enabled_plugins", None):
                 tool_mgr._enabled_plugins = set(user_config.enabled_plugins)
-                logger.info(f"[WS] 设备插件安装列表: {sorted(tool_mgr._enabled_plugins)}")
+                logger.info(f"[WS] 设备插件白名单: {sorted(tool_mgr._enabled_plugins)}")
             else:
-                logger.info("[WS] 设备插件安装列表: 无（插件全部不生效，仅内置工具可用）")
+                logger.info("[WS] 设备插件白名单: 无限制（所有插件启用）")
             # 设备级插件配置（天气 Key 等）
             if getattr(user_config, "plugin_configs", None):
                 tool_mgr.plugin_configs = dict(user_config.plugin_configs)

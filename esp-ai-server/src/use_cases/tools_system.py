@@ -992,7 +992,8 @@ class PerUserToolManager:
         self.ctx = ctx
         self.fsm = fsm
         self._disabled_tools = set(disabled_tools) if disabled_tools else set()
-        # 设备级插件"已安装"集合：None/空 = 未安装任何插件（插件商店语义，插件默认不生效）
+        # 设备级插件白名单：None/空 = 无白名单限制（插件全部启用）；
+        # 非空集合 = 仅白名单内插件生效（插件商店语义）
         self._enabled_plugins: set[str] | None = (
             set(enabled_plugins) if enabled_plugins else None
         )
@@ -1201,8 +1202,8 @@ class PerUserToolManager:
     def _device_tool_allowed(self, tool_name: str) -> bool:
         """设备级工具可见性/可执行性判断（插件商店语义）：
         1. 黑名单 disabled_tools → 禁用
-        2. 插件必须已"安装"到本设备（enabled_plugins 含该插件）才生效——
-           enabled_plugins 为 None/空 = 未安装任何插件，所有插件工具均不可用（内置工具不受影响）
+        2. 插件白名单 enabled_plugins：None/空 = 无限制（所有插件工具启用）；
+           非空集合 = 插件必须在该白名单内才生效（内置工具不受影响）
         3. 能力适配：插件声明 requires=display 且设备无屏（device_has_display=False）→ 隐藏
         """
         if tool_name in self._disabled_tools:
@@ -1211,10 +1212,10 @@ class PerUserToolManager:
         from src.infrastructure.plugin_loader import get_plugin_of_tool, get_plugin_requires
         plugin = get_plugin_of_tool(tool_name)
         if plugin:
-            # 插件商店：只有"安装"了该插件的设备才能使用它的工具
-            if self._enabled_plugins is None or plugin not in self._enabled_plugins:
+            # 插件商店：设置过白名单的设备，只有白名单内的插件工具才可见
+            if self._enabled_plugins is not None and plugin not in self._enabled_plugins:
                 logger.info(f"[ToolManager] 设备未安装插件「{plugin}」，隐藏工具 {tool_name} "
-                            f"(已安装: {sorted(self._enabled_plugins) if self._enabled_plugins else '无'})")
+                            f"(白名单: {sorted(self._enabled_plugins)})")
                 return False
             if not self.device_has_display and "display" in get_plugin_requires(plugin):
                 logger.info(f"[ToolManager] 设备无屏幕，隐藏工具 {tool_name}（插件「{plugin}」需 display）")

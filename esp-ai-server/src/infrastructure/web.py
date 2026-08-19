@@ -790,14 +790,14 @@ def _hot_reload_device_config(device_id: str) -> None:
             d["user_config"] = fresh_config
             if d.get("tool_manager"):
                 d["tool_manager"].user_config = fresh_config
-                # 同步设备级插件"已安装"集合与屏幕能力（热重载后立即生效）
+                # 同步设备级插件白名单与屏幕能力（热重载后立即生效）
                 tool_mgr = d["tool_manager"]
                 if getattr(fresh_config, "enabled_plugins", None):
                     tool_mgr._enabled_plugins = set(fresh_config.enabled_plugins)
                     from src.infrastructure.logging import get_logger as _gl
-                    _gl(__name__).info(f"[HotReload] 设备插件安装列表已更新: {sorted(tool_mgr._enabled_plugins)}")
+                    _gl(__name__).info(f"[HotReload] 设备插件白名单已更新: {sorted(tool_mgr._enabled_plugins)}")
                 elif getattr(tool_mgr, "_enabled_plugins", None) is not None:
-                    # 安装列表被清空 → 恢复"未安装任何插件"（插件全部不生效）
+                    # 白名单被清空 → 恢复"无限制"（所有插件启用）
                     tool_mgr._enabled_plugins = None
                 # 插件安装列表变化 → 失效工具 schema 缓存，让 LLM 下次会话看到最新工具集
                 if hasattr(tool_mgr, "invalidate_schema_cache"):

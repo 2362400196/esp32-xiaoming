@@ -36,7 +36,7 @@
               <input class="input input-inner" :type="showKey.bytedance ? 'text' : 'password'"
                 placeholder="请输入字节跳动 API Key" v-model="form.asr_api_key" />
               <button class="eye-btn" @click="showKey.bytedance = !showKey.bytedance">
-                <span class="eye-icon" :class="{ off: !showKey.bytedance }">👁</span>
+                <span class="eye-icon" :class="{ off: !showKey.bytedance }"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></span>
               </button>
             </div>
           </div>
@@ -110,7 +110,7 @@
                 <input class="input input-inner" :type="showKey.tencent ? 'text' : 'password'"
                   placeholder="请输入腾讯云 Secret Key" v-model="form.tencent_secret_key" />
                 <button class="eye-btn" @click="showKey.tencent = !showKey.tencent">
-                  <span class="eye-icon" :class="{ off: !showKey.tencent }">👁</span>
+                  <span class="eye-icon" :class="{ off: !showKey.tencent }"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></span>
                 </button>
               </div>
             </div>
@@ -129,7 +129,7 @@
               <input class="input input-inner" :type="showKey.deepseek ? 'text' : 'password'"
                 placeholder="请输入 DeepSeek API Key" v-model="form.llm_api_key" />
               <button class="eye-btn" @click="showKey.deepseek = !showKey.deepseek">
-                <span class="eye-icon" :class="{ off: !showKey.deepseek }">👁</span>
+                <span class="eye-icon" :class="{ off: !showKey.deepseek }"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></span>
               </button>
             </div>
           </div>
@@ -187,7 +187,7 @@
               <input class="input input-inner" :type="showKey.tts ? 'text' : 'password'"
                 placeholder="请输入字节跳动 API Key" v-model="form.tts_api_key" />
               <button class="eye-btn" @click="showKey.tts = !showKey.tts">
-                <span class="eye-icon" :class="{ off: !showKey.tts }">👁</span>
+                <span class="eye-icon" :class="{ off: !showKey.tts }"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></span>
               </button>
             </div>
           </div>
@@ -278,7 +278,7 @@
                   <input class="input input-inner" :type="showKey.volcAk ? 'text' : 'password'"
                     placeholder="以 AKLT 开头" v-model="form.volc_ak" />
                   <button class="eye-btn" @click="showKey.volcAk = !showKey.volcAk">
-                    <span class="eye-icon" :class="{ off: !showKey.volcAk }">👁</span>
+                    <span class="eye-icon" :class="{ off: !showKey.volcAk }"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></span>
                   </button>
                 </div>
               </div>
@@ -288,7 +288,7 @@
                   <input class="input input-inner" :type="showKey.volcSk ? 'text' : 'password'"
                     placeholder="SecretAccessKey" v-model="form.volc_sk" />
                   <button class="eye-btn" @click="showKey.volcSk = !showKey.volcSk">
-                    <span class="eye-icon" :class="{ off: !showKey.volcSk }">👁</span>
+                    <span class="eye-icon" :class="{ off: !showKey.volcSk }"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></span>
                   </button>
                 </div>
               </div>
@@ -547,7 +547,7 @@ async function load() {
       wakeup_enable_audio: cfg.wakeup?.enable_audio ?? true,
       wakeup_cache_enabled: cfg.wakeup?.cache_enabled ?? true,
       wakeup_play_enabled: cfg.wakeup?.play_enabled ?? true,
-      wakeup_audio_source: cfg.wakeup?.source ?? 'file',
+      wakeup_audio_source: cfg.wakeup?.source ?? 'tts',
       wakeup_play_on_next_round: cfg.wakeup?.play_on_next_round ?? false,
     }
     asrEngine.value = cfg.asr_provider === 'tencent' ? 'tencent' : 'bytedance'
@@ -739,7 +739,7 @@ async function save() {
     wakeup_enable_audio: form.value.wakeup_enable_audio,
     wakeup_cache_enabled: form.value.wakeup_cache_enabled,
     wakeup_play_enabled: form.value.wakeup_play_enabled,
-    wakeup_audio_source: form.value.wakeup_audio_source || 'file',
+    wakeup_audio_source: form.value.wakeup_audio_source || 'tts',
     wakeup_play_on_next_round: form.value.wakeup_play_on_next_round,
   }
   const res = await api.saveConfig(props.device.mac, body)
@@ -868,7 +868,7 @@ async function save() {
 /* 输入框 + 小眼睛 */
 .input-wrap { position: relative; }
 .input-inner { padding-right: 44px; }
-.eye-btn { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: none; background: transparent; cursor: pointer; padding: 6px; font-size: 14px; opacity: 0.45; transition: opacity 0.2s; }
+.eye-btn { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: none; background: transparent; cursor: pointer; padding: 6px; font-size: 14px; opacity: 0.45; transition: opacity 0.2s; display: flex; align-items: center; }
 .eye-btn:hover { opacity: 0.9; }
 .eye-icon.off { opacity: 0.25; }
 

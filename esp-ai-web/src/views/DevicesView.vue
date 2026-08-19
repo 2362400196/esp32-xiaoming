@@ -77,7 +77,7 @@
             <div class="screen-content" v-if="isOnline(d)">
               <img v-if="sleepGifUrl(d)" :src="sleepGifUrl(d)" alt="sleep" class="screen-gif"
                 draggable="false" @error="onGifError(d)" loading="lazy" />
-              <div v-else class="screen-emoji">💤</div>
+              <div v-else class="screen-emoji"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></div>
             </div>
 
             <!-- 离线黑屏 -->
@@ -659,6 +659,8 @@ watch(() => props.devices, () => { nextTick(updateBoardHeight) }, { deep: true }
 .screen-emoji {
   font-size: 48px;
   animation: breatheSoft 2.5s ease-in-out infinite;
+  display: flex; align-items: center; justify-content: center;
+  color: rgba(255, 255, 255, 0.85);
 }
 
 /* 离线黑屏 */

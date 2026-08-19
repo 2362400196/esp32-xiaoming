@@ -27,7 +27,7 @@
     <!-- 未选择设备 -->
     <div v-if="!currentDevice" class="empty-state glass">
       <div class="empty-inner">
-        <div class="empty-orb">🎛️</div>
+        <div class="empty-orb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></div>
         <p class="empty-title">未选择设备</p>
         <p class="empty-sub">请在上方选择一台设备开始控制</p>
       </div>
@@ -39,7 +39,7 @@
       <div class="status-row">
         <div class="status-card glass card-in">
           <div class="s-head">
-            <span class="s-icon">🔊</span>
+            <span class="s-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg></span>
             <span class="s-label">音量</span>
           </div>
           <div class="s-body">
@@ -53,14 +53,14 @@
         </div>
         <div class="status-card glass card-in" style="animation-delay:.06s">
           <div class="s-head">
-            <span class="s-icon">🧩</span>
+            <span class="s-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></span>
             <span class="s-label">已装插件</span>
           </div>
           <span class="s-value">{{ pluginCount }} 个</span>
         </div>
         <div class="status-card glass card-in" style="animation-delay:.12s">
           <div class="s-head">
-            <span class="s-icon">💡</span>
+            <span class="s-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg></span>
             <span class="s-label">亮度</span>
           </div>
           <div class="s-body">
@@ -94,7 +94,7 @@
 
           <div class="timeline" ref="timelineEl">
             <div v-if="!history.length" class="timeline-empty">
-              <div class="empty-orb small">💬</div>
+              <div class="empty-orb small"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></div>
               <p class="empty-main">还没有对话记录</p>
               <p class="empty-sub">在下方输入指令，开始与设备对话</p>
             </div>
@@ -440,7 +440,7 @@ async function onBrightnessChange() {
   border-color: rgba(255, 255, 255, 0.92);
 }
 .s-head { display: flex; align-items: center; gap: 8px; }
-.s-icon { font-size: 18px; filter: drop-shadow(0 2px 6px rgba(16, 185, 129, 0.2)); }
+.s-icon { font-size: 18px; filter: drop-shadow(0 2px 6px rgba(16, 185, 129, 0.2)); display: inline-flex; align-items: center; color: var(--mint-deep); }
 .s-label { font-size: 13px; color: var(--text-sub); font-weight: 500; }
 .s-value { font-size: 22px; font-weight: 800; color: var(--mint-deep); letter-spacing: -0.3px; }
 .s-value.s-loading { color: var(--text-dim); opacity: 0.6; }

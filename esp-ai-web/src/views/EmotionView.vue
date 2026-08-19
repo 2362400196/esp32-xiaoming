@@ -27,7 +27,7 @@
     <!-- 未选择设备 -->
     <div v-if="!currentDevice" class="empty-state glass">
       <div class="empty-inner">
-        <div class="empty-orb">🎭</div>
+        <div class="empty-orb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg></div>
         <p class="empty-title">未选择设备</p>
         <p class="empty-sub">请在上方选择一台设备</p>
       </div>
@@ -38,12 +38,12 @@
       <div class="section-card glass card-in">
         <div class="section-head">
           <div class="section-title-wrap">
-            <span class="section-ico">🎞️</span>
+            <span class="section-ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/></svg></span>
             <span class="section-title">{{ gifSectionTitle }}</span>
           </div>
           <div class="gif-head-actions">
             <span class="section-hint">点击图片替换对应情绪的 GIF</span>
-            <button class="btn-sm btn-mint" @click="openMaker">🛠️ GIF 制作器</button>
+            <button class="btn-sm btn-mint" @click="openMaker"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> GIF 制作器</button>
           </div>
         </div>
         <div class="upload-area">
@@ -64,7 +64,7 @@
       <div class="section-card glass card-in" style="animation-delay:.06s">
         <div class="section-head">
           <div class="section-title-wrap">
-            <span class="section-ico">🗂️</span>
+            <span class="section-ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
             <span class="section-title">表情包</span>
           </div>
           <div class="pack-actions">
@@ -97,7 +97,7 @@
       <div class="section-card glass card-in" style="animation-delay:.12s">
         <div class="section-head">
           <div class="section-title-wrap">
-            <span class="section-ico">⚡</span>
+            <span class="section-ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span>
             <span class="section-title">发送情绪</span>
           </div>
           <span class="section-hint">点击后设备屏幕立即切换表情</span>

@@ -3,7 +3,7 @@
     <!-- 未登录：居中登录卡 -->
     <div v-if="!loggedIn" class="auth-wrap">
       <div class="auth-card glass">
-        <div class="auth-logo"><span class="logo-dot"></span>ESP-<span class="grad-text">AI</span></div>
+        <div class="auth-logo"><span class="auth-logo-icon">🤖</span>ESP-<span class="grad-text">AI</span></div>
         <h2 class="auth-title">{{ mode === 'login' ? '欢迎回来' : '创建账号' }}</h2>
         <p class="auth-sub">{{ mode === 'login' ? '登录以管理你的智能设备' : '首个注册用户将成为管理员' }}</p>
         <input class="input" v-model="email" placeholder="邮箱 / 手机号" type="text" />
@@ -60,7 +60,7 @@
         <!-- 微信绑定 -->
         <div class="wechat-card glass card-in" style="animation-delay:0.12s">
           <div class="wechat-head" @click="wechatCollapsed = !wechatCollapsed">
-            <span class="wechat-title">💬 微信绑定</span>
+            <span class="wechat-title"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg> 微信绑定</span>
             <span class="wechat-arrow" :class="{ open: !wechatCollapsed }">▾</span>
           </div>
           <div v-if="!wechatCollapsed" class="wechat-body">
@@ -76,7 +76,7 @@
                 
               </div>
               <template v-if="wechatBoundDeviceKey">
-                <div class="wechat-bound">✅ 微信已绑定：{{ wechatBoundDeviceKey.slice(0, 16) }}...</div>
+                <div class="wechat-bound"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg> 微信已绑定：{{ wechatBoundDeviceKey.slice(0, 16) }}...</div>
                 
                 <button class="btn-sm btn-danger wechat-danger" @click="unbindWechat">解绑微信</button>
               </template>
@@ -374,24 +374,25 @@ function logout() {
 
 /* ===== 登录卡 ===== */
 .auth-wrap {
-  width: 100%; max-width: 420px; margin: 0 auto;
-  min-height: calc(100dvh - 148px);
-  display: flex; align-items: center;
+  width: 100%; max-width: 720px; margin: 0 auto;
+  min-height: calc(100dvh - 120px);
+  display: flex; align-items: center; justify-content: center;
 }
 .auth-card {
-  display: flex; flex-direction: column; gap: 16px;
-  padding: 44px 40px;
+  display: flex; flex-direction: column; gap: 18px;
+  padding: 56px 56px;
   position: relative; overflow: hidden;
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-md), var(--glass-hi);
 }
 .auth-card::before {
   content: '';
-  position: absolute; top: -60px; right: -60px;
-  width: 220px; height: 220px;
-  background: radial-gradient(circle, rgba(52, 211, 153, 0.16), transparent 70%);
-  border-radius: 50%; pointer-events: none;
+  position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  background: var(--grad-brand);
+  z-index: 1;
 }
+.auth-card .input { padding: 12px 16px; font-size: 15px; border-radius: var(--radius-md); }
+.auth-btn { padding: 13px; font-size: 15px; }
 .auth-card::after {
   content: '';
   position: absolute; bottom: -70px; left: -70px;
@@ -404,10 +405,14 @@ function logout() {
   display: flex; align-items: center; justify-content: center; gap: 10px;
   position: relative;
 }
-.logo-dot {
-  width: 14px; height: 14px; border-radius: 50%;
-  background: var(--grad-mint);
-  box-shadow: 0 0 18px rgba(16, 185, 129, 0.5);
+.auth-logo-icon {
+  font-size: 26px;
+  filter: drop-shadow(0 3px 8px rgba(16, 185, 129, 0.3));
+  animation: brandFloat 3s ease-in-out infinite;
+}
+@keyframes brandFloat {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-3px) rotate(-3deg); }
 }
 .auth-title { font-size: 22px; font-weight: 800; text-align: center; letter-spacing: -0.2px; position: relative; }
 .auth-sub { font-size: 13px; color: var(--text-sub); text-align: center; margin-bottom: 4px; position: relative; }
@@ -515,7 +520,7 @@ function logout() {
   transition: background .2s var(--ease);
 }
 .wechat-head:hover { background: var(--mint-softer); }
-.wechat-title { font-size: 14px; font-weight: 700; }
+.wechat-title { font-size: 14px; font-weight: 700; display: inline-flex; align-items: center; gap: 7px; color: var(--mint-deep); }
 .wechat-arrow { font-size: 14px; color: var(--text-dim); transition: transform .2s var(--ease); }
 .wechat-arrow.open { transform: rotate(180deg); }
 .wechat-body {
@@ -536,6 +541,7 @@ function logout() {
   border: 1px solid var(--mint-border);
   padding: 8px 12px; border-radius: 10px;
   word-break: break-all;
+  display: flex; align-items: center; gap: 6px;
 }
 .wechat-danger { align-self: flex-start; }
 .wechat-qr { display: flex; flex-direction: column; align-items: center; gap: 10px; }

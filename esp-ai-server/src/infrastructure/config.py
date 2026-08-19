@@ -146,7 +146,7 @@ class WakeupConfig(BaseModel):
     enable_audio: bool = Field(default=True)
     audio_cache_enabled: bool = Field(default=True)
     audio_play_enabled: bool = Field(default=True)
-    audio_source: str = Field(default="file")
+    audio_source: str = Field(default="tts")
     play_on_next_round: bool = Field(default=False)
 
 

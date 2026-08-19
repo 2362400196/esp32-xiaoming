@@ -35,21 +35,31 @@ security_scheme = HTTPBearer(auto_error=False)
 ALGORITHM = "HS256"
 
 
+_TEMP_SECRET: Optional[str] = None
+
+
 def _get_secret() -> str:
-    """获取 JWT 签名密钥"""
+    """获取 JWT 签名密钥
+
+    注意：fallback 临时密钥必须缓存（模块级变量），否则每次签发/校验都会生成
+    不同的随机密钥，导致登录签发的 token 在下一个请求校验时直接 401。
+    """
+    global _TEMP_SECRET
     settings = get_settings()
     secret = settings.jwt_secret
     if not secret:
         # 开发环境 fallback：从 admin_api_key 派生
         secret = settings.auth.admin_api_key
         if not secret:
-            # 既未配置 jwt_secret 也未配置 admin_api_key：生成随机临时密钥
+            # 既未配置 jwt_secret 也未配置 admin_api_key：进程内缓存随机临时密钥
             # 避免硬编码 fallback 被攻击者利用伪造任意身份 token
-            secret = secrets.token_hex(32)
-            logger.warning(
-                "未配置 JWT_SECRET 或 ADMIN_API_KEY，已生成随机临时 JWT 签名密钥。"
-                "请在环境变量中配置 JWT_SECRET 以保证重启后 token 依然有效且不被伪造。"
-            )
+            if _TEMP_SECRET is None:
+                _TEMP_SECRET = secrets.token_hex(32)
+                logger.warning(
+                    "未配置 JWT_SECRET 或 ADMIN_API_KEY，已生成进程内临时 JWT 签名密钥。"
+                    "请在环境变量中配置 JWT_SECRET 以保证重启后 token 依然有效且不被伪造。"
+                )
+            secret = _TEMP_SECRET
     return secret
 
 

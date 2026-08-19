@@ -27,7 +27,7 @@
     <!-- 未选择设备 -->
     <div v-if="!currentDevice" class="empty-state glass">
       <div class="empty-inner">
-        <div class="empty-orb">🛠️</div>
+        <div class="empty-orb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></div>
         <p class="empty-title">未选择设备</p>
         <p class="empty-sub">请在上方选择一台设备</p>
       </div>
@@ -37,7 +37,7 @@
     <div v-else class="section-card glass card-in">
       <div class="section-head">
         <div class="section-title-wrap">
-          <span class="section-ico">🧩</span>
+          <span class="section-ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></span>
           <span class="section-title">技能列表</span>
           <span class="section-count" v-if="skills.length">共 {{ skills.length }} 个</span>
         </div>
