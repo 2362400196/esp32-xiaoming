@@ -236,73 +236,87 @@ async def lifespan(app: FastAPI):
 
             # 使用完整 LLM（含工具）回复微信消息
             try:
-                llm_raw = getattr(app.state, 'llm_gateway', None)
-                if not llm_raw or not hasattr(llm_raw, 'stream_with_tools') or not text:
-                    logger.warning(f"[WeChat] LLM 网关不可用，跳过工具回复")
-                    return
-
-                from src.use_cases.tools_system import PerUserToolManager
-                shared_tm = getattr(app.state, 'shared_tool_manager', None)
-                if not shared_tm:
-                    logger.warning(f"[WeChat] 工具管理器不可用")
-                    return
-
-                # 创建带工具的 LLM 网关（使用设备真实 channel）
-                from src.interfaces.llm_gateways import OpenAILLMGateway
+                # 优先复用设备 session 的 llm_processor（与语音对话使用相同配置）
+                from src.interfaces.llm_gateways import OpenAILLMGateway, create_llm_gateway
                 from src.infrastructure.web import get_device_registry
+                from src.use_cases.tools_system import PerUserToolManager
                 settings = get_settings()
 
-                # 从注册表获取设备的 tool_manager 和 channel
                 registry = get_device_registry()
                 device_tool_mgr = None
                 device_channel = None
+                device_llm = None
                 if registry:
                     entry = registry.resolve(binding.device_key)
                     if entry and isinstance(entry, dict):
                         device_channel = entry.get('channel')
                         device_tool_mgr = entry.get('tool_manager')
+                        device_llm = entry.get('session', None)
+                        if device_llm:
+                            device_llm = getattr(device_llm, 'llm_processor', None)
 
-                if not device_tool_mgr:
-                    # 没有设备 session 时，用共享工具管理器（不含 MCP）
-                    shared_tm.ensure_discovered()
-                    device_tool_mgr = PerUserToolManager(shared=shared_tm, channel=device_channel)
-                    logger.info(f"[WeChat] 使用共享工具管理器（无 MCP），channel={device_channel}")
+                if device_llm:
+                    # 复用设备 session 的 llm_processor（配置完全一致）
+                    llm_with_tools = device_llm
+                    logger.info(f"[WeChat] 复用设备 session 的 llm_processor（含 MCP 工具）")
                 else:
-                    logger.info(f"[WeChat] 使用设备 session 的 tool_manager（含 MCP），channel={device_tool_mgr.channel}")
-                # 从数据库加载设备的系统提示词（通过 to_thread 避免阻塞事件循环）
-                wechat_prompt = ""
-                device_model = None
-                try:
-                    import asyncio as _asyncio
-                    from src.infrastructure.db.compat.sync_session import get_sync_session
-                    from src.infrastructure.db.models.device import DeviceModel
-                    from sqlalchemy import select
+                    # 设备不在线时，创建独立的 LLM 网关
+                    shared_tm = getattr(app.state, 'shared_tool_manager', None)
+                    if not shared_tm:
+                        logger.warning(f"[WeChat] 工具管理器不可用")
+                        return
 
-                    def _load_device_model():
-                        with get_sync_session() as sess:
-                            r = sess.execute(select(DeviceModel).where(
-                                DeviceModel.device_key == binding.device_key))
-                            return r.scalar_one_or_none()
+                    if not device_tool_mgr:
+                        shared_tm.ensure_discovered()
+                        device_tool_mgr = PerUserToolManager(shared=shared_tm, channel=device_channel)
+                        logger.info(f"[WeChat] 使用共享工具管理器（无 MCP），channel={device_channel}")
+                    else:
+                        logger.info(f"[WeChat] 使用设备 session 的 tool_manager（含 MCP），channel={device_tool_mgr.channel}")
 
-                    device_model = await _asyncio.to_thread(_load_device_model)
-                    if device_model and device_model.llm_system_prompt:
-                        wechat_prompt = device_model.llm_system_prompt
-                except Exception as db_err:
-                    logger.warning(f"[WeChat] 加载设备提示词失败: {db_err}")
-                if not wechat_prompt:
-                    wechat_prompt = settings.llm.system_prompt or "你是一个智能语音助手。"
-                # 追加微信聊天风格指示
-                wechat_prompt += " 用户通过微信和你聊天，请用自然口语化的微信聊天风格回复，控制在200字以内。可以适当使用emoji表情符号让回复更生动亲切。不要使用[e:情绪]标签。"
+                    # 从数据库加载设备 LLM 配置
+                    wechat_prompt = ""
+                    llm_api_key = settings.llm.api_key
+                    llm_base_url = settings.llm.base_url
+                    llm_model = settings.llm.model
+                    device_model = None
+                    try:
+                        import asyncio as _asyncio
+                        from src.infrastructure.db.compat.sync_session import get_sync_session
+                        from src.infrastructure.db.models.device import DeviceModel
+                        from sqlalchemy import select
 
-                llm_with_tools = OpenAILLMGateway(
-                    config={
-                        "api_key": device_model.llm_api_key if device_model and getattr(device_model, "llm_api_key", None) else settings.llm.api_key,
-                        "base_url": device_model.llm_base_url if device_model and getattr(device_model, "llm_base_url", None) else settings.llm.base_url,
-                        "model": device_model.llm_model if device_model and getattr(device_model, "llm_model", None) else settings.llm.model,
-                        "system_prompt": wechat_prompt,
-                    },
-                    tool_manager=device_tool_mgr,
-                )
+                        def _load_device_model():
+                            with get_sync_session() as sess:
+                                r = sess.execute(select(DeviceModel).where(
+                                    DeviceModel.device_key == binding.device_key))
+                                return r.scalar_one_or_none()
+
+                        device_model = await _asyncio.to_thread(_load_device_model)
+                        if device_model:
+                            if device_model.llm_api_key:
+                                llm_api_key = device_model.llm_api_key
+                            if device_model.llm_base_url:
+                                llm_base_url = device_model.llm_base_url
+                            if device_model.llm_model:
+                                llm_model = device_model.llm_model
+                            if device_model.llm_system_prompt:
+                                wechat_prompt = device_model.llm_system_prompt
+                    except Exception as db_err:
+                        logger.warning(f"[WeChat] 加载设备配置失败: {db_err}")
+
+                    if not wechat_prompt:
+                        wechat_prompt = settings.llm.system_prompt or "你是一个智能语音助手。"
+                    wechat_prompt += " 用户通过微信和你聊天，请用自然口语化的微信聊天风格回复，控制在200字以内。可以适当使用emoji表情符号让回复更生动亲切。不要使用[e:情绪]标签。"
+
+                    llm_with_tools = OpenAILLMGateway(
+                        config={
+                            "api_key": llm_api_key,
+                            "base_url": llm_base_url,
+                            "model": llm_model,
+                            "system_prompt": wechat_prompt,
+                        },
+                        tool_manager=device_tool_mgr,
+                    )
 
                 # 语音模式开关检测（必须在 LLM 调用之前）
                 if not hasattr(bot_.state, 'voice_mode'):
@@ -338,7 +352,7 @@ async def lifespan(app: FastAPI):
                     if chunk:
                         full_reply += chunk
 
-                if full_reply:
+                if full_reply and not full_reply.startswith("LLM not configured"):
                     import re
                     clean_reply = re.sub(r'\[e:[^\]]*\]', '', full_reply).strip() or full_reply
                     # 语音模式下加标识
