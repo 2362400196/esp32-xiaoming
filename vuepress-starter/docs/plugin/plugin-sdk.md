@@ -23,6 +23,13 @@
 | LTM 记忆 | `get_ltm_service()` / `get_default_ltm_service()` | 访问长期记忆服务（注入优先） |
 | 仓储工厂 | `get_diary_repository()` / `get_device_repository()` | 延迟加载数据库仓储，避免插件启动即依赖 DB |
 | 技能目录 | `skill_catalog_text()` | 渲染当前设备可用技能目录文本 |
+| **LLM 对话** | `llm_chat()` / `llm_generate()` | 调用大模型进行对话或文本生成 |
+| **TTS 合成** | `tts_synthesize()` | 文本转语音，返回 MP3 音频数据 |
+| **设备状态** | `device_is_online()` / `device_get_info()` | 查询设备在线状态与基本信息 |
+| **文件持久化** | `plugin_data_read()` / `plugin_data_write()` / `plugin_data_list()` / `plugin_data_delete()` | 读写插件专属数据目录 |
+| **键值存储** | `kv_get()` / `kv_set()` / `kv_delete()` / `kv_list()` | 插件专属的持久化键值存储 |
+| **用户画像** | `get_user_profile_summary()` | 获取当前设备用户的画像摘要 |
+| **工具函数** | `generate_uuid()` / `current_timestamp()` / `json_dumps()` / `json_loads()` | 通用零依赖工具函数 |
 
 ---
 
@@ -318,53 +325,301 @@ def list_skills(tool_manager=None) -> str:
 
 ---
 
-## 九、最佳实践与迁移清单
+## 九、LLM 对话（权限 `llm`）
 
-### 新插件写法模板
+插件可以调用大模型进行文本生成、智能分析、主动对话等操作。SDK 提供两种调用方式：
+
+### `llm_chat(messages, system_prompt=None, tool_manager=None) -> str`
+
+发送消息列表给 LLM，返回完整回复文本。`messages` 格式与 OpenAI API 一致。
 
 ```python
-from src.use_cases.tools_system import tool, StopPipeline
-from src.use_cases._plugin_helpers import (
-    get_device_key,                 # 设备标识（查表用）
-    send_device_command,            # 一次性指令
-    request_device_result,          # 需要回执的指令
-    get_plugin_config_or_env,       # 配置读取
-    http_get_json,                  # 外部 API
-)
+from src.use_cases._plugin_helpers import llm_chat
 
-@tool(cache=False)
-async def example(value: str = "", tool_manager=None) -> str:
-    """示例工具。"""
-    key = get_plugin_config_or_env(tool_manager, "example", "api_key",
-                                   env_var="EXAMPLE_API_KEY", default="")
-    data, err = await http_get_json("https://api.example.com/v1", params={"q": value})
-    if err:
-        return f"请求失败: {err}"
-    err = await send_device_command(tool_manager, "show_card", json.dumps(data))
-    if err:
-        return "卡片显示失败"
-    return "操作完成"
+@tool()
+async def analyze_sentiment(text: str, tool_manager=None) -> str:
+    """分析用户输入的情感倾向。"""
+    messages = [
+        {"role": "system", "content": "你是一个情感分析助手。请用一句话分析用户的情感倾向（积极/消极/中性）。"},
+        {"role": "user", "content": text},
+    ]
+    result = await llm_chat(messages, tool_manager=tool_manager)
+    return f"情感分析结果：{result}"
 ```
 
-### 旧代码迁移对照
+### `llm_generate(prompt, system_prompt=None, tool_manager=None) -> str`
 
-| 旧写法（每个插件各写一份） | 新写法（统一 SDK） |
-|---------------------------|---------------------|
-| `tool_manager.channel.send_json({"type": "instruct", "command_id": "...", "data": "..."})` | `await send_device_command(tool_manager, "...", "...")` |
-| `if not tool_manager or not tool_manager.channel: return "设备未连接"` + `try/except` | `err = await send_device_command(...)`；`err` 非空即失败原因 |
-| 手写 future + `asyncio.wait_for` 等设备回复 | `request_device_result(...)`，返回 `(result, status, detail)` |
-| 每个插件写 `_get_xxx_key()`（配置→环境变量回退） | `get_plugin_config_or_env(...)` |
-| `httpx.AsyncClient(timeout=...)` + `try/except` | `http_get_json(...)` 返回 `(data, error)` |
-| 模块顶层 `import` 数据库仓储 | 工具内 `get_diary_repository()` / `get_device_repository()` |
-| 自己拼技能列表文本 | `skill_catalog_text(tool_manager)` |
+更简洁的单轮文本生成，直接传入提示文本即可：
 
-### 注意事项
+```python
+from src.use_cases._plugin_helpers import llm_generate
 
-- **下划线模块**：`_plugin_helpers.py` 不会被自动注册为工具，可放心 import
-- **future 冲突**：同一 `future_attr` 同时只能有一个请求在等待，不同类型用不同属性名
-- **延迟导入**：仓储工厂在工具函数内调用，不要在模块顶层
-- **成功/失败约定**：`send_device_command` 返回 `None`=成功、字符串=失败原因；HTTP 函数返回 `(result, None)` / `(None, error)`；`request_device_result` 用 `status` 判断
-- **中文可播报**：错误信息返回中文文本，TTS 直接播给用户
+@tool()
+async def summarize(text: str, tool_manager=None) -> str:
+    """总结一段文本的核心内容。"""
+    summary = await llm_generate(
+        f"请用一句话总结以下内容：{text}",
+        tool_manager=tool_manager,
+    )
+    return f"总结：{summary}"
+```
+
+::: tip 适用场景
+- **文本分析**：情感分析、意图分类、关键词提取
+- **智能回复**：生成个性化回复文案
+- **内容生成**：写诗、写故事、生成报告
+- **数据提取**：从非结构化文本中提取结构化信息
+:::
+
+---
+
+## 十、TTS 语音合成（权限 `tts`）
+
+将文本转换为 MP3 格式的音频数据，插件可以获取音频后通过设备指令发送给设备播放。
+
+### `tts_synthesize(text, voice=None, tool_manager=None) -> bytes`
+
+```python
+from src.use_cases._plugin_helpers import tts_synthesize, send_device_command
+
+@tool()
+async def speak_text(text: str, tool_manager=None) -> str:
+    """让设备用语音播报一段文本。"""
+    audio_bytes = await tts_synthesize(text, tool_manager=tool_manager)
+    if not audio_bytes:
+        return "语音合成失败"
+    # 发送给设备播放（具体指令取决于设备实现）
+    err = await send_device_command(tool_manager, "play_audio", audio_bytes)
+    if err:
+        return f"播报失败: {err}"
+    return "正在播报"
+```
+
+`voice` 参数可选，不传时使用全局配置的音色。
+
+---
+
+## 十一、设备状态查询（权限 `device`）
+
+查询设备的在线状态和基本信息，无需下发指令即可获取设备信息。
+
+### `device_is_online(device_key="", tool_manager=None) -> bool`
+
+检查设备是否在线。不传 `device_key` 时自动使用当前调用上下文绑定的设备：
+
+```python
+from src.use_cases._plugin_helpers import device_is_online
+
+@tool()
+async def check_device(tool_manager=None) -> str:
+    """检查当前设备是否在线。"""
+    if device_is_online(tool_manager=tool_manager):
+        return "设备在线"
+    return "设备离线"
+```
+
+### `device_get_info(device_key="", tool_manager=None) -> dict`
+
+获取设备详细信息，包括固件版本、MAC 地址、注册时间、OTA 状态等：
+
+```python
+from src.use_cases._plugin_helpers import device_get_info
+
+@tool()
+async def get_device_status(tool_manager=None) -> str:
+    """获取设备当前状态信息。"""
+    info = await device_get_info(tool_manager=tool_manager)
+    if not info:
+        return "设备不在线或未注册"
+    fw = info.get("firmware_version", "未知")
+    mac = info.get("mac", "未知")
+    online = "在线" if device_is_online(tool_manager=tool_manager) else "离线"
+    return f"设备 {mac}，固件版本 {fw}，状态：{online}"
+```
+
+返回的 dict 包含字段：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `device_key` | str | 设备标识 |
+| `mac` | str | MAC 地址 |
+| `firmware_version` | str | 固件版本 |
+| `register_time` | float | 注册时间戳 |
+| `ota_updating` | bool | 是否正在 OTA 升级 |
+| `ota_progress` | float | OTA 升级进度（0~100） |
+
+---
+
+## 十二、插件数据持久化（权限 `file_read` / `file_write`）
+
+每个插件拥有**独立的文件系统目录**，可以读写自己的数据文件。路径自动隔离，插件之间互不可见，且带有**路径穿越防护**。
+
+### `plugin_data_read(path, tool_manager=None) -> str | None`
+
+读取插件数据目录下的文件，文件不存在返回 `None`：
+
+```python
+from src.use_cases._plugin_helpers import plugin_data_read
+
+# 读取配置文件
+config_text = plugin_data_read("config.json", tool_manager=tool_manager)
+if config_text is None:
+    config_text = "{}"
+```
+
+### `plugin_data_write(path, content, tool_manager=None) -> None`
+
+写入文件到插件数据目录，自动创建中间目录：
+
+```python
+from src.use_cases._plugin_helpers import plugin_data_write
+
+# 保存缓存数据
+plugin_data_write("cache/last_result.json", json.dumps(result), tool_manager=tool_manager)
+```
+
+### `plugin_data_list(path="", tool_manager=None) -> list`
+
+列出目录下的文件和子目录，返回每项的 `name` / `is_dir` / `size` / `mtime`：
+
+```python
+from src.use_cases._plugin_helpers import plugin_data_list
+
+files = plugin_data_list(tool_manager=tool_manager)
+for f in files:
+    if not f["is_dir"]:
+        print(f"  {f['name']} ({f['size']} bytes)")
+```
+
+### `plugin_data_delete(path, tool_manager=None) -> bool`
+
+删除文件或目录（含子目录递归删除），返回是否删除成功：
+
+```python
+from src.use_cases._plugin_helpers import plugin_data_delete
+
+if plugin_data_delete("old_cache.json", tool_manager=tool_manager):
+    print("已删除旧缓存")
+```
+
+数据文件存储在 `data/plugins/data/<插件id>/` 目录下，重启服务后仍然保留。
+
+---
+
+## 十三、键值存储（权限 `kv`）
+
+插件专属的**持久化键值存储**，适合保存配置、状态、缓存等简单数据。无需处理文件路径，开箱即用。
+
+### `kv_get(key, default=None, tool_manager=None) -> Any`
+
+读取键值，键不存在时返回 `default`：
+
+```python
+from src.use_cases._plugin_helpers import kv_get, kv_set
+
+# 读取上次运行的时间戳
+last_run = kv_get("last_run_time", default=0, tool_manager=tool_manager)
+```
+
+### `kv_set(key, value, tool_manager=None) -> None`
+
+写入键值，`value` 必须是 JSON 可序列化的类型：
+
+```python
+# 保存用户设置
+kv_set("user_name", "小明", tool_manager=tool_manager)
+kv_set("volume", 80, tool_manager=tool_manager)
+kv_set("tags", ["音乐", "新闻", "天气"], tool_manager=tool_manager)
+```
+
+### `kv_delete(key, tool_manager=None) -> bool`
+
+删除键值，返回是否删除成功：
+
+```python
+if kv_delete("temp_data", tool_manager=tool_manager):
+    print("临时数据已清除")
+```
+
+### `kv_list(prefix="", tool_manager=None) -> list`
+
+列出所有键值（可按前缀过滤），每项包含 `key` 和 `value`：
+
+```python
+all_data = kv_list(tool_manager=tool_manager)
+# 只列出 cache_ 开头的键
+cache_data = kv_list(prefix="cache_", tool_manager=tool_manager)
+```
+
+数据存储在 `data/plugins/kv/<插件id>.json` 文件中，重启服务后保留。
+
+---
+
+## 十四、用户画像（权限 `db`）
+
+获取当前设备用户的画像摘要，用于了解用户偏好、姓名、兴趣等信息，实现个性化服务。
+
+### `get_user_profile_summary(device_key="", tool_manager=None) -> str`
+
+```python
+from src.use_cases._plugin_helpers import get_user_profile_summary
+
+@tool()
+async def greet_user(tool_manager=None) -> str:
+    """个性化问候用户。"""
+    profile = await get_user_profile_summary(tool_manager=tool_manager)
+    if profile == "暂无用户信息":
+        return "你好！我是你的智能助手。"
+    return f"根据你的信息，{profile}，有什么我可以帮你的吗？"
+```
+
+返回的摘要文本包含：名字、职业、家人、喜欢/不喜欢的事物、正在学习的内容、最近关心的事、最近情绪等。
+
+---
+
+## 十五、通用工具函数（无需权限）
+
+纯本地执行的工具函数，不涉及 RPC 通信，零开销。
+
+### `generate_uuid() -> str`
+
+生成 UUID v4 字符串：
+
+```python
+from src.use_cases._plugin_helpers import generate_uuid
+
+request_id = generate_uuid()
+```
+
+### `current_timestamp() -> float`
+
+获取当前 Unix 时间戳（秒）：
+
+```python
+from src.use_cases._plugin_helpers import current_timestamp
+
+now = current_timestamp()
+```
+
+### `json_dumps(obj, indent=None) -> str`
+
+JSON 序列化（支持中文，自动 `ensure_ascii=False`）：
+
+```python
+from src.use_cases._plugin_helpers import json_dumps
+
+text = json_dumps({"name": "小明", "age": 8}, indent=2)
+```
+
+### `json_loads(s) -> Any`
+
+JSON 反序列化：
+
+```python
+from src.use_cases._plugin_helpers import json_loads
+
+data = json_loads('{"name": "小明"}')
+```
 
 ## 参考文件
 

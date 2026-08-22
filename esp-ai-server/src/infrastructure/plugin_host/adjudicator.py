@@ -40,6 +40,21 @@ _OP_PERMS: dict[str, str] = {
     "device_config_get": "db",
     "device_config_update_partial": "db",
     "env_read": "env_read",
+    # 新增能力
+    "llm_chat": "llm",
+    "llm_generate": "llm",
+    "tts_synthesize": "tts",
+    "device_is_online": "device",
+    "device_get_info": "device",
+    "plugin_data_read": "file_read",
+    "plugin_data_write": "file_write",
+    "plugin_data_list": "file_read",
+    "plugin_data_delete": "file_write",
+    "kv_get": "kv",
+    "kv_set": "kv",
+    "kv_delete": "kv",
+    "kv_list": "kv",
+    "get_user_profile_summary": "db",
 }
 
 # 无需显式权限的只读 op（设备 key 解析 / 技能目录 / 插件配置）
@@ -51,7 +66,7 @@ _NO_PERM_OPS = frozenset({
 # 内置插件默认权限（内置插件仍可放宽，但已声明为准）
 BUILTIN_DEFAULT_PERMS = frozenset({
     "network", "device", "ltm", "db", "file_read", "file_write",
-    "subprocess", "exec", "env_read",
+    "subprocess", "exec", "env_read", "llm", "tts", "kv",
 })
 
 
@@ -465,6 +480,115 @@ class Adjudicator:
         if message:
             add_log(self.plugin_id, level, message)
         return None
+
+    # ═════════════════════════════════════════════════════════
+    # LLM 对话
+    # ═════════════════════════════════════════════════════════
+
+    async def _op_llm_chat(self, params, ctx) -> str:
+        from src.use_cases._plugin_helpers import llm_chat
+        return await llm_chat(
+            messages=params.get("messages", []),
+            system_prompt=params.get("system_prompt"),
+            tool_manager=ctx.tool_manager,
+        )
+
+    async def _op_llm_generate(self, params, ctx) -> str:
+        from src.use_cases._plugin_helpers import llm_generate
+        return await llm_generate(
+            prompt=params.get("prompt", ""),
+            system_prompt=params.get("system_prompt"),
+            tool_manager=ctx.tool_manager,
+        )
+
+    # ═════════════════════════════════════════════════════════
+    # TTS 语音合成
+    # ═════════════════════════════════════════════════════════
+
+    async def _op_tts_synthesize(self, params, ctx) -> str | None:
+        from src.use_cases._plugin_helpers import tts_synthesize
+        import base64
+        audio_bytes = await tts_synthesize(
+            text=params.get("text", ""),
+            voice=params.get("voice"),
+            tool_manager=ctx.tool_manager,
+        )
+        if audio_bytes:
+            return base64.b64encode(audio_bytes).decode("ascii")
+        return None
+
+    # ═════════════════════════════════════════════════════════
+    # 设备状态
+    # ═════════════════════════════════════════════════════════
+
+    async def _op_device_is_online(self, params, ctx) -> bool:
+        from src.use_cases._plugin_helpers import device_is_online
+        device_key = params.get("device_key") or ctx.device_key or ""
+        return device_is_online(device_key=device_key, tool_manager=ctx.tool_manager)
+
+    async def _op_device_get_info(self, params, ctx) -> dict:
+        from src.use_cases._plugin_helpers import device_get_info
+        device_key = params.get("device_key") or ctx.device_key or ""
+        self._check_device_scope(device_key, ctx, "device_get_info")
+        return await device_get_info(device_key=device_key, tool_manager=ctx.tool_manager)
+
+    # ═════════════════════════════════════════════════════════
+    # 插件数据持久化
+    # ═════════════════════════════════════════════════════════
+
+    async def _op_plugin_data_read(self, params, ctx) -> str | None:
+        from src.use_cases._plugin_helpers import plugin_data_read
+        return plugin_data_read(path=params.get("path", ""), tool_manager=ctx.tool_manager)
+
+    async def _op_plugin_data_write(self, params, ctx) -> None:
+        from src.use_cases._plugin_helpers import plugin_data_write
+        plugin_data_write(
+            path=params.get("path", ""),
+            content=params.get("content", ""),
+            tool_manager=ctx.tool_manager,
+        )
+
+    async def _op_plugin_data_list(self, params, ctx) -> list:
+        from src.use_cases._plugin_helpers import plugin_data_list
+        return plugin_data_list(path=params.get("path", ""), tool_manager=ctx.tool_manager)
+
+    async def _op_plugin_data_delete(self, params, ctx) -> bool:
+        from src.use_cases._plugin_helpers import plugin_data_delete
+        return plugin_data_delete(path=params.get("path", ""), tool_manager=ctx.tool_manager)
+
+    # ═════════════════════════════════════════════════════════
+    # 键值存储
+    # ═════════════════════════════════════════════════════════
+
+    async def _op_kv_get(self, params, ctx) -> Any:
+        from src.use_cases._plugin_helpers import kv_get
+        return kv_get(
+            key=params.get("key", ""),
+            default=params.get("default"),
+            tool_manager=ctx.tool_manager,
+        )
+
+    async def _op_kv_set(self, params, ctx) -> None:
+        from src.use_cases._plugin_helpers import kv_set
+        kv_set(key=params.get("key", ""), value=params.get("value"), tool_manager=ctx.tool_manager)
+
+    async def _op_kv_delete(self, params, ctx) -> bool:
+        from src.use_cases._plugin_helpers import kv_delete
+        return kv_delete(key=params.get("key", ""), tool_manager=ctx.tool_manager)
+
+    async def _op_kv_list(self, params, ctx) -> list:
+        from src.use_cases._plugin_helpers import kv_list
+        return kv_list(prefix=params.get("prefix", ""), tool_manager=ctx.tool_manager)
+
+    # ═════════════════════════════════════════════════════════
+    # 用户画像
+    # ═════════════════════════════════════════════════════════
+
+    async def _op_get_user_profile_summary(self, params, ctx) -> str:
+        from src.use_cases._plugin_helpers import get_user_profile_summary
+        device_key = params.get("device_key") or ctx.device_key or ""
+        self._check_device_scope(device_key, ctx, "user_profile")
+        return await get_user_profile_summary(device_key=device_key, tool_manager=ctx.tool_manager)
 
     # ── 设备作用域检查 ──────────────────────────────────────
 

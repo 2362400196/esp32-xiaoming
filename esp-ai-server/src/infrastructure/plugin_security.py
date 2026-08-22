@@ -12,14 +12,17 @@
 
 权限模型（manifest.permissions 取值）：
     - network    出站网络访问（SDK http_request / http_get_json / 直接 httpx/requests/socket）
-    - device     设备指令下发（SDK send_device_command / send_instruct / request_device_result）
+    - device     设备指令下发（SDK send_device_command / send_instruct / request_device_result / device_is_online / device_get_info）
     - ltm        长期记忆存取（SDK get_ltm_service）
-    - file_read  读文件
-    - file_write 写文件
+    - file_read  读文件（SDK plugin_data_read / plugin_data_list）
+    - file_write 写文件（SDK plugin_data_write / plugin_data_delete）
     - subprocess 子进程执行
     - exec       动态代码执行（eval/exec/compile）
-    - db         数据库访问（sqlite3/sqlalchemy 等）
+    - db         数据库访问（sqlite3/sqlalchemy 等，SDK get_user_profile_summary）
     - env_read   读取环境变量
+    - llm        LLM 对话（SDK llm_chat / llm_generate）
+    - tts        TTS 语音合成（SDK tts_synthesize）
+    - kv         键值存储（SDK kv_get / kv_set / kv_delete / kv_list）
 
 内置插件必须声明其 SDK 能力（network/device/ltm），官方插件仓库同规则。
 """
@@ -48,6 +51,13 @@ _SDK_FUNCTIONS = frozenset({
     "http_request", "http_get_json", "get_ltm_service", "get_default_ltm_service",
     "get_diary_repository", "get_device_repository", "skill_catalog_text",
     "get_device_key", "resolve_device_key", "mask_secret",
+    "llm_chat", "llm_generate",
+    "tts_synthesize",
+    "device_is_online", "device_get_info",
+    "plugin_data_read", "plugin_data_write", "plugin_data_list", "plugin_data_delete",
+    "kv_get", "kv_set", "kv_delete", "kv_list",
+    "get_user_profile_summary",
+    "generate_uuid", "current_timestamp", "json_dumps", "json_loads",
 })
 
 # 危险调用前缀（完整属性名）→ 所需权限。

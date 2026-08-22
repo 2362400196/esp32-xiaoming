@@ -350,6 +350,130 @@ def plugin_log(message: str, level: str = "info") -> None:
         pass
 
 
+# ════════════════════════════════════════════════════════════
+# LLM 对话
+# ════════════════════════════════════════════════════════════
+
+
+async def llm_chat(messages: list, system_prompt: str | None = None, tool_manager=None) -> str:
+    result = await client.send_async("llm_chat", {
+        "messages": messages, "system_prompt": system_prompt,
+    })
+    return result or ""
+
+
+async def llm_generate(prompt: str, system_prompt: str | None = None, tool_manager=None) -> str:
+    result = await client.send_async("llm_generate", {
+        "prompt": prompt, "system_prompt": system_prompt,
+    })
+    return result or ""
+
+
+# ════════════════════════════════════════════════════════════
+# TTS 语音合成
+# ════════════════════════════════════════════════════════════
+
+
+async def tts_synthesize(text: str, voice: str | None = None, tool_manager=None) -> bytes:
+    import base64
+    result = await client.send_async("tts_synthesize", {
+        "text": text, "voice": voice,
+    })
+    if result:
+        return base64.b64decode(result)
+    return b""
+
+
+# ════════════════════════════════════════════════════════════
+# 设备状态
+# ════════════════════════════════════════════════════════════
+
+
+def device_is_online(device_key: str = "", tool_manager=None) -> bool:
+    result = client.send_sync("device_is_online", {"device_key": device_key})
+    return bool(result)
+
+
+async def device_get_info(device_key: str = "", tool_manager=None) -> dict:
+    result = await client.send_async("device_get_info", {"device_key": device_key})
+    return result or {}
+
+
+# ════════════════════════════════════════════════════════════
+# 插件数据持久化
+# ════════════════════════════════════════════════════════════
+
+
+def plugin_data_read(path: str, tool_manager=None) -> str | None:
+    return client.send_sync("plugin_data_read", {"path": path})
+
+
+def plugin_data_write(path: str, content: str, tool_manager=None) -> None:
+    client.send_sync("plugin_data_write", {"path": path, "content": content})
+
+
+def plugin_data_list(path: str = "", tool_manager=None) -> list:
+    return client.send_sync("plugin_data_list", {"path": path}) or []
+
+
+def plugin_data_delete(path: str, tool_manager=None) -> bool:
+    return bool(client.send_sync("plugin_data_delete", {"path": path}))
+
+
+# ════════════════════════════════════════════════════════════
+# 键值存储
+# ════════════════════════════════════════════════════════════
+
+
+def kv_get(key: str, default: Any = None, tool_manager=None) -> Any:
+    return client.send_sync("kv_get", {"key": key, "default": default})
+
+
+def kv_set(key: str, value: Any, tool_manager=None) -> None:
+    client.send_sync("kv_set", {"key": key, "value": value})
+
+
+def kv_delete(key: str, tool_manager=None) -> bool:
+    return bool(client.send_sync("kv_delete", {"key": key}))
+
+
+def kv_list(prefix: str = "", tool_manager=None) -> list:
+    return client.send_sync("kv_list", {"prefix": prefix}) or []
+
+
+# ════════════════════════════════════════════════════════════
+# 用户画像
+# ════════════════════════════════════════════════════════════
+
+
+async def get_user_profile_summary(device_key: str = "", tool_manager=None) -> str:
+    result = await client.send_async("get_user_profile_summary", {"device_key": device_key})
+    return result or "暂无用户信息"
+
+
+# ════════════════════════════════════════════════════════════
+# 通用工具函数（纯本地实现，无需 RPC）
+# ════════════════════════════════════════════════════════════
+
+
+def generate_uuid() -> str:
+    import uuid
+    return str(uuid.uuid4())
+
+
+def current_timestamp() -> float:
+    import time
+    return time.time()
+
+
+def json_dumps(obj: Any, indent: int | None = None) -> str:
+    return _json.dumps(obj, ensure_ascii=False, indent=indent)
+
+
+def json_loads(s: str) -> Any:
+    return _json.loads(s)
+
+
 def build_helpers_shim() -> types.ModuleType:
     mod = types.ModuleType("src.use_cases._plugin_helpers")
     mod.__dict__.update({
@@ -371,6 +495,25 @@ def build_helpers_shim() -> types.ModuleType:
         "mask_secret": mask_secret,
         "is_secret_key": is_secret_key,
         "require_permission": require_permission,
+        # 新增能力
+        "llm_chat": llm_chat,
+        "llm_generate": llm_generate,
+        "tts_synthesize": tts_synthesize,
+        "device_is_online": device_is_online,
+        "device_get_info": device_get_info,
+        "plugin_data_read": plugin_data_read,
+        "plugin_data_write": plugin_data_write,
+        "plugin_data_list": plugin_data_list,
+        "plugin_data_delete": plugin_data_delete,
+        "kv_get": kv_get,
+        "kv_set": kv_set,
+        "kv_delete": kv_delete,
+        "kv_list": kv_list,
+        "get_user_profile_summary": get_user_profile_summary,
+        "generate_uuid": generate_uuid,
+        "current_timestamp": current_timestamp,
+        "json_dumps": json_dumps,
+        "json_loads": json_loads,
     })
     return mod
 

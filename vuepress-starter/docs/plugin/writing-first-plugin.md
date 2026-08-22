@@ -92,14 +92,17 @@ LLM 解析后调用 `say_hello(name="张三")`，设备播报："你好，张三
 | 权限 | SDK 操作 | 能做什么 | 适用场景 |
 |------|----------|----------|----------|
 | `network` | `http_request` / `http_get_json` | 发起外部 HTTP 请求（含 SSRF 防护） | 查天气、调 API、爬数据 |
-| `device` | `send_device_command` / `send_instruct` / `request_device_result` | 给设备下发指令、获取回执 | 控制亮度、屏幕显示、播放音乐 |
+| `device` | `send_device_command` / `send_instruct` / `request_device_result` / `device_is_online` / `device_get_info` | 给设备下发指令、查询设备状态 | 控制亮度、屏幕显示、播放音乐 |
 | `ltm` | `ltm_store` / `ltm_recall` / `ltm_list_all` / `ltm_update` / `ltm_forget` | 读写设备的长期记忆 | 记住用户偏好、学习习惯 |
-| `db` | `diary_*` / `device_config_*` | 读写数据库（日记、设备配置） | 记日记、读写设备配置 |
+| `db` | `diary_*` / `device_config_*` / `get_user_profile_summary` | 读写数据库（日记、设备配置、用户画像） | 记日记、读写设备配置、查用户画像 |
 | `env_read` | `get_plugin_config_or_env` 读环境变量 | 读取白名单内的环境变量 | 从环境变量读取 API Key 等配置 |
-| `file_read` | `open()` 读模式 / `Path.read_text()` 等 | 读取插件目录和状态目录的文件 | 读本地数据文件 |
-| `file_write` | `open()` 写模式 / `Path.write_text()` 等 | 写入插件目录和状态目录 | 缓存数据、写日志 |
+| `file_read` | `open()` 读模式 / `Path.read_text()` / `plugin_data_read` / `plugin_data_list` | 读取插件目录和状态目录的文件 | 读本地数据文件 |
+| `file_write` | `open()` 写模式 / `Path.write_text()` / `plugin_data_write` / `plugin_data_delete` | 写入插件目录和状态目录 | 缓存数据、写日志、管理文件 |
 | `subprocess` | `subprocess.*` / `os.system` / `os.popen` 等 | 执行子进程命令 | **需要审核**，运行外部工具 |
 | `exec` | `eval()` / `exec()` / `compile()` | 动态执行代码 | **需要审核**，运行用户脚本 |
+| `llm` | `llm_chat` / `llm_generate` | 调用 LLM 大模型对话 | 文本分析、智能回复、内容生成 |
+| `tts` | `tts_synthesize` | 文本转语音合成 | 让设备说话、语音播报 |
+| `kv` | `kv_get` / `kv_set` / `kv_delete` / `kv_list` | 插件专属键值存储 | 持久化配置、缓存数据 |
 
 ### 声明方式
 
@@ -124,7 +127,10 @@ LLM 解析后调用 `say_hello(name="张三")`，设备播报："你好，张三
 | 控制设备 + 调 API | `["network", "device"]` | 天气卡片（查 API + 屏幕显示） |
 | 记忆 + 网络 | `["ltm", "network"]` | 记住用户偏好并联网查询 |
 | 读写文件 | `["file_read", "file_write"]` | 缓存数据、写自定义日志 |
-| 全功能 | `["network", "device", "ltm", "db"]` | 完整设备助手 |
+| LLM 智能处理 | `["llm"]` | 用大模型分析文本、生成回复 |
+| LLM + 语音播报 | `["llm", "tts"]` | 生成文本并用语音播报 |
+| 数据持久化 | `["kv"]` | 用键值存储保存配置和状态 |
+| 全功能 | `["network", "device", "ltm", "db", "llm"]` | 完整设备助手 |
 
 ### 内置插件权限参考
 

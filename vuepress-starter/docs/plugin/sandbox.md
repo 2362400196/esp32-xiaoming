@@ -151,11 +151,14 @@ sqlite3 / shutil / tempfile / zipfile / tarfile / gzip / os.system 相关
 |-------------|-------------|
 | `[]`（默认） | 只能读设备 key、插件配置、技能目录，其余全部被拒 |
 | `["network"]` | 可发外部 HTTP 请求 |
-| `["device"]` | 可给设备下发指令 |
+| `["device"]` | 可给设备下发指令、查询设备在线状态与信息 |
 | `["ltm"]` | 可读写长期记忆 |
-| `["db"]` | 可读写数据库（日记、设备配置） |
+| `["db"]` | 可读写数据库（日记、设备配置、用户画像） |
 | `["env_read"]` | 可读白名单内的环境变量 |
-| `["file_read", "file_write"]` | 可读写插件目录与状态目录 |
+| `["file_read", "file_write"]` | 可读写插件数据目录与状态目录 |
+| `["llm"]` | 可调用 LLM 对话（`llm_chat` / `llm_generate`） |
+| `["tts"]` | 可调用 TTS 语音合成 |
+| `["kv"]` | 可使用插件键值存储（`kv_get` / `kv_set` / `kv_delete` / `kv_list`） |
 
 **内置插件的权限声明**：`alarm=[]`、`device_config=[device,db]`、`device_control=[device]`、`diary=[db]`、`http_tool=[network]`、`media_player=[network,device]`、`memory=[ltm]`、`screen=[device]`、`system_basic=[device]`、`weather=[network,device]`。
 
@@ -220,7 +223,7 @@ sqlite3 / shutil / tempfile / zipfile / tarfile / gzip / os.system 相关
 
 ### 能做的
 
-- 声明 `permissions` 后正常使用 SDK：网络请求、设备指令、记忆读写、数据库访问
+- 声明 `permissions` 后正常使用 SDK：网络请求、设备指令、记忆读写、数据库访问、LLM 对话、TTS 合成、键值存储
 - 用白名单标准库（`json`、`datetime`、`asyncio` 等）写业务逻辑
 - 读取和（声明后）写入自己的插件目录与状态目录
 - 读白名单内的环境变量（`<插件id>_` 或 `PLUGIN_` 前缀，或通过 `PLUGIN_ENV_ALLOWLIST` 显式放行）
