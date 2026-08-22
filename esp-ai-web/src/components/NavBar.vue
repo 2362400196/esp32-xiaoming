@@ -7,11 +7,33 @@
       </div>
 
       <nav class="nav-menu">
-        <button v-for="item in items" :key="item.id" class="nav-item"
-          :class="{ active: active === item.id }" @click="$emit('switch', item.id)">
-          <span class="nav-icon" v-html="icons[item.id] || ''"></span>
-          <span class="nav-label">{{ item.label }}</span>
-        </button>
+        <template v-for="item in items" :key="item.id">
+          <!-- 有子项的折叠菜单 -->
+          <div v-if="item.children?.length" class="nav-dropdown-wrap">
+            <button class="nav-item" :class="{ active: dropdownOpen === item.id }"
+              @click.stop="toggleDropdown(item.id)">
+              <span class="nav-icon" v-html="icons[item.icon || item.id] || ''"></span>
+              <span class="nav-label">{{ item.label }}</span>
+              <span class="nav-chevron" :class="{ open: dropdownOpen === item.id }">▾</span>
+            </button>
+            <Transition name="drop">
+              <div v-if="dropdownOpen === item.id" class="nav-dropdown" @click.stop>
+                <button v-for="child in item.children" :key="child.id"
+                  class="nav-dropdown-item" :class="{ active: active === child.id }"
+                  @click="selectChild(child.id)">
+                  <span class="nav-icon" v-html="icons[child.icon || child.id] || ''"></span>
+                  <span class="nav-label">{{ child.label }}</span>
+                </button>
+              </div>
+            </Transition>
+          </div>
+          <!-- 普通导航项 -->
+          <button v-else class="nav-item" :class="{ active: active === item.id }"
+            @click="$emit('switch', item.id)">
+            <span class="nav-icon" v-html="icons[item.icon || item.id] || ''"></span>
+            <span class="nav-label">{{ item.label }}</span>
+          </button>
+        </template>
       </nav>
 
       <div class="nav-user">
@@ -26,14 +48,32 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { getUser, isLoggedIn } from '../api'
 
-defineProps({
+const props = defineProps({
   active: { type: String, default: 'home' },
   items: { type: Array, default: () => [] },
 })
-defineEmits(['switch'])
+const emit = defineEmits(['switch'])
+
+const dropdownOpen = ref(null)
+
+function toggleDropdown(id) {
+  dropdownOpen.value = dropdownOpen.value === id ? null : id
+}
+
+function selectChild(id) {
+  dropdownOpen.value = null
+  emit('switch', id)
+}
+
+function handleClickOutside() {
+  dropdownOpen.value = null
+}
+
+onMounted(() => document.addEventListener('click', handleClickOutside))
+onUnmounted(() => document.removeEventListener('click', handleClickOutside))
 
 const loggedIn = computed(() => isLoggedIn())
 const userName = computed(() => getUser()?.nickname || getUser()?.email?.split('@')[0] || '用户')
@@ -47,7 +87,20 @@ const icons = {
   skills: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4.5 4.5 0 0 0-6.4 6.4L3 18v3h3l5.3-5.3a4.5 4.5 0 0 0 6.4-6.4L14 12l-2-2 3.4-3.4a4.2 4.2 0 0 1-.7-.3z"/></svg>',
   tool: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>',
   profile: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+  wechat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 12a7 7 0 1 0-13 5l-1 3 3.5-1.2A7 7 0 0 0 17 12z"/><circle cx="9" cy="12" r=".5" fill="currentColor"/><circle cx="13" cy="12" r=".5" fill="currentColor"/><path d="M21 12a7 7 0 0 1-9 6.7"/></svg>',
   admin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>',
+  mcp: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>',
+  // 插件预置图标
+  server: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>',
+  message: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 12a7 7 0 1 0-13 5l-1 3 3.5-1.2A7 7 0 0 0 17 12z"/><circle cx="9" cy="12" r=".5" fill="currentColor"/><circle cx="13" cy="12" r=".5" fill="currentColor"/><path d="M21 12a7 7 0 0 1-9 6.7"/></svg>',
+  clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>',
+  chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4.5 4.5 0 0 0-6.4 6.4L3 18v3h3l5.3-5.3a4.5 4.5 0 0 0 6.4-6.4L14 12l-2-2 3.4-3.4a4.2 4.2 0 0 1-.7-.3z"/></svg>',
+  settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
+  cloud: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9z"/></svg>',
+  bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>',
+  star: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
+  // 插件组图标
+  plugin_group: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>',
 }
 </script>
 
@@ -59,7 +112,6 @@ const icons = {
   padding: 0 20px;
   height: 60px;
 }
-/* 导航栏隐藏/显示的过渡动画（编辑器打开时收起，关闭时展开） */
 .nav-enter-active, .nav-leave-active {
   overflow: hidden;
   transition: height 0.32s var(--ease), opacity 0.32s var(--ease), transform 0.32s var(--ease);
@@ -116,13 +168,14 @@ const icons = {
   border-radius: 14px;
   transition: all 0.3s var(--ease);
   position: relative;
+  white-space: nowrap;
 }
 .nav-item:hover {
   color: var(--text-main);
   background: rgba(255, 255, 255, 0.55);
   transform: translateY(-1px);
 }
-.nav-icon { display: flex; width: 16px; height: 16px; opacity: 0.7; }
+.nav-icon { display: flex; width: 16px; height: 16px; opacity: 0.7; flex-shrink: 0; }
 .nav-item.active {
   color: var(--mint-deep);
   font-weight: 600;
@@ -134,6 +187,66 @@ const icons = {
 @keyframes navBreathe {
   0%, 100% { box-shadow: inset 0 0 0 1px var(--mint-border), 0 6px 16px rgba(16, 185, 129, 0.16); }
   50% { box-shadow: inset 0 0 0 1px var(--mint-border), 0 8px 22px rgba(16, 185, 129, 0.26); }
+}
+
+/* 折叠菜单 */
+.nav-dropdown-wrap { position: relative; }
+.nav-chevron {
+  font-size: 10px;
+  margin-left: 2px;
+  transition: transform 0.25s var(--ease);
+  opacity: 0.5;
+}
+.nav-chevron.open { transform: rotate(180deg); }
+
+.nav-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 160px;
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  padding: 6px;
+  box-shadow: 0 12px 36px rgba(23, 52, 74, 0.15), var(--glass-hi);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nav-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  color: var(--text-sub);
+  cursor: pointer;
+  border-radius: 10px;
+  transition: all 0.25s var(--ease);
+  white-space: nowrap;
+}
+.nav-dropdown-item:hover {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.6);
+}
+.nav-dropdown-item.active {
+  color: var(--mint-deep);
+  font-weight: 600;
+  background: var(--mint-soft);
+}
+
+/* 下拉动画 */
+.drop-enter-active, .drop-leave-active {
+  transition: opacity 0.2s var(--ease), transform 0.2s var(--ease);
+}
+.drop-enter-from, .drop-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-6px);
 }
 
 .nav-user { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
@@ -158,5 +271,7 @@ const icons = {
   .nav-item { padding: 8px 10px; }
   .nav-label { font-size: 12px; }
   .user-name { display: none; }
+  .nav-dropdown { left: 0; transform: none; }
+  .drop-enter-from, .drop-leave-to { transform: translateY(-6px); }
 }
 </style>

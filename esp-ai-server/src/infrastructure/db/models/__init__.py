@@ -17,7 +17,6 @@ from src.infrastructure.db.models.growth import (
     LearningLogModel,
     UserProfileModel,
 )
-from src.infrastructure.db.models.wechat_binding import WeChatBindingModel
 from src.infrastructure.db.models.emo import EmoPackModel
 from src.infrastructure.db.models.skill import SkillModel
 from src.infrastructure.db.models.marketplace import (
@@ -40,7 +39,6 @@ __all__ = [
     "LearningLogModel",
     "EmoPackModel",
     "SkillModel",
-    "WeChatBindingModel",
     "MarketplacePluginModel",
     "PluginVersionModel",
     "PluginReviewModel",

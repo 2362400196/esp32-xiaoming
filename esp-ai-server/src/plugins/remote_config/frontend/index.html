@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>远程配置</title>
+<style>
+:root{--mint:#10b981;--mint-deep:#059669;--mint-soft:rgba(16,185,129,0.1);--text-main:#1e293b;--text-sub:#64748b;--bg:#f0f5f0;--border:rgba(0,0,0,0.06);--radius:16px;--radius-sm:10px;--shadow:0 4px 20px rgba(0,0,0,0.06);--glass:linear-gradient(155deg,rgba(255,255,255,0.85),rgba(255,255,255,0.55));--glass-border:rgba(255,255,255,0.6)}
+*{box-sizing:border-box}
+body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text-main);min-height:100vh}
+.container{max-width:720px;margin:0 auto;padding:20px 16px 40px}
+.hero-bar{position:relative;overflow:hidden;padding:28px 30px;border-radius:var(--radius);background:var(--glass);border:1px solid var(--glass-border);backdrop-filter:blur(12px);margin-bottom:20px}
+.watermark{position:absolute;right:-8px;bottom:-18px;font-size:90px;font-weight:900;color:rgba(16,185,129,0.08);line-height:1;pointer-events:none;user-select:none}
+.hero-title{font-size:22px;font-weight:700;margin:0}.highlight{color:var(--mint-deep)}
+.hero-sub{font-size:13px;color:var(--text-sub);margin:4px 0 0}
+.card{background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius);padding:18px;margin-bottom:12px;backdrop-filter:blur(12px);box-shadow:var(--shadow)}
+.device-bar{display:flex;align-items:center;gap:8px;padding:10px 16px;background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius-sm);font-size:13px;backdrop-filter:blur(12px);margin-bottom:16px}
+.device-bar .name{font-weight:600}
+.config-group{margin-bottom:10px}
+.config-key{font-size:12px;font-weight:600;color:var(--text-sub);margin-bottom:4px;word-break:break-all}
+.config-val{font-size:13px;padding:8px 10px;background:rgba(0,0,0,0.03);border-radius:8px;word-break:break-all;font-family:monospace}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 20px;font-size:13px;font-weight:600;border:none;border-radius:var(--radius-sm);cursor:pointer;transition:all 0.25s}
+.btn-primary{background:var(--mint);color:#fff}.btn-primary:hover{background:var(--mint-deep)}
+.btn-sm{padding:6px 16px;font-size:12px;border-radius:var(--radius-sm)}
+.spinner{width:28px;height:28px;border:3px solid var(--mint-soft);border-top-color:var(--mint-deep);border-radius:50%;animation:spin 0.8s linear infinite;margin:20px auto}
+@keyframes spin{to{transform:rotate(360deg)}}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:10px 24px;background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius-sm);font-size:13px;font-weight:500;backdrop-filter:blur(12px);box-shadow:0 8px 30px rgba(0,0,0,0.1);z-index:2000;animation:fadeInUp 0.3s ease}
+@keyframes fadeInUp{from{opacity:0;transform:translateX(-50%) translateY(16px)}}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="hero-bar">
+    <span class="watermark">R</span>
+    <h2 class="hero-title">远程<span class="highlight">配置</span></h2>
+    <p class="hero-sub">查询设备配置、上报状态、管理缓存</p>
+  </div>
+  <div class="device-bar" id="deviceBar">
+    <span>设备：<span class="name" id="deviceName">未选择</span></span>
+  </div>
+  <div id="loading"><div class="spinner"></div></div>
+  <div id="content" style="display:none">
+    <div id="configCards"></div>
+    <div style="text-align:center;margin-top:12px">
+      <button class="btn btn-primary btn-sm" onclick="loadConfig()">刷新配置</button>
+    </div>
+  </div>
+</div>
+<script>
+let deviceMac='';
+function getToken(){return localStorage.getItem('espai_token')||''}
+async function api(path,method='GET',body=null){
+  const token=getToken();const headers={'Content-Type':'application/json'};
+  if(token)headers['Authorization']='Bearer '+token;
+  try{const r=await fetch(path,{method,headers,body:body?JSON.stringify(body):null});return await r.json()}catch(e){return{code:1,message:String(e)}}
+}
+function showToast(msg){const o=document.querySelector('.toast');if(o)o.remove();const el=document.createElement('div');el.className='toast';el.textContent=msg;document.body.appendChild(el);setTimeout(()=>el.remove(),2200)}
+
+async function loadConfig(){
+  if(!deviceMac){document.getElementById('loading').style.display='none';return}
+  document.getElementById('loading').style.display='block'
+  document.getElementById('content').style.display='none'
+  const res = await api('/api/v1/devices/'+encodeURIComponent(deviceMac)+'/plugins')
+  document.getElementById('loading').style.display='none'
+  document.getElementById('content').style.display='block'
+  if(res.code===0 && res.data){
+    const configs = res.data.plugin_configs || {}
+    renderConfig(configs)
+  }else{
+    document.getElementById('configCards').innerHTML='<div class="card" style="text-align:center;padding:32px;color:var(--text-sub)">加载配置失败</div>'
+  }
+}
+function renderConfig(config){
+  const cards=document.getElementById('configCards')
+  const entries=Object.entries(config)
+  if(entries.length===0){
+    cards.innerHTML='<div class="card" style="text-align:center;padding:32px;color:var(--text-sub)">暂无配置数据</div>'
+    return
+  }
+  cards.innerHTML=entries.map(([plugin,cfg])=>{
+    const valStr=typeof cfg==='object'?JSON.stringify(cfg,null,2):String(cfg)
+    return `<div class="card">
+      <div class="config-key">${escapeHtml(plugin)}</div>
+      <div class="config-val">${escapeHtml(valStr)}</div>
+    </div>`
+  }).join('')
+}
+function escapeHtml(s){if(!s)return'';const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+
+window.addEventListener('message',function(e){
+  try{const m=typeof e.data==='object'?e.data:JSON.parse(e.data)
+  if(m.type==='deviceChanged'&&m.device){
+    deviceMac=m.device.device_id||m.device.id||m.device.mac||''
+    document.getElementById('deviceName').textContent=m.device?.name||deviceMac||'未选择'
+    if(deviceMac)loadConfig()
+  }}catch{}
+})
+try{window.parent.postMessage({type:'ready'},'*')}catch(e){}
+
+(function(){const did=new URLSearchParams(window.location.search).get('device_id');if(did){deviceMac=did;document.getElementById('deviceName').textContent=deviceMac;loadConfig()}})();
+</script>
+</body>
+</html>

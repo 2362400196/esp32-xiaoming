@@ -13,7 +13,7 @@
           :selected="currentDevice" :loading="loading"
           @select="selectDevice" @speak="speakToDevice" @stop="stopDevice" @settings="openDeviceSettings"
           @unbind="onDeviceUnbind" @bound="onDeviceBound" @toast="toast" />
-        <StoreView v-else-if="tab === 'store'" :key="'store'" @toast="toast" />
+        <StoreView v-else-if="tab === 'store'" :key="'store'" @toast="toast" @plugin-changed="syncPluginNav" />
         <DeveloperView v-else-if="tab === 'developer'" :key="'developer'" @toast="toast" @editor-change="onEditorChange" />
         <ControlView v-else-if="tab === 'control'" :key="'control'" :current-device="currentDevice"
           :devices="devices" :plugin-count="pluginCount"
@@ -21,10 +21,8 @@
         <EmotionView v-else-if="tab === 'emotion'" :key="'emotion'" :current-device="currentDevice"
           :devices="devices"
           @toast="toast" @select-device="selectDevice" />
-        <SkillsView v-else-if="tab === 'skills'" :key="'skills'" :current-device="currentDevice"
-          :devices="devices"
-          @toast="toast" @select-device="selectDevice" />
         <ToolView v-else-if="tab === 'tool'" :key="'tool'" @toast="toast" />
+        <PluginPageView v-else-if="tab.startsWith('plugin_')" :key="tab" :plugin-name="currentPluginPage?.name || ''" :plugin-title="currentPluginPage?.title || ''" :plugin-entry="currentPluginPage?.entry || ''" :current-device="currentDevice" @toast="toast" />
         <AdminView v-else-if="tab === 'admin'" :key="'admin'" @toast="toast" />
         <ProfileView v-else :key="'profile'" :devices="devices" @login="onLogin" @toast="toast" />
       </transition>
@@ -48,14 +46,20 @@ import StoreView from './views/StoreView.vue'
 import DeveloperView from './views/DeveloperView.vue'
 import ControlView from './views/ControlView.vue'
 import EmotionView from './views/EmotionView.vue'
-import SkillsView from './views/SkillsView.vue'
 import ToolView from './views/ToolView.vue'
 import ProfileView from './views/ProfileView.vue'
+import PluginPageView from './views/PluginPageView.vue'
 import DeviceSettings from './components/DeviceSettings.vue'
 import AdminView from './views/AdminView.vue'
 import { api, getUser, isLoggedIn, setAuth } from './api'
 
 const tab = ref('devices')
+const pluginPages = ref([])
+const currentPluginPage = computed(() => {
+  if (!tab.value.startsWith('plugin_')) return null
+  const name = tab.value.slice(7)
+  return pluginPages.value.find(p => p.name === name) || null
+})
 const editorOpen = ref(false)
 let editorCloseTimer = null
 function onEditorChange(v) {
@@ -74,7 +78,6 @@ const navItems = ref([
   { id: 'developer', label: '开发者' },
   { id: 'control', label: '控制' },
   { id: 'emotion', label: '表情' },
-  { id: 'skills', label: '技能' },
   { id: 'tool', label: '工具' },
   { id: 'profile', label: '我的' },
 ])
@@ -86,6 +89,43 @@ function syncAdminNav() {
     navItems.value.splice(navItems.value.length - 1, 0, { id: 'admin', label: '管理' })
   } else if (!isAdmin && idx !== -1) {
     navItems.value.splice(idx, 1)
+  }
+}
+
+async function syncPluginNav() {
+  // 移除旧的插件导航项
+  navItems.value = navItems.value.filter(i => i.id !== 'plugin_group')
+  // 并行获取前端页面列表和已安装插件列表
+  const [pagesRes, optionalRes] = await Promise.all([
+    api.pluginFrontendPages(),
+    api.optionalPlugins(),
+  ])
+  // 获取已安装的插件名称集合
+  const installed = new Set()
+  if (optionalRes.status === 200 && optionalRes.data?.code === 0) {
+    for (const p of (optionalRes.data.data || [])) {
+      if (p.installed) installed.add(p.name)
+    }
+  }
+  // 只显示已安装的插件前端页面
+  if (pagesRes.status === 200 && pagesRes.data?.code === 0) {
+    pluginPages.value = pagesRes.data.data || []
+    const children = pluginPages.value
+      .filter(p => installed.has(p.name))
+      .map(p => ({
+        id: 'plugin_' + p.name,
+        label: p.nav_label || p.title,
+        icon: p.nav_icon || '',
+      }))
+    if (children.length) {
+      const profileIdx = navItems.value.findIndex(i => i.id === 'profile')
+      const group = { id: 'plugin_group', label: '我的插件', icon: 'plugin_group', children }
+      if (profileIdx >= 0) {
+        navItems.value.splice(profileIdx, 0, group)
+      } else {
+        navItems.value.push(group)
+      }
+    }
   }
 }
 
@@ -277,6 +317,7 @@ async function onLogin() {
   if (loggedIn.value) {
     await syncUserProfile()
     syncAdminNav()
+    await syncPluginNav()
     tab.value = 'devices'   // 登录成功 → 跳设备页
     refreshDevices()
   }
@@ -287,6 +328,7 @@ onMounted(async () => {
     await syncUserProfile()
     syncAdminNav()
   refreshDevices()
+  await syncPluginNav()
   pollTimer = setInterval(() => { if (isLoggedIn()) refreshDevices() }, 20000)
 })
 onBeforeUnmount(() => { clearInterval(pollTimer); clearTimeout(editorCloseTimer) })
@@ -296,6 +338,9 @@ onBeforeUnmount(() => { clearInterval(pollTimer); clearTimeout(editorCloseTimer)
 .app { min-height: 100%; display: flex; flex-direction: column; position: relative; z-index: 1; }
 .stage {
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   max-width: 1080px;
   width: 100%;
   margin: 0 auto;

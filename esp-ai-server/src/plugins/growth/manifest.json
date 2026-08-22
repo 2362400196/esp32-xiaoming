@@ -1,0 +1,18 @@
+{
+    "id": "growth",
+    "name": "成长系统",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "用户画像分析、情绪检测、日记自动生成、自学习技能",
+    "api_version": "1.0",
+    "optional": true,
+    "frontend": true,
+    "frontend_config": {
+        "nav_label": "成长",
+        "nav_icon": "star",
+        "width": "full"
+    },
+    "requires": [],
+    "config_fields": [],
+    "permissions": ["llm", "db", "kv", "device"]
+}

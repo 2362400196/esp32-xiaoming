@@ -22,6 +22,7 @@ from src.infrastructure.db.models.user import UserModel
 from src.infrastructure.logging import get_logger
 from src.infrastructure.security_jwt import (
     get_current_user,
+    get_current_user_optional,
     hash_password,
     verify_password,
     create_access_token,

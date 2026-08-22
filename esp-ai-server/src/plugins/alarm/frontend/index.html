@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>闹钟定时</title>
+<style>
+:root{--mint:#10b981;--mint-deep:#059669;--mint-soft:rgba(16,185,129,0.1);--text-main:#1e293b;--text-sub:#64748b;--bg:#f0f5f0;--border:rgba(0,0,0,0.06);--danger:#ef4444;--radius:16px;--radius-sm:10px;--shadow:0 4px 20px rgba(0,0,0,0.06);--glass:linear-gradient(155deg,rgba(255,255,255,0.85),rgba(255,255,255,0.55));--glass-border:rgba(255,255,255,0.6)}
+*{box-sizing:border-box}
+body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text-main);min-height:100vh}
+.container{max-width:640px;margin:0 auto;padding:20px 16px 40px}
+.hero-bar{position:relative;overflow:hidden;padding:28px 30px;border-radius:var(--radius);background:var(--glass);border:1px solid var(--glass-border);backdrop-filter:blur(12px);margin-bottom:20px}
+.watermark{position:absolute;right:-8px;bottom:-18px;font-size:90px;font-weight:900;color:rgba(16,185,129,0.08);line-height:1;pointer-events:none;user-select:none}
+.hero-title{font-size:22px;font-weight:700;margin:0}.highlight{color:var(--mint-deep)}
+.hero-sub{font-size:13px;color:var(--text-sub);margin:4px 0 0}
+.card{background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius);padding:18px;margin-bottom:12px;backdrop-filter:blur(12px);box-shadow:var(--shadow)}
+.card-row{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border)}
+.card-row:last-child{border-bottom:none}
+.card-label{font-size:13px;color:var(--text-sub)}
+.card-value{font-size:14px;font-weight:600}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 20px;font-size:13px;font-weight:600;border:none;border-radius:var(--radius-sm);cursor:pointer;transition:all 0.25s}
+.btn-primary{background:var(--mint);color:#fff}.btn-primary:hover{background:var(--mint-deep);transform:translateY(-1px)}
+.btn-sm{padding:6px 16px;font-size:12px;border-radius:var(--radius-sm)}
+.text-sub{color:var(--text-sub);font-size:13px}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="hero-bar">
+    <span class="watermark">A</span>
+    <h2 class="hero-title">闹钟<span class="highlight">定时</span></h2>
+    <p class="hero-sub">闹钟、提醒、睡眠定时器管理</p>
+  </div>
+  <div class="card">
+    <p class="text-sub" style="margin:0 0 12px">闹钟管理功能通过语音指令操作：</p>
+    <div class="card-row"><span class="card-label">设置闹钟</span><span class="card-value">"设置明天早上 7 点的闹钟"</span></div>
+    <div class="card-row"><span class="card-label">查看闹钟</span><span class="card-value">"有哪些闹钟"</span></div>
+    <div class="card-row"><span class="card-label">删除闹钟</span><span class="card-value">"删除早上 7 点的闹钟"</span></div>
+    <div class="card-row"><span class="card-label">睡眠定时</span><span class="card-value">"30 分钟后关闭"</span></div>
+  </div>
+  <div class="card" style="text-align:center;padding:32px">
+    <p style="margin:0 0 8px;font-size:15px;font-weight:600">💡 提示</p>
+    <p class="text-sub" style="margin:0">闹钟完全通过语音交互管理，无需手动操作。直接对设备说指令即可。</p>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>主动推送</title>
+<style>
+:root{--mint:#10b981;--mint-deep:#059669;--mint-soft:rgba(16,185,129,0.1);--text-main:#1e293b;--text-sub:#64748b;--bg:#f0f5f0;--border:rgba(0,0,0,0.06);--radius:16px;--radius-sm:10px;--shadow:0 4px 20px rgba(0,0,0,0.06);--glass:linear-gradient(155deg,rgba(255,255,255,0.85),rgba(255,255,255,0.55));--glass-border:rgba(255,255,255,0.6)}
+*{box-sizing:border-box}
+body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text-main);min-height:100vh}
+.container{max-width:640px;margin:0 auto;padding:20px 16px 40px}
+.hero-bar{position:relative;overflow:hidden;padding:28px 30px;border-radius:var(--radius);background:var(--glass);border:1px solid var(--glass-border);backdrop-filter:blur(12px);margin-bottom:20px}
+.watermark{position:absolute;right:-8px;bottom:-18px;font-size:90px;font-weight:900;color:rgba(16,185,129,0.08);line-height:1;pointer-events:none;user-select:none}
+.hero-title{font-size:22px;font-weight:700;margin:0}.highlight{color:var(--mint-deep)}
+.hero-sub{font-size:13px;color:var(--text-sub);margin:4px 0 0}
+.card{background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius);padding:18px;margin-bottom:12px;backdrop-filter:blur(12px);box-shadow:var(--shadow)}
+.toggle-row{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border)}
+.toggle-row:last-child{border-bottom:none}
+.toggle-label{font-size:14px;font-weight:500}
+.toggle-desc{font-size:12px;color:var(--text-sub);margin-top:2px}
+.toggle{position:relative;width:42px;height:24px;background:#ddd;border-radius:12px;cursor:pointer;transition:background 0.3s;flex-shrink:0}
+.toggle.active{background:var(--mint)}
+.toggle::after{content:'';position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;transition:transform 0.3s;box-shadow:0 1px 4px rgba(0,0,0,0.15)}
+.toggle.active::after{transform:translateX(18px)}
+.spinner{width:28px;height:28px;border:3px solid var(--mint-soft);border-top-color:var(--mint-deep);border-radius:50%;animation:spin 0.8s linear infinite;margin:20px auto}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="hero-bar">
+    <span class="watermark">P</span>
+    <h2 class="hero-title">主动<span class="highlight">推送</span></h2>
+    <p class="hero-sub">AI 主动发起对话，定时推送话题、提醒和问候</p>
+  </div>
+  <div id="loading"><div class="spinner"></div></div>
+  <div id="content" style="display:none">
+    <div class="card">
+      <h3 style="font-size:14px;font-weight:700;margin:0 0 12px">推送设置</h3>
+      <div class="toggle-row">
+        <div><div class="toggle-label">总开关</div><div class="toggle-desc">允许 AI 主动发起对话</div></div>
+        <div class="toggle" id="masterToggle" onclick="togglePush('enabled')"></div>
+      </div>
+      <div class="toggle-row">
+        <div><div class="toggle-label">早安问候</div><div class="toggle-desc">每天早上推送天气和日程</div></div>
+        <div class="toggle" id="morningToggle" onclick="togglePush('morning')"></div>
+      </div>
+      <div class="toggle-row">
+        <div><div class="toggle-label">话题推荐</div><div class="toggle-desc">根据兴趣推送讨论话题</div></div>
+        <div class="toggle" id="topicToggle" onclick="togglePush('topics')"></div>
+      </div>
+    </div>
+    <div class="card" style="text-align:center;padding:24px">
+      <p style="margin:0;font-size:13px;color:var(--text-sub)">推送设置通过语音也可以控制<br>说"开启主动推送"或"关闭主动推送"</p>
+    </div>
+  </div>
+</div>
+<script>
+let deviceMac = '';
+let config = { enabled: true, morning: true, topics: true };
+
+function getToken(){return localStorage.getItem('espai_token')||''}
+async function api(path,method='GET',body=null){
+  const token=getToken();const headers={'Content-Type':'application/json'};
+  if(token)headers['Authorization']='Bearer '+token;
+  try{const r=await fetch(path,{method,headers,body:body?JSON.stringify(body):null});return await r.json()}catch(e){return{code:1,message:String(e)}}
+}
+function updateUI(){
+  document.getElementById('masterToggle').className='toggle'+(config.enabled?' active':'')
+  document.getElementById('morningToggle').className='toggle'+(config.morning?' active':'')
+  document.getElementById('topicToggle').className='toggle'+(config.topics?' active':'')
+  document.getElementById('morningToggle').parentElement.style.opacity=config.enabled?'1':'0.4'
+  document.getElementById('topicToggle').parentElement.style.opacity=config.enabled?'1':'0.4'
+}
+async function loadConfig(){
+  if(!deviceMac){document.getElementById('loading').style.display='none';return}
+  document.getElementById('loading').style.display='flex'
+  document.getElementById('content').style.display='none'
+  const res = await api('/api/v1/devices/'+encodeURIComponent(deviceMac)+'/plugins')
+  document.getElementById('loading').style.display='none'
+  document.getElementById('content').style.display='block'
+  if(res.code===0 && res.data?.plugin_configs?.proactive_brain){
+    config = { ...config, ...res.data.plugin_configs.proactive_brain }
+  }
+  updateUI()
+}
+async function togglePush(key){
+  config[key] = !config[key]; updateUI()
+  await api('/api/v1/devices/'+encodeURIComponent(deviceMac)+'/plugins/proactive_brain/config','PUT',{config})
+}
+window.addEventListener('message',function(e){
+  try{const m=typeof e.data==='object'?e.data:JSON.parse(e.data)
+  if(m.type==='deviceChanged'&&m.device){
+    deviceMac=m.device.device_id||m.device.id||m.device.mac||''
+    if(deviceMac)loadConfig()
+  }}catch{}
+})
+try{window.parent.postMessage({type:'ready'},'*')}catch(e){}
+
+(function(){const did=new URLSearchParams(window.location.search).get('device_id');if(did){deviceMac=did;loadConfig()}})();
+</script>
+</body>
+</html>

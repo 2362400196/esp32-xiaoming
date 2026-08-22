@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from pydantic import BaseModel
 
 from src.infrastructure.logging import get_logger
-from src.infrastructure.security_jwt import get_current_user, require_admin
+from src.infrastructure.security_jwt import get_current_user, get_current_user_optional, require_admin
 
 logger = get_logger(__name__)
 
@@ -660,3 +660,210 @@ async def clear_plugin_logs(name: str, _admin=Depends(require_admin)):
         return {"code": 0, "message": f"已清除 {count} 条日志", "data": {"cleared": count}}
     except Exception as e:
         return {"code": 1, "message": str(e), "data": None}
+
+
+# ════════════════════════════════════════════════════════════
+# 可选插件 API（商店安装/卸载）
+# ════════════════════════════════════════════════════════════
+
+
+@router.get("/api/v1/plugins/optional")
+async def list_optional_plugins(user=Depends(get_current_user_optional)):
+    """列出所有可选插件（已安装的包括 enabled_plugins 状态）。
+
+    可选插件是内置但默认不启用的插件，需用户从商店安装后使用。
+    """
+    try:
+        from src.infrastructure.plugin_loader import get_optional_plugins_info, is_optional_plugin
+
+        plugins = get_optional_plugins_info()
+
+        # 获取用户第一个设备的 enabled_plugins（未登录时返回空集合）
+        enabled_set = set()
+        if user:
+            enabled_set = await _get_user_enabled_plugins(user)
+        for p in plugins:
+            p["installed"] = p["name"] in enabled_set
+
+        return {"code": 0, "message": "ok", "data": plugins}
+    except Exception as e:
+        return {"code": 1, "message": str(e), "data": None}
+
+
+@router.post("/api/v1/plugins/optional/{name}/install")
+async def install_optional_plugin(
+    name: str,
+    user=Depends(get_current_user),
+    device_id: str | None = None,
+):
+    """安装可选插件（启用该插件在设备上的工具）。
+
+    可选参数 device_id 指定目标设备，默认使用用户第一个设备。
+    """
+    try:
+        from src.infrastructure.plugin_loader import is_optional_plugin
+
+        if not is_optional_plugin(name):
+            return {"code": 1, "message": f"插件「{name}」不是可选插件", "data": None}
+
+        enabled = await _update_device_plugins(user, name, install=True, device_id=device_id)
+        return {"code": 0, "message": f"「{name}」已安装", "data": {"enabled_plugins": sorted(enabled)}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"code": 1, "message": str(e), "data": None}
+
+
+def _clear_plugin_data(plugin_name: str) -> None:
+    """清空插件的所有配置数据（KV + 文件 + 数据库关联数据）。"""
+    import os, shutil
+    from src.infrastructure.plugin_loader import _PROJECT_ROOT
+
+    # 1. KV 文件
+    kv_path = _PROJECT_ROOT / "data" / "plugins" / "kv" / f"{plugin_name}.json"
+    if kv_path.is_file():
+        try:
+            kv_path.unlink()
+        except OSError:
+            pass
+
+    # 2. 插件数据目录
+    data_dir = _PROJECT_ROOT / "data" / "plugins" / "data" / plugin_name
+    if data_dir.is_dir():
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+    # 3. 插件特有的全局数据
+    if plugin_name == "wechat_bot":
+        _clear_wechat_data(_PROJECT_ROOT)
+
+
+def _clear_wechat_data(project_root) -> None:
+    """清空微信插件特有的全局数据（统一数据文件）。"""
+    import os, logging
+    logger = logging.getLogger(__name__)
+
+    # 删除统一数据文件
+    data_file = project_root / "data" / "wechat_bot_data.json"
+    if data_file.is_file():
+        try:
+            data_file.unlink()
+            logger.info(f"[卸载] 已清除微信数据文件: {data_file}")
+        except OSError as e:
+            logger.warning(f"[卸载] 清除微信数据文件失败: {e}")
+
+    # 清理旧格式遗留文件
+    for old in ["wechat_token.json", "wechat_bindings.json"]:
+        p = project_root / "data" / old
+        if p.is_file():
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+    # 重置内存中的微信绑定管理器
+    try:
+        from src.use_cases.wechat_binding import get_wechat_binding_manager
+        mgr = get_wechat_binding_manager()
+        for device_key in list(mgr._bindings.keys()):
+            mgr.unbind(device_key)
+        logger.info("[卸载] 已清空内存中的微信绑定关系")
+    except Exception as e:
+        logger.warning(f"[卸载] 清空内存微信绑定失败: {e}")
+
+
+@router.post("/api/v1/plugins/optional/{name}/uninstall")
+async def uninstall_optional_plugin(
+    name: str,
+    user=Depends(get_current_user),
+    device_id: str | None = None,
+):
+    """卸载可选插件。
+
+    内置插件 → 仅禁用（从设备 enabled_plugins 移除，不删文件）。
+    用户安装的插件 → 卸载（禁用 + 删除插件目录）。
+    """
+    try:
+        from src.infrastructure.plugin_loader import is_optional_plugin, get_plugin_source
+        from src.infrastructure.plugin_loader import INSTALLED_PLUGINS_DIR
+        import shutil
+
+        if not is_optional_plugin(name):
+            return {"code": 1, "message": f"插件「{name}」不是可选插件", "data": None}
+
+        # 先从设备禁用
+        enabled = await _update_device_plugins(user, name, install=False, device_id=device_id)
+
+        # 清空插件配置数据（KV + 数据目录）
+        _clear_plugin_data(name)
+
+        # 如果是用户安装的插件（source=installed），删除插件目录
+        source = get_plugin_source(name)
+        deleted = False
+        if source == "installed":
+            plugin_dir = INSTALLED_PLUGINS_DIR / name
+            if plugin_dir.is_dir():
+                shutil.rmtree(plugin_dir)
+                deleted = True
+
+        msg = f"「{name}」已卸载"
+        if deleted:
+            msg += "（插件目录已删除）"
+        return {"code": 0, "message": msg, "data": {"enabled_plugins": sorted(enabled), "deleted": deleted}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"code": 1, "message": str(e), "data": None}
+
+
+async def _get_user_enabled_plugins(user) -> set[str]:
+    """获取用户第一个设备的 enabled_plugins 集合。"""
+    from src.infrastructure.db.session import get_session_ctx
+    from src.infrastructure.db.models.device import DeviceModel
+    from sqlalchemy import select
+    async with get_session_ctx() as session:
+        result = await session.execute(
+            select(DeviceModel).where(DeviceModel.user_id == user.id).limit(1)
+        )
+        model = result.scalar_one_or_none()
+        if model is None:
+            return set()
+        enabled = model.enabled_plugins or []
+        return set(enabled)
+
+
+async def _update_device_plugins(user, plugin_name: str, install: bool, device_id: str | None = None) -> list[str]:
+    """为用户的设备添加/移除可选插件。"""
+    from src.infrastructure.db.session import get_session_ctx
+    from src.infrastructure.db.models.device import DeviceModel
+    from sqlalchemy import select
+
+    async with get_session_ctx() as session:
+        if device_id:
+            result = await session.execute(
+                select(DeviceModel).where(
+                    DeviceModel.device_id == device_id,
+                    DeviceModel.user_id == user.id,
+                )
+            )
+        else:
+            result = await session.execute(
+                select(DeviceModel).where(DeviceModel.user_id == user.id).limit(1)
+            )
+        model = result.scalar_one_or_none()
+        if model is None:
+            raise HTTPException(404, "设备不存在")
+
+        enabled = set(model.enabled_plugins or [])
+        if install:
+            enabled.add(plugin_name)
+        else:
+            enabled.discard(plugin_name)
+
+        model.enabled_plugins = list(enabled)
+        session.add(model)
+
+    # 热重载在线设备
+    from src.infrastructure.web import _hot_reload_device_config
+    _hot_reload_device_config(model.device_id)
+
+    return list(enabled)

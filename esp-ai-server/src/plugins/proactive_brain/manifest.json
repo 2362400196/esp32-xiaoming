@@ -1,0 +1,18 @@
+{
+    "id": "proactive_brain",
+    "name": "主动推送",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "AI 主动发起对话，定时推送话题、提醒和问候",
+    "api_version": "1.0",
+    "optional": true,
+    "frontend": true,
+    "frontend_config": {
+        "nav_label": "推送",
+        "nav_icon": "bell",
+        "width": "narrow"
+    },
+    "requires": [],
+    "config_fields": [],
+    "permissions": ["llm", "device", "kv", "network"]
+}

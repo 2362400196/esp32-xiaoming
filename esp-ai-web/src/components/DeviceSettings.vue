@@ -362,49 +362,6 @@
           </div>
         </section>
 
-        <!-- ============ 插件 ============ -->
-        <section v-else-if="activeTab === 'plugins'" key="plugins" class="tab-pane">
-          <div class="plugins-head">
-            <p class="plugins-hint">管理当前设备启用的插件，可从市场安装后再在此启用</p>
-            <button class="btn-ghost btn-sm" :disabled="checkingUpdates" @click="checkUpdates">
-              {{ checkingUpdates ? '检查中…' : '检查更新' }}
-            </button>
-          </div>
-          <div v-if="pluginLoading" class="plugins-loading">加载中…</div>
-          <div v-else-if="!installedPlugins.length" class="plugins-empty">当前设备还没有插件</div>
-          <div v-else class="plugin-list">
-            <div v-for="p in installedPlugins" :key="p.name" class="plugin-item"
-              :class="{ enabled: p.enabled, 'has-update': hasUpdate(p.name) }">
-              <div class="plugin-main">
-                <span class="plugin-icon" :class="{ active: p.enabled }">{{ (p.title || p.name).charAt(0).toUpperCase() }}</span>
-                <div class="plugin-info">
-                  <p class="plugin-name">{{ p.title || p.name }}</p>
-                  <div class="plugin-meta">
-                    <span v-if="p.source === 'built-in'" class="meta-tag">内置</span>
-                    <span v-else-if="p.version" class="meta-tag">v{{ p.version }}</span>
-                    <span v-if="hasUpdate(p.name)" class="meta-tag update">新版本</span>
-                  </div>
-                </div>
-              </div>
-              <div class="plugin-actions">
-                <button v-if="hasUpdate(p.name)" class="action-btn update"
-                  :disabled="updating === p.name" @click="updatePlugin(p)">
-                  {{ updating === p.name ? '…' : '更新' }}
-                </button>
-                <button v-if="p.config_fields && p.config_fields.length" class="action-btn"
-                  @click="openConfig(p)">配置</button>
-                <button class="action-btn toggle" :class="{ on: p.enabled }"
-                  :disabled="p.saving" @click="togglePlugin(p)">
-                  {{ p.saving ? '…' : (p.enabled ? '禁用' : '启用') }}
-                </button>
-                <button v-if="p.source !== 'built-in'" class="action-btn danger"
-                  :disabled="uninstalling === p.name" @click="uninstallPlugin(p)">
-                  {{ uninstalling === p.name ? '…' : '卸载' }}
-                </button>
-              </div>
-            </div>
-          </div>
-        </section>
         </transition>
       </div>
 
@@ -416,26 +373,7 @@
       </div>
     </div>
 
-    <!-- 插件配置弹窗 -->
-    <transition name="pop">
-      <div v-if="configPlugin" class="config-mask" @click.self="configPlugin = null">
-        <div class="config-panel glass">
-          <h3 class="config-title">配置「{{ configPlugin.title }}」</h3>
-          <p class="config-note">配置仅保存在当前设备，不影响其他设备</p>
-          <div v-for="f in configFields" :key="f.key" class="config-field">
-            <label class="config-label">{{ f.label }}<span v-if="f.required" class="req"> *</span></label>
-            <input class="input" v-model="configValues[f.key]" :placeholder="f.placeholder || '请输入'" />
-          </div>
-          <div class="config-actions">
-            <button class="btn-ghost" @click="configPlugin = null">取消</button>
-            <button class="btn-mint" :disabled="configSaving" @click="saveConfig">
-              {{ configSaving ? '保存中…' : '保存配置' }}
-            </button>
-          </div>
-        </div>
-      </div>
-    </transition>
-  </div>
+    </div>
 </template>
 
 <script setup>
@@ -445,7 +383,7 @@ import { api } from '../api'
 import { ttsVoices1, ttsVoices2 } from '../data/ttsVoices'
 
 const props = defineProps({ device: Object })
-const emit = defineEmits(['close', 'toast', 'plugins-changed'])
+const emit = defineEmits(['close', 'toast'])
 
 const loading = ref(false)
 const saving = ref(false)
@@ -461,24 +399,11 @@ const ttsModel = ref('seed-tts-2.0')
 const cloneVoices = ref([])
 const form = ref({})
 
-// ===== 插件管理 =====
-const pluginLoading = ref(false)
-const installedPlugins = ref([])
-const updatesMap = ref({})
-const checkingUpdates = ref(false)
-const updating = ref(null)
-const uninstalling = ref(null)
-const configPlugin = ref(null)
-const configFields = ref([])
-const configValues = ref({})
-const configSaving = ref(false)
-
 const tabs = [
   { id: 'asr', label: '语音识别' },
   { id: 'llm', label: '大模型' },
   { id: 'tts', label: '语音合成' },
   { id: 'wakeup', label: '唤醒' },
-  { id: 'plugins', label: '插件' },
 ]
 const asrEngines = [
   { id: 'bytedance', name: '字节跳动' },
@@ -574,123 +499,6 @@ function selectTtsModel(type) {
   ttsModel.value = type
   if (type === 'seed-icl-2.0') loadCloneVoices()
 }
-
-// ===== 插件管理 =====
-const deviceId = computed(() => props.device?.device_id || props.device?.id || props.device?.mac || '')
-
-async function loadPlugins() {
-  if (!deviceId.value) return
-  pluginLoading.value = true
-  const res = await api.plugins(deviceId.value)
-  if (res.status === 200 && res.data?.code === 0) {
-    const d = res.data.data
-    const rawEnabled = d.enabled_plugins
-    const allEnabled = !rawEnabled || rawEnabled.length === 0
-    const enabled = new Set(rawEnabled || [])
-    const configs = d.plugin_configs || {}
-    installedPlugins.value = (d.available_plugins || []).map(p => ({
-      ...p,
-      config: configs[p.name] || {},
-      configDone: Object.keys(configs[p.name] || {}).length > 0,
-      enabled: allEnabled || p.source === 'built-in' || enabled.has(p.name),
-      saving: false,
-    }))
-  }
-  pluginLoading.value = false
-}
-
-function hasUpdate(name) {
-  return !!updatesMap.value[name]
-}
-
-async function checkUpdates() {
-  checkingUpdates.value = true
-  const res = await api.checkPluginUpdates()
-  checkingUpdates.value = false
-  if (res.status === 200 && res.data?.code === 0) {
-    const list = res.data.data || []
-    const map = {}
-    for (const u of list) {
-      if (u.has_update) map[u.name] = u
-    }
-    updatesMap.value = map
-    const count = Object.keys(map).length
-    emit('toast', count ? `${count} 个插件有新版本` : '所有插件已是最新')
-  } else {
-    emit('toast', res.data?.message || '检查更新失败')
-  }
-}
-
-async function updatePlugin(p) {
-  updating.value = p.name
-  emit('toast', `正在更新「${p.title || p.name}」…`)
-  const res = await api.updatePlugin(p.name)
-  updating.value = null
-  if (res.status === 200 && res.data?.code === 0) {
-    emit('toast', '更新成功')
-    delete updatesMap.value[p.name]
-    await loadPlugins()
-  } else {
-    emit('toast', res.data?.message || '更新失败')
-  }
-}
-
-async function uninstallPlugin(p) {
-  if (!window.confirm(`确定卸载「${p.title || p.name}」？卸载后所有设备将无法使用此插件。`)) return
-  uninstalling.value = p.name
-  const res = await api.uninstallPlugin(p.name)
-  uninstalling.value = null
-  if (res.status === 200 && res.data?.code === 0) {
-    emit('toast', '插件已卸载')
-    await loadPlugins()
-    emit('plugins-changed')
-  } else {
-    emit('toast', res.data?.message || '卸载失败')
-  }
-}
-
-async function togglePlugin(p) {
-  p.saving = true
-  const target = !p.enabled
-  const list = installedPlugins.value.filter(x => x.name === p.name ? target : x.enabled).map(x => x.name)
-  const res = await api.installPlugin(deviceId.value, list)
-  p.saving = false
-  if (res.status === 200 && res.data?.code === 0) {
-    p.enabled = target
-    emit('toast', target ? '已启用' : '已禁用')
-    emit('plugins-changed')
-  } else {
-    emit('toast', res.data?.message || '操作失败')
-  }
-}
-
-function openConfig(p) {
-  configPlugin.value = p
-  configFields.value = p.config_fields || []
-  configValues.value = {}
-  for (const f of configFields.value) configValues.value[f.key] = (p.config && p.config[f.key]) || ''
-}
-
-async function saveConfig() {
-  if (!configPlugin.value) return
-  configSaving.value = true
-  const config = {}
-  for (const f of configFields.value) if (configValues.value[f.key]) config[f.key] = configValues.value[f.key]
-  const res = await api.savePluginConfig(deviceId.value, configPlugin.value.name, config)
-  configSaving.value = false
-  if (res.status === 200 && res.data?.code === 0) {
-    emit('toast', '配置已保存')
-    configPlugin.value = null
-    await loadPlugins()
-    emit('plugins-changed')
-  } else {
-    emit('toast', res.data?.message || '保存失败')
-  }
-}
-
-watch(activeTab, (val) => {
-  if (val === 'plugins') loadPlugins()
-})
 
 async function save() {
   if (!props.device?.mac || saving.value) return
@@ -895,88 +703,6 @@ async function save() {
 .collapse-body { margin-top: 8px; display: flex; flex-direction: column; gap: 14px; }
 
 .settings-textarea { min-height: 80px; resize: vertical; }
-
-/* ===== 插件管理 ===== */
-.plugins-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.plugins-hint { font-size: 12px; color: var(--text-sub); }
-.plugins-loading { padding: 40px; text-align: center; color: var(--text-sub); font-size: 13px; }
-.plugins-empty {
-  padding: 36px 16px; text-align: center;
-  color: var(--text-dim); font-size: 13px;
-  border: 1px dashed var(--glass-border);
-  border-radius: 12px;
-}
-.plugin-list { display: flex; flex-direction: column; gap: 8px; }
-.plugin-item {
-  display: flex; flex-direction: column; gap: 10px;
-  padding: 14px;
-  background: rgba(255, 255, 255, 0.35);
-  border: 1px solid var(--glass-border);
-  border-radius: 12px;
-  transition: all 0.2s var(--ease);
-}
-.plugin-item:hover { background: var(--mint-softer); border-color: var(--mint-border); }
-.plugin-item.enabled { border-color: var(--mint-border); }
-.plugin-item.has-update { border-color: var(--amber); }
-.plugin-main { display: flex; align-items: center; gap: 10px; }
-.plugin-icon {
-  width: 36px; height: 36px; border-radius: 10px; flex-shrink: 0;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 14px; font-weight: 700; color: var(--text-sub);
-  background: var(--glass-bg-strong);
-  border: 1px solid var(--glass-border);
-  transition: all 0.25s var(--ease);
-}
-.plugin-icon.active { background: var(--grad-mint); color: #fff; border-color: transparent; box-shadow: var(--shadow-mint); }
-.plugin-info { flex: 1; min-width: 0; }
-.plugin-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.plugin-meta { display: flex; gap: 4px; margin-top: 4px; }
-.plugin-meta .meta-tag {
-  font-size: 10px; padding: 1px 6px; border-radius: 4px;
-  background: var(--glass-bg-strong); color: var(--text-sub);
-}
-.plugin-meta .meta-tag.update { background: rgba(245, 158, 11, 0.14); color: #b45309; }
-.plugin-actions { display: flex; gap: 4px; }
-.plugin-actions .action-btn {
-  flex: 1; padding: 5px 8px; font-size: 11px; font-weight: 600;
-  border-radius: 8px; border: 1px solid var(--glass-border);
-  background: var(--glass-bg-strong); color: var(--text-sub);
-  cursor: pointer; transition: all 0.2s var(--ease);
-}
-.plugin-actions .action-btn:hover { border-color: var(--mint); color: var(--mint-deep); }
-.plugin-actions .action-btn.toggle.on { background: var(--mint-soft); color: var(--mint); border-color: var(--mint-border); }
-.plugin-actions .action-btn.update { background: rgba(245, 158, 11, 0.12); color: #b45309; border-color: transparent; }
-.plugin-actions .action-btn.danger:hover { border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
-.plugin-actions .action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-/* ===== 插件配置弹窗 ===== */
-.config-mask {
-  position: fixed; inset: 0; z-index: 240;
-  display: flex; align-items: center; justify-content: center;
-  background: rgba(15, 23, 42, 0.4);
-  backdrop-filter: blur(10px) saturate(140%);
-  -webkit-backdrop-filter: blur(10px) saturate(140%);
-  padding: 20px;
-}
-.config-panel {
-  width: min(420px, 90vw);
-  padding: 26px 24px;
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-hover), var(--glass-hi);
-}
-.config-title { font-size: 16px; font-weight: 700; margin: 0 0 6px; }
-.config-note { font-size: 12px; color: var(--text-sub); margin: 0 0 18px; }
-.config-field { margin-bottom: 14px; }
-.config-label { display: block; font-size: 12px; font-weight: 600; color: var(--text-sub); margin-bottom: 6px; }
-.config-label .req { color: var(--danger); }
-.config-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
-.config-actions .btn-ghost { background: rgba(255,255,255,0.6); color: var(--text-sub); border: 1px solid var(--glass-border); }
-.config-actions .btn-ghost:hover { border-color: var(--mint-border); color: var(--mint-deep); background: var(--mint-softer); }
-.config-actions .btn-mint { background: var(--grad-mint); color: #fff; border: none; box-shadow: var(--shadow-mint); }
-
-/* 弹窗过渡 */
-.pop-enter-active, .pop-leave-active { transition: all 0.3s var(--ease); }
-.pop-enter-from, .pop-leave-to { opacity: 0; transform: scale(0.95) translateY(10px); }
 
 /* 底部按钮区 */
 .settings-foot {

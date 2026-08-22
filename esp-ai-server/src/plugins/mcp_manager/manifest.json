@@ -1,0 +1,18 @@
+{
+    "id": "mcp_manager",
+    "name": "MCP 管理",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "MCP 服务器配置管理，添加、移除、启用、禁用",
+    "api_version": "1.0",
+    "optional": true,
+    "frontend": true,
+    "frontend_config": {
+        "nav_label": "MCP",
+        "nav_icon": "server",
+        "width": "full"
+    },
+    "requires": [],
+    "config_fields": [],
+    "permissions": ["network", "db", "kv"]
+}

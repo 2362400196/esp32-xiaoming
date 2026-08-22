@@ -208,6 +208,19 @@ getActiveEmoPack: (deviceId) => request('/api/v1/emos/active/' + encodeURICompon
     wechatUnbind: (deviceKey) => request('/api/v1/wechat/unbind', 'POST', { device_key: deviceKey }),
     wechatBindings: () => request('/api/v1/wechat/bindings'),
     wechatRecentGroups: () => request('/api/v1/wechat/recent-groups'),
+  // 可选插件（商店安装/卸载）
+  optionalPlugins: () => request('/api/v1/plugins/optional'),
+  installOptionalPlugin: (name) => request('/api/v1/plugins/optional/' + encodeURIComponent(name) + '/install', 'POST'),
+  uninstallOptionalPlugin: (name) => request('/api/v1/plugins/optional/' + encodeURIComponent(name) + '/uninstall', 'POST'),
+  // 插件前端页面
+  pluginFrontendPages: () => request('/api/v1/plugins/frontend-pages'),
+  // MCP 服务器管理
+  mcpServers: (mac) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp'),
+  mcpTools: (mac, server) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/' + encodeURIComponent(server) + '/tools'),
+  mcpUpdate: (mac, server, config) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/' + encodeURIComponent(server), 'PUT', config),
+  mcpDelete: (mac, server) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/' + encodeURIComponent(server), 'DELETE'),
+  mcpToggle: (mac, server, disabled) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/' + encodeURIComponent(server) + '/toggle', 'POST', { disabled }),
+  mcpDisabled: (mac) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/disabled'),
 }
 
 export function formatTime(ts) {

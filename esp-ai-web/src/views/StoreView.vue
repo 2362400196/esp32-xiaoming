@@ -45,8 +45,8 @@
 
       <!-- 市场插件网格 -->
       <div v-else class="market-grid">
-        <div v-for="(p, i) in marketList" :key="p.slug" class="market-card glass card-in"
-          :style="{ animationDelay: i * 0.04 + 's' }" :class="{ installed: isInstalledLocally(p.slug) }"
+        <div v-for="(p, i) in marketList" :key="p.slug || p.name" class="market-card glass card-in"
+          :style="{ animationDelay: i * 0.04 + 's' }" :class="{ installed: isInstalled(p) }"
           @click="openDetail(p)">
           <div class="market-card-header">
             <div class="market-icon">
@@ -55,30 +55,37 @@
             <div class="market-info">
               <div class="market-title-row">
                 <p class="market-name">{{ p.name }}</p>
-                <span v-if="isInstalledLocally(p.slug)" class="installed-badge">已安装</span>
+                <span v-if="isInstalled(p)" class="installed-badge">已安装</span>
               </div>
               <p class="market-desc">{{ p.description }}</p>
             </div>
           </div>
           <div class="market-meta-row">
-            <span class="meta-item">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                <circle cx="12" cy="7" r="4"/>
-              </svg>
-              {{ p.developer_name }}
-            </span>
-            <span class="meta-sep">·</span>
-            <span class="meta-item">v{{ p.latest_version }}</span>
-            <span class="meta-sep">·</span>
-            <span class="meta-item">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="7 10 12 15 17 10"/>
-                <line x1="12" y1="15" x2="12" y2="3"/>
-              </svg>
-              {{ formatDownloads(p.total_downloads) }}
-            </span>
+            <template v-if="p.is_optional">
+              <span class="meta-item">v{{ p.latest_version }}</span>
+              <span class="meta-sep">·</span>
+              <span class="meta-item">内置</span>
+            </template>
+            <template v-else>
+              <span class="meta-item">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                  <circle cx="12" cy="7" r="4"/>
+                </svg>
+                {{ p.developer_name }}
+              </span>
+              <span class="meta-sep">·</span>
+              <span class="meta-item">v{{ p.latest_version }}</span>
+              <span class="meta-sep">·</span>
+              <span class="meta-item">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="7 10 12 15 17 10"/>
+                  <line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+                {{ formatDownloads(p.total_downloads) }}
+              </span>
+            </template>
           </div>
           <div v-if="p.avg_rating > 0" class="market-rating-row">
             <div class="rating-stars">
@@ -88,11 +95,14 @@
             <span class="rating-count">({{ p.review_count }})</span>
           </div>
           <div class="market-actions">
-            <button v-if="!isInstalledLocally(p.slug)" class="install-btn"
-              :disabled="p.installing" @click.stop="installFromMarket(p)">
+            <button v-if="!isInstalled(p)" class="install-btn"
+              :disabled="p.installing" @click.stop="installPlugin(p)">
               {{ p.installing ? '安装中…' : '安装' }}
             </button>
-            <span v-else class="installed-text">已安装</span>
+            <button v-else class="uninstall-btn" :disabled="p.installing"
+              @click.stop="uninstallPlugin(p)">
+              {{ p.installing ? '卸载中…' : '卸载' }}
+            </button>
           </div>
         </div>
       </div>
@@ -193,9 +203,13 @@
           </div>
 
           <div class="detail-footer">
-            <button v-if="!isInstalledLocally(detailPlugin.slug)" class="btn-mint detail-install"
-              :disabled="detailPlugin.installing" @click="installFromMarket(detailPlugin)">
-              {{ detailPlugin.installing ? '安装中…' : '安装到服务器' }}
+            <button v-if="!isInstalled(detailPlugin)" class="btn-mint detail-install"
+              :disabled="detailPlugin.installing" @click="installPlugin(detailPlugin)">
+              {{ detailPlugin.installing ? '安装中…' : '安装' }}
+            </button>
+            <button v-else-if="detailPlugin.is_optional" class="btn-ghost detail-install"
+              :disabled="detailPlugin.installing" @click="uninstallPlugin(detailPlugin)">
+              {{ detailPlugin.installing ? '卸载中…' : '卸载' }}
             </button>
             <span v-else class="detail-installed">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -207,6 +221,27 @@
         </div>
       </div>
     </transition>
+
+    <!-- ======================= 卸载确认弹窗 ======================= -->
+    <transition name="pop">
+      <div v-if="confirmUninstall" class="detail-mask" @click.self="confirmUninstall = null">
+        <div class="confirm-panel glass">
+          <div class="confirm-icon">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="1.5" stroke-linecap="round">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="8" x2="12" y2="13"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+          </div>
+          <h3 class="confirm-title">确认卸载「{{ confirmUninstall?.name }}」？</h3>
+          <p class="confirm-desc">卸载后将清空该插件的所有配置数据，此操作不可撤销。</p>
+          <div class="confirm-actions">
+            <button class="btn btn-cancel" @click="confirmUninstall = null">取消</button>
+            <button class="btn btn-danger" @click="doUninstall(confirmUninstall)">确认卸载</button>
+          </div>
+        </div>
+      </div>
+    </transition>
   </div>
 </template>
 
@@ -214,7 +249,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { api, isLoggedIn } from '../api'
 
-const emit = defineEmits(['toast'])
+const emit = defineEmits(['toast', 'plugin-changed'])
 
 const isLoggedInUser = computed(() => isLoggedIn())
 
@@ -229,6 +264,101 @@ const categories = ref([])
 const page = ref(1)
 const pageSize = 20
 const localInstalled = ref([])
+const optionalInstalled = ref(new Set())
+const confirmUninstall = ref(null)
+
+/** 判断插件是否已安装（市场插件或内置可选插件） */
+function isInstalled(p) {
+  if (p.is_optional) return optionalInstalled.value.has(p.slug)
+  return localInstalled.value.some(x => x.name === p.slug || x.slug === p.slug)
+}
+
+/** 安装插件：市场插件走下载流程，可选插件走 API */
+async function installPlugin(p) {
+  p.installing = true
+  if (p.is_optional) {
+    const res = await api.installOptionalPlugin(p.slug)
+    if (res.status === 200 && res.data?.code === 0) {
+      optionalInstalled.value = new Set([...optionalInstalled.value, p.slug])
+      p.installed = true
+      emit('plugin-changed')
+      emit('toast', `「${p.name}」已安装`)
+    } else {
+      emit('toast', (res.data && res.data.message) || '安装失败')
+    }
+  } else {
+    emit('toast', `正在下载「${p.name}」…`)
+    try {
+      const dlRes = await fetch(`/api/v1/marketplace/plugins/${encodeURIComponent(p.slug)}/download`)
+      if (!dlRes.ok) throw new Error('下载失败')
+      const blob = await dlRes.blob()
+      const file = new File([blob], `${p.slug}-${p.latest_version}.zip`, { type: 'application/zip' })
+      const res = await api.installPluginZip(file)
+      if (res.status === 200 && res.data?.code === 0) {
+        emit('plugin-changed')
+        emit('toast', `「${p.name}」安装成功`)
+        await loadLocalInstalled()
+      } else {
+        emit('toast', res.data?.message || '安装失败')
+      }
+    } catch (e) {
+      emit('toast', '下载失败：' + e.message)
+    }
+  }
+  p.installing = false
+}
+
+/** 卸载可选插件 — 弹出确认对话框 */
+function uninstallPlugin(p) {
+  if (!p.is_optional) return
+  confirmUninstall.value = p
+}
+
+/** 执行卸载（确认后） */
+async function doUninstall(p) {
+  confirmUninstall.value = null
+  if (!p.is_optional) return
+  p.installing = true
+  const res = await api.uninstallOptionalPlugin(p.slug)
+  if (res.status === 200 && res.data?.code === 0) {
+    const s = new Set(optionalInstalled.value)
+    s.delete(p.slug)
+    optionalInstalled.value = s
+    p.installed = false
+    emit('plugin-changed')
+    emit('toast', (res.data && res.data.message) || `「${p.name}」已卸载`)
+  } else {
+    emit('toast', (res.data && res.data.message) || '卸载失败')
+  }
+  p.installing = false
+}
+
+async function loadOptionalPlugins() {
+  const res = await api.optionalPlugins()
+  if (res.status === 200 && res.data?.code === 0) {
+    const list = (res.data.data || []).map(p => ({
+      slug: p.name,
+      name: p.title || p.name,
+      description: p.description || '',
+      latest_version: p.version || '1.0.0',
+      developer_name: '',
+      total_downloads: 0,
+      avg_rating: 0,
+      review_count: 0,
+      is_optional: true,
+      installed: p.installed || false,
+      installing: false,
+    }))
+    // 标记已安装的可选插件
+    const installed = new Set()
+    for (const p of list) {
+      if (p.installed) installed.add(p.slug)
+    }
+    optionalInstalled.value = installed
+    // 合并到市场列表
+    marketList.value = [...marketList.value, ...list]
+  }
+}
 
 async function loadCategories() {
   const res = await api.marketplaceCategories()
@@ -252,6 +382,8 @@ async function loadMarket() {
     marketTotal.value = 0
   }
   marketLoading.value = false
+  // 加载内置可选插件，合并到市场列表
+  await loadOptionalPlugins()
 }
 
 function searchMarket() {
@@ -266,31 +398,6 @@ async function loadLocalInstalled() {
   }
 }
 
-function isInstalledLocally(slug) {
-  return localInstalled.value.some(p => p.name === slug || p.slug === slug)
-}
-
-async function installFromMarket(p) {
-  p.installing = true
-  emit('toast', `正在下载「${p.name}」…`)
-  try {
-    const dlRes = await fetch(`/api/v1/marketplace/plugins/${encodeURIComponent(p.slug)}/download`)
-    if (!dlRes.ok) throw new Error('下载失败')
-    const blob = await dlRes.blob()
-    const file = new File([blob], `${p.slug}-${p.latest_version}.zip`, { type: 'application/zip' })
-    const res = await api.installPluginZip(file)
-    if (res.status === 200 && res.data?.code === 0) {
-      emit('toast', `「${p.name}」安装成功`)
-      await loadLocalInstalled()
-    } else {
-      emit('toast', res.data?.message || '安装失败')
-    }
-  } catch (e) {
-    emit('toast', '下载失败：' + e.message)
-  }
-  p.installing = false
-}
-
 // ===== 插件详情 =====
 const detailPlugin = ref(null)
 const detailVersions = ref([])
@@ -303,6 +410,8 @@ async function openDetail(p) {
   detailPlugin.value = { ...p, installing: false }
   detailVersions.value = []
   detailReviews.value = []
+  // 可选插件没有云端版本/评价
+  if (p.is_optional) return
   const [vRes, rRes] = await Promise.all([
     api.marketplaceVersions(p.slug),
     api.marketplaceReviews(p.slug),
@@ -579,6 +688,33 @@ onMounted(() => {
 
 .pop-enter-active, .pop-leave-active { transition: all 0.3s var(--ease); }
 .pop-enter-from, .pop-leave-to { opacity: 0; transform: scale(0.95) translateY(10px); }
+
+.uninstall-btn {
+  padding: 6px 16px; border-radius: var(--radius-sm); border: 1px solid var(--danger-border);
+  background: var(--danger-soft); color: var(--danger); font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: all 0.2s var(--ease);
+}
+.uninstall-btn:hover { background: var(--danger); color: #fff; }
+.uninstall-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ===== 卸载确认弹窗 ===== */
+.confirm-panel {
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 360px; max-width: 88vw; padding: 32px 28px 24px; border-radius: 16px;
+  z-index: 2000; text-align: center;
+}
+.confirm-icon { margin-bottom: 16px; }
+.confirm-title { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
+.confirm-desc { font-size: 13px; color: var(--text-secondary); margin: 0 0 24px; line-height: 1.5; }
+.confirm-actions { display: flex; gap: 12px; justify-content: center; }
+.confirm-actions .btn {
+  min-width: 100px; padding: 8px 20px; border-radius: 8px; border: none;
+  font-size: 14px; cursor: pointer; transition: all .2s;
+}
+.btn-cancel { background: var(--bg-secondary); color: var(--text); }
+.btn-cancel:hover { background: var(--bg-tertiary); }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn-danger:hover { opacity: .85; }
 
 /* ===== 响应式 ===== */
 @media (max-width: 640px) {

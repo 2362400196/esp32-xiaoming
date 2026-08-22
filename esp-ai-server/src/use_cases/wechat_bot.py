@@ -47,6 +47,33 @@ MAX_MSG_LEN = 4000
 DEDUP_CACHE_SIZE = 64
 CONTEXT_CACHE_SIZE = 32
 
+# 微信数据文件（统一存储 token + 绑定关系）
+WECHAT_DATA_FILE = "data/wechat_bot_data.json"
+
+
+def _load_wechat_data() -> dict:
+    """加载微信数据文件。"""
+    import os
+    if not os.path.exists(WECHAT_DATA_FILE):
+        return {"token": {}, "bindings": []}
+    try:
+        with open(WECHAT_DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {"token": {}, "bindings": []}
+
+
+def _save_wechat_data(data: dict) -> None:
+    """原子写入微信数据文件。"""
+    import os
+    os.makedirs(os.path.dirname(WECHAT_DATA_FILE), exist_ok=True)
+    tmp = WECHAT_DATA_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, WECHAT_DATA_FILE)
+
 
 class QRStatus(str, Enum):
     IDLE = "idle"
@@ -215,57 +242,37 @@ class WeChatBot:
         return True
 
     def _persist_token(self) -> None:
-        """持久化 token 和 base_url 到文件（原子写入）"""
-        import os
-        try:
-            token_file = "data/wechat_token.json"
-            os.makedirs(os.path.dirname(token_file), exist_ok=True)
-            data = {
-                "token": self.state.token,
-                "base_url": self.state.base_url,
-                "account_id": self.state.account_id,
-            }
-            # 原子写入：先写临时文件，再 os.replace 原子替换
-            tmp_file = token_file + ".tmp"
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_file, token_file)
-            logger.info(f"[WeChat] token 已持久化到 {token_file}")
-        except Exception as e:
-            logger.warning(f"[WeChat] token 持久化失败: {e}")
+        """持久化 token 和 base_url 到统一数据文件（原子写入）"""
+        data = _load_wechat_data()
+        data["token"] = {
+            "token": self.state.token,
+            "base_url": self.state.base_url,
+            "account_id": self.state.account_id,
+        }
+        _save_wechat_data(data)
+        logger.info(f"[WeChat] token 已持久化到 {WECHAT_DATA_FILE}")
 
     def _load_persisted_token(self) -> bool:
-        """从文件加载持久化的 token"""
-        import os
-        token_file = "data/wechat_token.json"
-        if not os.path.exists(token_file):
+        """从统一数据文件加载持久化的 token"""
+        data = _load_wechat_data()
+        tok = data.get("token", {})
+        if not tok.get("token"):
             return False
-        try:
-            with open(token_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            self.state.token = data.get("token", "")
-            self.state.base_url = data.get("base_url", DEFAULT_BASE_URL)
-            self.state.account_id = data.get("account_id", "default")
-            if self.state.token:
-                self.state.configured = True
-                # logger.info(f"[WeChat] 从文件恢复 token: len={len(self.state.token)}, base_url={self.state.base_url}")
-                return True
-        except Exception as e:
-            logger.warning(f"[WeChat] 加载持久化 token 失败: {e}")
+        self.state.token = tok.get("token", "")
+        self.state.base_url = tok.get("base_url", DEFAULT_BASE_URL)
+        self.state.account_id = tok.get("account_id", "default")
+        if self.state.token:
+            self.state.configured = True
+            return True
         return False
 
     def _clear_persisted_token(self) -> None:
-        """删除持久化的 token 文件（token 失效后避免重启自动重试）"""
-        import os
-        token_file = "data/wechat_token.json"
-        try:
-            if os.path.exists(token_file):
-                os.remove(token_file)
-                logger.info("[WeChat] token 已失效，已清除持久化 token 文件，需重新扫码登录")
-        except Exception as e:
-            logger.warning(f"[WeChat] 清除持久化 token 失败: {e}")
+        """清空统一数据文件中的 token（token 失效后避免重启自动重试）"""
+        data = _load_wechat_data()
+        if data.get("token"):
+            data["token"] = {}
+            _save_wechat_data(data)
+            logger.info("[WeChat] token 已失效，已清除持久化 token，需重新扫码登录")
 
     # ── HTTP 客户端 ───────────────────────────
 

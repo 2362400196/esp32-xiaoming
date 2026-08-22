@@ -77,6 +77,9 @@ _plugin_module_names: dict[str, str] = {}
 # 插件 → 已加入 sys.path 的目录（支持 plugin.py 同目录 import 其他模块）
 _plugin_syspaths: dict[str, str] = {}
 
+# 插件 → 是否为可选插件（manifest.json 的 optional: true，默认不安装）
+_plugin_optional: dict[str, bool] = {}
+
 # 工具名 → 所属插件名（避免重复遍历 _loaded_tools，且消除重名归属歧义）
 _tool_owner: dict[str, str] = {}
 
@@ -229,10 +232,12 @@ def _record_meta(plugin_name: str, plugin_dir: Path) -> None:
         _plugin_manifest[plugin_name] = manifest
         _plugin_meta[plugin_name] = manifest.to_meta_dict()
         _plugin_version[plugin_name] = manifest.version
+        _plugin_optional[plugin_name] = manifest.optional
     else:
         logger.warning(f"[插件] {plugin_name} 无 manifest.json，元数据缺失")
         _plugin_meta[plugin_name] = {}
         _plugin_version[plugin_name] = "1.0.0"
+        _plugin_optional[plugin_name] = False
     _plugin_source[plugin_name] = "installed" if (INSTALLED_PLUGINS_DIR / plugin_name).is_dir() else "built-in"
     _plugin_module_names[plugin_name] = (
         f"esp_ai_installed_plugin_{plugin_name}"
@@ -252,6 +257,7 @@ async def _unload_plugin(plugin_name: str) -> None:
     _plugin_meta.pop(plugin_name, None)
     _plugin_version.pop(plugin_name, None)
     _plugin_manifest.pop(plugin_name, None)
+    _plugin_optional.pop(plugin_name, None)
     module_name = _plugin_module_names.pop(plugin_name, None)
 
     if old_source == "installed" or (INSTALLED_PLUGINS_DIR / plugin_name).is_dir():
@@ -344,6 +350,29 @@ def _available_plugins_info() -> list[dict]:
             "source": _plugin_source.get(name, "built-in"),
             "version": _plugin_version.get(name, "1.0.0"),
         })
+    return out
+
+
+def is_optional_plugin(plugin_name: str) -> bool:
+    """判断插件是否为可选插件（manifest.json 声明了 optional: true）。"""
+    return _plugin_optional.get(plugin_name, False)
+
+
+def get_optional_plugins_info() -> list[dict]:
+    """返回所有可选插件的信息（含元数据）。"""
+    out = []
+    for name in sorted(_plugin_optional.keys()):
+        if _plugin_optional.get(name):
+            meta = _plugin_meta.get(name, {})
+            out.append({
+                "name": name,
+                "version": _plugin_version.get(name, "1.0.0"),
+                "source": _plugin_source.get(name, "built-in"),
+                "title": meta.get("name", name),
+                "description": meta.get("description", ""),
+                "requires": meta.get("requires", []),
+                "config_fields": meta.get("config_fields", []),
+            })
     return out
 
 

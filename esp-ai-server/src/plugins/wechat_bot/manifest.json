@@ -1,0 +1,18 @@
+{
+    "id": "wechat_bot",
+    "name": "微信集成",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "微信消息收发、二维码登录、设备绑定管理",
+    "api_version": "1.0",
+    "optional": true,
+    "frontend": true,
+    "frontend_config": {
+        "nav_label": "微信",
+        "nav_icon": "message",
+        "width": "narrow"
+    },
+    "requires": [],
+    "config_fields": [],
+    "permissions": ["network", "llm", "device", "db", "kv"]
+}

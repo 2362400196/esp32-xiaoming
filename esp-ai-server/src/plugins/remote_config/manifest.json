@@ -1,0 +1,18 @@
+{
+    "id": "remote_config",
+    "name": "远程配置",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "远程配置管理，查询设备配置、上报状态、管理缓存",
+    "api_version": "1.0",
+    "optional": true,
+    "frontend": true,
+    "frontend_config": {
+        "nav_label": "配置",
+        "nav_icon": "cloud",
+        "width": "full"
+    },
+    "requires": [],
+    "config_fields": [],
+    "permissions": ["device", "network", "db"]
+}

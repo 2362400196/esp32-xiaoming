@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MCP 服务器管理</title>
+<style>
+:root {
+  --mint: #10b981; --mint-deep: #059669; --mint-soft: rgba(16,185,129,0.1);
+  --mint-border: rgba(16,185,129,0.25); --text-main: #1e293b; --text-sub: #64748b;
+  --bg: #f0f5f0; --border: rgba(0,0,0,0.06); --danger: #ef4444; --danger-soft: rgba(239,68,68,0.1);
+  --radius: 16px; --radius-sm: 10px; --shadow: 0 4px 20px rgba(0,0,0,0.06);
+  --glass: linear-gradient(155deg, rgba(255,255,255,0.85), rgba(255,255,255,0.55));
+  --glass-border: rgba(255,255,255,0.6);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg); color: var(--text-main); min-height: 100vh;
+}
+.container { max-width: 720px; margin: 0 auto; padding: 20px 16px 40px; }
+.header { margin-bottom: 20px; }
+.header h1 { font-size: 20px; font-weight: 800; margin: 0 0 4px; }
+.header p { font-size: 13px; color: var(--text-sub); margin: 0; }
+.device-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 16px; padding: 10px 16px;
+  background: var(--glass); border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm); font-size: 13px; backdrop-filter: blur(12px);
+}
+.device-bar .device-name { font-weight: 600; }
+.device-bar .no-device { color: var(--danger); font-weight: 600; }
+.toolbar { display: flex; justify-content: flex-end; margin-bottom: 16px; }
+.btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 8px 18px;
+  font-size: 13px; font-weight: 600; border: none; border-radius: var(--radius-sm);
+  cursor: pointer; transition: all 0.25s; text-decoration: none;
+}
+.btn-primary { background: var(--mint); color: #fff; }
+.btn-primary:hover { background: var(--mint-deep); transform: translateY(-1px); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-ghost { background: transparent; color: var(--text-main); padding: 6px 14px; }
+.btn-ghost:hover { background: var(--mint-soft); }
+.btn-danger { color: var(--danger) !important; }
+.btn-danger:hover { background: var(--danger-soft) !important; }
+.btn-xs { padding: 4px 12px; font-size: 12px; border-radius: 8px; }
+.card {
+  background: var(--glass); border: 1px solid var(--glass-border);
+  border-radius: var(--radius); padding: 18px; margin-bottom: 12px;
+  backdrop-filter: blur(12px); box-shadow: var(--shadow);
+}
+.card-head { display: flex; gap: 12px; }
+.card-icon {
+  width: 38px; height: 38px; border-radius: 10px; display: flex;
+  align-items: center; justify-content: center; font-size: 15px; font-weight: 700;
+  color: #fff; background: linear-gradient(135deg, var(--mint), var(--mint-deep)); flex-shrink: 0;
+}
+.card-info { flex: 1; min-width: 0; }
+.card-title-row { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+.card-name { font-weight: 700; font-size: 15px; }
+.badge { font-size: 11px; padding: 2px 8px; border-radius: 99px; font-weight: 600; }
+.badge-on { background: var(--mint-soft); color: var(--mint-deep); }
+.badge-off { background: var(--danger-soft); color: var(--danger); }
+.card-url { font-size: 12px; color: var(--text-sub); word-break: break-all; margin-top: 2px; }
+.card-meta { font-size: 12px; color: var(--text-sub); margin: 8px 0; }
+.card-actions { display: flex; gap: 6px; border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px; }
+.tools-section { margin-top: 8px; }
+.tools-title { font-size: 12px; font-weight: 600; color: var(--text-sub); margin-bottom: 6px; }
+.tools-list { display: flex; flex-direction: column; gap: 4px; max-height: 150px; overflow-y: auto; }
+.tool-item { display: flex; gap: 6px; font-size: 12px; padding: 4px 8px; background: rgba(0,0,0,0.03); border-radius: 6px; }
+.tool-name { font-weight: 600; color: var(--mint-deep); white-space: nowrap; }
+.tool-desc { color: var(--text-sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.empty-state { text-align: center; padding: 50px 20px; color: var(--text-sub); }
+.empty-state svg { opacity: 0.35; margin-bottom: 10px; }
+.empty-state p { margin: 4px 0; }
+.spinner { width: 28px; height: 28px; border: 3px solid var(--mint-soft); border-top-color: var(--mint-deep); border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 50px; color: var(--text-sub); }
+/* Modal */
+.modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.3); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.modal-panel { width: 90%; max-width: 460px; max-height: 90vh; overflow-y: auto; }
+.modal-title { font-size: 16px; font-weight: 700; margin: 0 0 16px; }
+.form-group { margin-bottom: 12px; }
+.form-label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; color: var(--text-sub); }
+input, select, textarea {
+  width: 100%; padding: 8px 12px; font-size: 13px; border: 1px solid var(--border);
+  border-radius: 8px; background: rgba(255,255,255,0.8); color: var(--text-main);
+  outline: none; font-family: inherit; box-sizing: border-box;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--mint); box-shadow: 0 0 0 3px var(--mint-soft); }
+textarea { resize: vertical; min-height: 60px; }
+.form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  padding: 10px 24px; background: var(--glass); border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm); font-size: 13px; font-weight: 500;
+  backdrop-filter: blur(12px); box-shadow: 0 8px 30px rgba(0,0,0,0.1); z-index: 2000;
+  animation: fadeInUp 0.3s ease;
+}
+@keyframes fadeInUp { from { opacity: 0; transform: translateX(-50%) translateY(16px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+</style>
+</head>
+<body>
+<div class="container" id="app">
+  <div class="header">
+    <h1>MCP 服务器管理</h1>
+    <p>管理和配置外部工具服务器的连接</p>
+  </div>
+  <div class="device-bar" id="deviceBar">
+    <span>设备：<span class="device-name" id="deviceName">未选择</span></span>
+    <span class="no-device" id="noDevice" style="display:none">请先选择设备</span>
+  </div>
+  <div class="toolbar">
+    <button class="btn btn-primary" onclick="openAddForm()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      添加服务器
+    </button>
+  </div>
+  <div id="serverList"></div>
+  <div class="empty-state" id="emptyState" style="display:none">
+    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+    <p>暂无 MCP 服务器配置</p>
+    <p style="font-size:13px;color:var(--text-sub)">点击「添加服务器」连接外部工具</p>
+  </div>
+  <div class="loading" id="loading" style="display:none">
+    <div class="spinner"></div>
+    <p>加载 MCP 配置…</p>
+  </div>
+</div>
+
+<!-- 添加/编辑弹窗 -->
+<div class="modal-mask" id="modalMask" style="display:none" onclick="if(event.target===this)closeForm()">
+  <div class="modal-panel card" onclick="event.stopPropagation()">
+    <h3 class="modal-title" id="modalTitle">添加服务器</h3>
+    <div class="form-group">
+      <label class="form-label">服务器名称</label>
+      <input id="formName" placeholder="例如：weather-server" />
+    </div>
+    <div class="form-group">
+      <label class="form-label">URL</label>
+      <input id="formUrl" placeholder="https://example.com/mcp" />
+    </div>
+    <div class="form-group">
+      <label class="form-label">类型</label>
+      <select id="formType">
+        <option value="streamable_http">streamable_http</option>
+        <option value="stdio">stdio</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">请求头（JSON，可选）</label>
+      <textarea id="formHeaders" placeholder='{"Authorization": "Bearer xxx"}' rows="3"></textarea>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeForm()">取消</button>
+      <button class="btn btn-primary" id="saveBtn" onclick="saveServer()">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentDevice = null;
+let servers = {};
+let editingName = '';
+let disabledServers = [];
+
+function getToken() { return localStorage.getItem('espai_token') || ''; }
+
+function deviceMac() {
+  return currentDevice?.device_id || currentDevice?.id || currentDevice?.mac || '';
+}
+
+function showToast(msg) {
+  const old = document.querySelector('.toast');
+  if (old) old.remove();
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2200);
+}
+
+async function api(path, method = 'GET', body = null) {
+  const token = getToken();
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  try {
+    const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : null });
+    return await res.json();
+  } catch (e) {
+    return { code: 1, message: String(e) };
+  }
+}
+
+async function loadServers() {
+  const mac = deviceMac();
+  if (!mac) {
+    document.getElementById('serverList').innerHTML = '';
+    document.getElementById('emptyState').style.display = 'block';
+    document.getElementById('loading').style.display = 'none';
+    return;
+  }
+  document.getElementById('loading').style.display = 'flex';
+  document.getElementById('emptyState').style.display = 'none';
+  document.getElementById('serverList').innerHTML = '';
+
+  const res = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp');
+  document.getElementById('loading').style.display = 'none';
+  if (res.code === 0) {
+    servers = res.data || {};
+    // 加载禁用状态
+    const dRes = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/disabled');
+    disabledServers = [];
+    if (dRes.code === 0 && dRes.data) {
+      disabledServers = dRes.data.disabled_servers || [];
+    }
+    renderServers();
+  } else {
+    showToast(res.message || '加载失败');
+  }
+}
+
+function renderServers() {
+  const list = document.getElementById('serverList');
+  const empty = document.getElementById('emptyState');
+  const names = Object.keys(servers);
+  if (names.length === 0) {
+    list.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  list.innerHTML = names.map(name => {
+    const cfg = servers[name];
+    const disabled = disabledServers.includes(name);
+    const icon = name.charAt(0).toUpperCase();
+    return `<div class="card">
+      <div class="card-head">
+        <div class="card-icon">${icon}</div>
+        <div class="card-info">
+          <div class="card-title-row">
+            <span class="card-name">${escapeHtml(name)}</span>
+            <span class="badge ${disabled ? 'badge-off' : 'badge-on'}">${disabled ? '已禁用' : '已启用'}</span>
+          </div>
+          <div class="card-url">${escapeHtml(cfg.url || '')}</div>
+        </div>
+      </div>
+      <div class="card-meta">类型：${cfg.type || 'streamable_http'}</div>
+      <div class="tools-section">
+        <div class="tools-title">工具</div>
+        <div class="tools-list" id="tools_${name}">
+          ${cfg._tools ? cfg._tools.map(t => `<div class="tool-item"><span class="tool-name">${escapeHtml(t.name)}</span><span class="tool-desc">${escapeHtml(t.description || '')}</span></div>`).join('') : ''}
+        </div>
+        ${!cfg._tools ? `<button class="btn btn-ghost btn-xs" onclick="loadTools('${name}')">查看工具</button>` : ''}
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-ghost btn-xs" onclick="toggleServer('${name}', ${disabled})">${disabled ? '启用' : '禁用'}</button>
+        <button class="btn btn-ghost btn-xs" onclick="editServer('${name}')">编辑</button>
+        <button class="btn btn-ghost btn-xs btn-danger" onclick="deleteServer('${name}')">删除</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function loadTools(name) {
+  const mac = deviceMac();
+  if (!mac) return;
+  const res = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/' + encodeURIComponent(name) + '/tools');
+  if (res.code === 0) {
+    if (!servers[name]) servers[name] = {};
+    servers[name]._tools = res.data || [];
+    renderServers();
+  } else {
+    showToast(res.message || '加载工具失败');
+  }
+}
+
+async function toggleServer(name, currentlyDisabled) {
+  const mac = deviceMac();
+  if (!mac) return;
+  const newDisabled = !currentlyDisabled;
+  const res = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/' + encodeURIComponent(name) + '/toggle', 'POST', { disabled: newDisabled });
+  if (res.code === 0) {
+    if (newDisabled) {
+      if (!disabledServers.includes(name)) disabledServers.push(name);
+    } else {
+      disabledServers = disabledServers.filter(s => s !== name);
+    }
+    renderServers();
+    showToast(`「${name}」已${newDisabled ? '禁用' : '启用'}`);
+  } else {
+    showToast(res.message || '操作失败');
+  }
+}
+
+function openAddForm() {
+  editingName = '';
+  document.getElementById('modalTitle').textContent = '添加 MCP 服务器';
+  document.getElementById('formName').value = '';
+  document.getElementById('formName').disabled = false;
+  document.getElementById('formUrl').value = '';
+  document.getElementById('formType').value = 'streamable_http';
+  document.getElementById('formHeaders').value = '';
+  document.getElementById('saveBtn').textContent = '保存';
+  document.getElementById('modalMask').style.display = 'flex';
+}
+
+function editServer(name) {
+  const cfg = servers[name];
+  if (!cfg) return;
+  editingName = name;
+  document.getElementById('modalTitle').textContent = '编辑服务器';
+  document.getElementById('formName').value = name;
+  document.getElementById('formName').disabled = true;
+  document.getElementById('formUrl').value = cfg.url || '';
+  document.getElementById('formType').value = cfg.type || 'streamable_http';
+  document.getElementById('formHeaders').value = cfg.headers ? JSON.stringify(cfg.headers, null, 2) : '';
+  document.getElementById('saveBtn').textContent = '保存';
+  document.getElementById('modalMask').style.display = 'flex';
+}
+
+function closeForm() {
+  document.getElementById('modalMask').style.display = 'none';
+}
+
+async function saveServer() {
+  const name = document.getElementById('formName').value.trim();
+  const url = document.getElementById('formUrl').value.trim();
+  const type = document.getElementById('formType').value;
+  const headersRaw = document.getElementById('formHeaders').value.trim();
+  const mac = deviceMac();
+  if (!name) { showToast('请输入服务器名称'); return; }
+  if (!url) { showToast('请输入 URL'); return; }
+  if (!mac) { showToast('请先选择设备'); return; }
+  let headers = {};
+  if (headersRaw) {
+    try { headers = JSON.parse(headersRaw); } catch { showToast('请求头格式错误，需为 JSON'); return; }
+  }
+  const btn = document.getElementById('saveBtn');
+  btn.disabled = true;
+  btn.textContent = '保存中…';
+  const res = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/' + encodeURIComponent(name), 'PUT', { type, url, headers });
+  btn.disabled = false;
+  btn.textContent = '保存';
+  if (res.code === 0) {
+    showToast(editingName ? '已更新' : '已添加');
+    closeForm();
+    await loadServers();
+  } else {
+    showToast(res.message || '保存失败');
+  }
+}
+
+async function deleteServer(name) {
+  const mac = deviceMac();
+  if (!mac) return;
+  if (!confirm(`确定要删除「${name}」吗？`)) return;
+  const res = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/' + encodeURIComponent(name), 'DELETE');
+  if (res.code === 0) {
+    delete servers[name];
+    renderServers();
+    showToast(`「${name}」已删除`);
+  } else {
+    showToast(res.message || '删除失败');
+  }
+}
+
+function escapeHtml(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// 与主应用通信
+window.addEventListener('message', function(e) {
+  try {
+    const msg = typeof e.data === 'object' ? e.data : JSON.parse(e.data);
+    if (msg.type === 'deviceChanged' && msg.device) {
+      currentDevice = msg.device;
+      const mac = deviceMac();
+      document.getElementById('deviceName').textContent = currentDevice?.name || mac || '未选择';
+      document.getElementById('noDevice').style.display = mac ? 'none' : 'inline';
+      if (mac) loadServers();
+    }
+  } catch {}
+});
+
+// 通知主应用已就绪
+try{window.parent.postMessage({ type: 'ready' }, '*');}catch(e){}
+
+// 从 URL 参数读取设备 ID（兼容 postMessage 未到达的情况）
+(function initFromUrl() {
+  const did = new URLSearchParams(window.location.search).get('device_id');
+  if (did) {
+    currentDevice = { device_id: did };
+    const mac = deviceMac();
+    document.getElementById('deviceName').textContent = currentDevice?.name || mac || '未选择';
+    document.getElementById('noDevice').style.display = 'none';
+    loadServers();
+  }
+})();
+</script>
+</body>
+</html>

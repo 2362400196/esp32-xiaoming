@@ -1,0 +1,18 @@
+{
+    "id": "skill_system",
+    "name": "技能系统",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "技能目录管理、创建、更新、删除，控制设备可用技能",
+    "api_version": "1.0",
+    "optional": true,
+    "frontend": true,
+    "frontend_config": {
+        "nav_label": "技能",
+        "nav_icon": "chart",
+        "width": "full"
+    },
+    "requires": [],
+    "config_fields": [],
+    "permissions": ["llm", "db", "kv"]
+}

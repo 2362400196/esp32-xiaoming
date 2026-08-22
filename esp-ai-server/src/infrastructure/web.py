@@ -227,8 +227,27 @@ async def lifespan(app: FastAPI):
             """微信消息回调：查找绑定的设备并转发，然后通过 LLM（含工具）回复"""
             binding = bind_mgr.get_by_wechat(chat_id)
             if not binding:
-                logger.info(f"[WeChat] 未绑定的微信消息: {chat_id[:16]}, 忽略")
-                return
+                # 自动绑定到第一个可用的设备
+                from src.infrastructure.web import get_device_registry
+                registry = get_device_registry()
+                if registry:
+                    device_ids = registry.get_all_ids()
+                    if device_ids:
+                        first_id = device_ids[0]
+                        entry = registry.resolve(first_id)
+                        if entry:
+                            mac = entry.get("mac", "") or entry.get("device_id", "") or first_id
+                            device_key = first_id
+                            bind_mgr.bind(chat_id, sender_id, device_key, device_mac=mac)
+                            binding = bind_mgr.get_by_wechat(chat_id)
+                            try:
+                                await bot_.send_text(chat_id, "已自动绑定设备，现在可以开始对话了")
+                            except Exception:
+                                pass
+                            logger.info(f"[WeChat] 自动绑定: wechat={chat_id[:16]} → device={device_key[:16]}")
+                if not binding:
+                    logger.info(f"[WeChat] 未绑定的微信消息: {chat_id[:16]}, 无在线设备可绑定")
+                    return
             await bind_mgr.send_wechat_message_to_device(
                 binding.device_key, chat_id, sender_id, text
             )
@@ -922,6 +941,10 @@ def _register_routes(app: FastAPI) -> None:
     # 插件管理路由（热加载）
     from src.infrastructure.routes.plugins import router as plugins_router
     app.include_router(plugins_router)
+
+    # 插件前端页面路由（静态文件托管 + 页面列表 API）
+    from src.infrastructure.routes.plugin_frontend import router as plugin_frontend_router
+    app.include_router(plugin_frontend_router)
 
     # 云市场路由（开发者认证、插件上传/下载、评论、分类）
     from src.infrastructure.routes.marketplace import router as marketplace_router

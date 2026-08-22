@@ -70,6 +70,15 @@ class PluginManifest(BaseModel):
     permissions: list[str] = Field(
         default_factory=list, description="权限声明（network/file_read等）"
     )
+    optional: bool = Field(
+        default=False, description="可选插件，默认不安装，需用户从商店启用"
+    )
+    frontend: bool = Field(
+        default=False, description="是否包含前端页面"
+    )
+    frontend_config: dict[str, Any] = Field(
+        default_factory=dict, description="前端页面配置（nav_label, nav_icon, width 等）"
+    )
     file_hashes: list[dict[str, str]] = Field(
         default_factory=list, description="包内每个文件的 SHA-256（签名负载的一部分）"
     )
@@ -159,15 +168,15 @@ class PluginManifest(BaseModel):
         return manifest_major in supported_majors
 
     def to_meta_dict(self) -> dict:
-        """转换为 plugin_loader 使用的元数据字典。
-
-        返回 name/description/requires/config_fields 四个字段。
-        """
+        """转换为 plugin_loader 使用的元数据字典。"""
         return {
             "name": self.name,
             "description": self.description,
             "requires": list(self.requires),
             "config_fields": list(self.config_fields),
+            "optional": self.optional,
+            "frontend": self.frontend,
+            "frontend_config": dict(self.frontend_config),
         }
 
     # ──────────────────────────────────────────────────────────
@@ -191,6 +200,7 @@ class PluginManifest(BaseModel):
             "dependencies": list(self.dependencies),
             "config_fields": list(self.config_fields),
             "permissions": list(self.permissions),
+            "optional": self.optional,
             "file_hashes": sorted(self.file_hashes, key=lambda h: h.get("path", "")),
         }
         return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

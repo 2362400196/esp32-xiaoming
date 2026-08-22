@@ -163,3 +163,26 @@ async def require_admin(user: UserModel = Depends(get_current_user)) -> UserMode
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+async def get_current_user_optional(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
+) -> UserModel | None:
+    """可选的用户认证依赖：有 Token 返回用户，无 Token 返回 None。"""
+    if not credentials:
+        return None
+    try:
+        payload = decode_token(credentials.credentials)
+    except Exception:
+        return None
+    if payload.get("type") != "access":
+        return None
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+    async with get_session_ctx() as session:
+        result = await session.execute(select(UserModel).where(UserModel.id == user_id))
+        user = result.scalar_one_or_none()
+    if not user or not user.is_active:
+        return None
+    return user

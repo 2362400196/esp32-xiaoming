@@ -121,8 +121,27 @@ def _ensure_bot(request: Request):
         async def _on_wechat_message(bot_, chat_id, sender_id, message_id, text, context_token):
             binding = bind_mgr.get_by_wechat(chat_id)
             if not binding:
-                logger.info(f"[WeChat] 未绑定的微信消息: {chat_id[:16]}, 忽略")
-                return
+                # 自动绑定到第一个可用的设备
+                from src.infrastructure.web import get_device_registry
+                registry = get_device_registry()
+                if registry:
+                    device_ids = registry.get_all_ids()
+                    if device_ids:
+                        first_id = device_ids[0]
+                        entry = registry.resolve(first_id)
+                        if entry:
+                            mac = entry.get("mac", "") or entry.get("device_id", "") or first_id
+                            device_key = first_id
+                            bind_mgr.bind(chat_id, sender_id, device_key, device_mac=mac)
+                            binding = bind_mgr.get_by_wechat(chat_id)
+                            try:
+                                await bot_.send_text(chat_id, "已自动绑定设备，现在可以开始对话了")
+                            except Exception:
+                                pass
+                            logger.info(f"[WeChat] 自动绑定: wechat={chat_id[:16]} → device={device_key[:16]}")
+                if not binding:
+                    logger.info(f"[WeChat] 未绑定的微信消息: {chat_id[:16]}, 无在线设备可绑定")
+                    return
             await bind_mgr.send_wechat_message_to_device(
                 binding.device_key, chat_id, sender_id, text
             )
