@@ -94,6 +94,9 @@ static void handle_wakeup(void)
     network_audio_stop();
     // 3. 硬停止扬声器播放（清空缓冲区 + 重置解码器，相当于 Arduino mp3_player_stop）
     audio_spk_hard_stop();
+    // 给 spk_task 时间处理 s_spk_need_reset（清空 I2S DMA、释放解码器）
+    // 打断场景下 spk_task 可能正在阻塞写 I2S，最多等 100ms 让 DMA 写完成
+    vTaskDelay(pdMS_TO_TICKS(30));
 
     // vv=== IDF 特有：确保 WakeNet 已暂停，避免 I2S 句柄竞争 ===vv
     // 按钮唤醒和语音唤醒均可能触发，语音唤醒任务自身会暂停，
@@ -103,6 +106,8 @@ static void handle_wakeup(void)
     // vv=== Arduino wakeUp: esp_ai_session_id = "" ===vv
     // 清除上一轮对话状态（session_id、tts_task_id、drain action 等）
     // 语音打断时旧会话可能还在 drain 等待中，必须清理
+    // 先停止可能残留的麦克风采集（iat_start 后可能未收到 iat_end 就被打断）
+    audio_mic_stop();
     websocket_reset_conversation_state();
 
     // vv=== Arduino wakeUp: 播放唤醒提示音（服务端缓存的叮声/问候语）===

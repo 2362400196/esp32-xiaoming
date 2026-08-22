@@ -364,9 +364,18 @@ static void spk_task(void *arg)
                          (double)total_written * 1000.0 / 2.0 / (double)SPK_SAMPLE_RATE);
                 total_written = 0;
             }
+            // 打断场景（语音/按钮中断）：disable/enable I2S 清空 DMA 缓冲，
+            // 让音频立即停止，避免旧数据继续播放 ~480ms。
+            // 正常播放结束时不走此路径（s_spk_ing 为 false 时 spk_task 不会进 reset），
+            // 仅 audio_spk_hard_stop() 触发硬重置时 s_spk_ing=false + s_spk_need_reset=true
+            // 同时成立，此时 spk_task 已停止写入新数据，安全地清空 DMA。
+            // 清空后立即 enable，新的 audio_spk_play() 写入时 DMA 已空。
+            if (!s_spk_ing) {
+                i2s_channel_disable(s_spk_handle);
+                i2s_channel_enable(s_spk_handle);
+                ESP_LOGD(TAG, "I2S DMA 已清空（打断场景）");
+            }
             // 不再 xStreamBufferReset：audio_spk_play() 已清过，这里再清会丢失期间到达的数据
-            // 不再 i2s_channel_disable/enable：清 DMA 缓冲区会产生约 480ms 静音间隙（卡顿主因）
-            // 新播放开始时 DMA 应已为空（上次音频已播完），直接写入新数据即可
             // 解码器延迟分配：释放旧实例，下一段音频首次解码时再申请（C3 省内存）
             if (s_mp3_dec) { mp3_decoder_free(s_mp3_dec); s_mp3_dec = NULL; }
         }
@@ -1112,13 +1121,13 @@ esp_err_t audio_spk_play(void)
     // 同步重置：清空缓冲区
     if (s_spk_stream) xStreamBufferReset(s_spk_stream);
 
-    // 使用 s_spk_need_reset 让 spk_task 安全地执行完整重置
-    // 包括：清空 I2S DMA、重置解码器、重置采样率和帧计数
-    // 不能在这里直接调用 i2s_channel_disable/enable，因为 spk_task 可能正在写 I2S
-    s_spk_need_reset = true;
-    s_spk_reset_decoder_flag = false;  // s_spk_need_reset 会处理，避免重复
-
+    // 先开启播放标志，再设置重置标志！顺序不可颠倒：
+    // s_spk_need_reset → spk_task 会进入 reset 路径，其中检查 !s_spk_ing 来
+    // 决定是否清空 I2S DMA。如果 s_spk_need_reset 先于 s_spk_ing 设置，
+    // spk_task 可能在线程切换间隙看到 s_spk_ing=false 而误清 DMA，
+    // 导致 I2S RX 时钟停止，WakeNet 无法读取麦克风数据。
     s_spk_ing = true;
+    s_spk_need_reset = true;
     // 不重置 s_spk_wait_drain：如果二进制 "03" 已设置 drain 等待，
     // play_audio 消息可能晚于 "03" 到达（WebSocket 消息顺序），
     // 重置会导致 drain 检查失效，看门狗 30s 超时

@@ -239,6 +239,7 @@ static void wakenet_task(void *arg)
         const size_t chunk_bytes = (size_t)chunksize * wn_channels * sizeof(int16_t);
         size_t filled = 0;
         bool read_failed = false;
+        int read_empty_count = 0;  // 连续空读保护
         while (filled < chunk_bytes && s_wakeup_running && !s_wakenet_paused && s_wakenet_data != NULL) {
             size_t bytes_read = 0;
             esp_err_t ret = i2s_channel_read(s_wakenet_mic_handle,
@@ -246,7 +247,18 @@ static void wakenet_task(void *arg)
                                              chunk_bytes - filled,
                                              &bytes_read, pdMS_TO_TICKS(50));
             if (ret != ESP_OK) { read_failed = true; break; }
-            if (bytes_read > 0) filled += bytes_read;
+            if (bytes_read > 0) {
+                filled += bytes_read;
+                read_empty_count = 0;
+            } else {
+                read_empty_count++;
+                // 连续 10 次空读（约 500ms 无数据）→ 放弃本轮，避免死循环
+                if (read_empty_count >= 10) {
+                    ESP_LOGW(TAG, "I2S RX 连续空读 %d 次，放弃本轮检测", read_empty_count);
+                    read_failed = true;
+                    break;
+                }
+            }
         }
         // 读取完成后释放互斥锁，让 mic_task 可以使用
         if (s_i2s_mutex) xSemaphoreGive(s_i2s_mutex);
@@ -343,6 +355,16 @@ static void wakenet_task(void *arg)
         // 唤醒词检测（纯 WakeNet，直接对原始 PCM 检测）
         wakenet_state_t state = s_wakenet->detect(s_wakenet_data, feed_buf);
         s_wakenet_reading = false;
+
+        // 诊断：每 200 次检测（约 6 秒）打印一次 detect 结果，确认 WakeNet 在运行
+        static uint32_t s_detect_diag = 0;
+        s_detect_diag++;
+        if (s_detect_diag % 200 == 0) {
+            ESP_LOGD(TAG, "WakeNet 检测状态: %s (迭代 %u)",
+                     state == WAKENET_DETECTED ? "DETECTED" :
+                     state == WAKENET_NO_DETECT ? "NOT_DETECTED" : "UNKNOWN",
+                     (unsigned)s_detect_diag);
+        }
 
         if (state == WAKENET_DETECTED) {
             // 表情下载期间禁用唤醒（下载占用内存，唤醒后播放/重建可能分配失败
@@ -809,18 +831,24 @@ void wakeup_pause(void)
         ESP_LOGI(TAG, "语音唤醒已暂停");
     }
 
-    // 内存优化：销毁 WakeNet 实例，把激活缓冲（~80KB）还给堆，
-    // 供音频播放（MP3 解码器 45KB）和 WebSocket 大帧重组使用。
-    // 注意：必须无条件执行！语音唤醒路径 wakenet_task 已自行置 paused，
-    // 若这里只在"首次暂停"时销毁，打断播放场景（唤醒词打断故事播放）会漏掉销毁，
-    // 堆只剩 ~34KB < MP3 解码器 45KB → 播放无声（实测 bug）。
-    // 会话结束 wakeup_resume() 时重建，语音唤醒恢复。
+    // 内存优化：销毁 WakeNet 实例，把激活缓冲还给堆，供音频播放使用。
+    // C3（无 PSRAM）：WakeNet 激活缓冲 ~80KB + MP3 解码器 45KB 都在内部 RAM，
+    // 无法共存，必须销毁以释放内存给 MP3 解码器（否则播放无声）。
+    // 非 C3（有 PSRAM）：WakeNet 激活缓冲在 PSRAM，MP3 解码器用内部 RAM，
+    // 无内存冲突，保留实例可避免"02"连续对话中 iat_end 未到达时 WakeNet 永久失效。
+    // 注意：即使条件跳过销毁，I2S 互斥锁仍被持有，wakenet_task 不会读取 I2S。
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
     if (s_wakenet && s_wakenet_data) {
         s_wakenet->destroy(s_wakenet_data);
         s_wakenet_data = NULL;
         ESP_LOGI(TAG, "WakeNet 实例已销毁，释放堆给播放使用 (剩余堆: %d bytes)",
                  (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     }
+#else
+    ESP_LOGI(TAG, "WakeNet 实例保留（PSRAM 模式，无需释放内存，剩余堆: %d bytes, PSRAM: %d bytes)",
+             (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+#endif
 }
 
 // WakeNet 重建失败重试任务：
@@ -829,8 +857,9 @@ void wakeup_pause(void)
 // 语音唤醒会永久失效（实测必须重启）。本任务每 10 秒重试重建，直到成功或系统停止。
 // 唤醒灵敏度：WakeNet 模型默认阈值 ~0.63，对部分环境/扬声器偏严（需大声喊才能唤醒）。
 // 通过 set_det_threshold 调低阈值提升灵敏度（合法范围 0.4~0.9999，越低越灵敏、误唤醒率越高）。
-// 0.60 为当前取值（0.55 略灵敏、用户反馈轻微误唤醒后回调；若误唤醒仍多可回 0.62，难唤醒可降至 0.55）。
-#define WAKENET_DET_THRESHOLD 0.60f
+// 0.55 为当前取值：上一版 0.60 在 TTS 播放中（扬声器回声干扰）打断不灵敏。0.55 在降噪环境下
+// 误唤醒率仍可接受，但显著提升打断成功率。若误唤醒过多可回 0.60，难唤醒可降至 0.50。
+#define WAKENET_DET_THRESHOLD 0.55f
 
 // 调低 WakeNet 触发阈值（须在 create 之后调用；wakeup_resume/延迟重试重建后阈值会重置，需重新设置）
 static void wakeup_apply_det_threshold(void)
@@ -850,8 +879,15 @@ static void wakeup_apply_det_threshold(void)
 
 static void wakenet_rebuild_task(void *arg)
 {
+    // 快速重试：前 5 次每秒重试（快速恢复打断能力），之后每 10 秒重试
+    int retry_count = 0;
+    const int FAST_RETRY_LIMIT = 5;
+    const TickType_t FAST_RETRY_DELAY = pdMS_TO_TICKS(1000);
+    const TickType_t SLOW_RETRY_DELAY = pdMS_TO_TICKS(10000);
     while (s_wakeup_running) {
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        TickType_t delay = (retry_count < FAST_RETRY_LIMIT) ? FAST_RETRY_DELAY : SLOW_RETRY_DELAY;
+        vTaskDelay(delay);
+        retry_count++;
         if (!s_wakeup_running) break;
         if (s_wakenet_data != NULL) break;          // 已重建成功（可能由其他路径重建）
         if (s_wakenet_paused) continue;             // 会话中，等 resume
@@ -859,10 +895,15 @@ static void wakenet_rebuild_task(void *arg)
         s_wakenet_data = s_wakenet->create(s_model_name, DET_MODE_95);
         if (s_wakenet_data != NULL) {
             wakeup_apply_det_threshold();
-            ESP_LOGI(TAG, "WakeNet 重建成功（延迟重试恢复）");
+            ESP_LOGI(TAG, "WakeNet 重建成功（延迟重试恢复，重试次数=%d）", retry_count);
             break;
         }
-        ESP_LOGW(TAG, "WakeNet 重建重试失败（堆不足），10 秒后再试");
+        if (retry_count <= FAST_RETRY_LIMIT) {
+            ESP_LOGW(TAG, "WakeNet 重建重试 #%d 失败（堆不足），1 秒后再试, 剩余堆: %d bytes",
+                     retry_count, (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        } else {
+            ESP_LOGW(TAG, "WakeNet 重建重试 #%d 失败（堆不足），10 秒后再试", retry_count);
+        }
     }
     vTaskDelete(NULL);
 }
@@ -877,9 +918,12 @@ void wakeup_resume(void)
         // 内存优化：重建被 wakeup_pause 销毁的 WakeNet 实例，恢复语音唤醒
         // 播放结束后 MP3 解码器已释放（spk_task drain 时释放），堆充足
         if (s_wakenet_data == NULL && s_wakenet != NULL && s_model_name != NULL) {
+            ESP_LOGI(TAG, "WakeNet 创建中... 剩余堆: %d bytes",
+                     (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
             s_wakenet_data = s_wakenet->create(s_model_name, DET_MODE_95);
             if (s_wakenet_data == NULL) {
-                ESP_LOGE(TAG, "WakeNet 重建失败（堆不足），启动延迟重试...");
+                ESP_LOGE(TAG, "WakeNet 重建失败（堆不足），启动延迟重试... 剩余堆: %d bytes",
+                         (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
                 // 不放弃：启动后台重试任务（GIF 下载等内存占用结束后即可恢复），
                 // 否则异常会话结束后语音唤醒永久失效，必须重启
                 xTaskCreate(wakenet_rebuild_task, "wn_rebuild", 4096, NULL, 2, NULL);
@@ -888,8 +932,11 @@ void wakeup_resume(void)
                 ESP_LOGI(TAG, "WakeNet 重建成功，语音唤醒已恢复 (剩余堆: %d bytes)",
                          (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
             }
+        } else if (s_wakenet_data != NULL) {
+            ESP_LOGI(TAG, "语音唤醒已恢复（WakeNet 实例已存在，未重建）");
+        } else {
+            ESP_LOGI(TAG, "语音唤醒标记已恢复（WakeNet 接口未就绪，等待重建任务）");
         }
-        ESP_LOGI(TAG, "语音唤醒已恢复");
     }
 }
 

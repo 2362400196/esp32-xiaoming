@@ -126,22 +126,23 @@ static void drain_check_timer_cb(void *arg)
     if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
 
     if (action == DRAIN_ACTION_CONTINUE) {
-        // 二进制 "02" (SID_TTS_END_RESTART)：继续对话，与 Arduino wakeUp("continue") 一致
-        // 服务端发完 "02" 结束帧后会自动发 iat_start，无需客户端主动 start（避免与服务端
-        // _start_next_asr 竞态）。这里只停止唤醒监听，等 iat_start 启动麦克风。
-        audio_spk_stop();
-        vTaskDelay(pdMS_TO_TICKS(50));
-        // tts_task_id 已在二进制处理器中清除（与 Arduino 一致）
-        send_audio_over_internal("02");
-        // Arduino wakeUp("continue"): esp_ai_session_id = ""
-        // 清除旧 session_id，新 session_start 会设置新的
-        if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
-        s_current_session_id[0] = '\0';
-        s_audio_over_sent = false;  // 新会话重置发送标志
-        if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
-        // 暂停唤醒监听，等待服务端 iat_start（届时 wakeup_pause + audio_mic_start）
-        wakeup_pause();
-        display_show_status("聆听中");
+	        // 二进制 "02" (SID_TTS_END_RESTART)：继续对话，与 Arduino wakeUp("continue") 一致
+	        // 服务端发完 "02" 结束帧后会自动发 iat_start，无需客户端主动 start（避免与服务端
+	        // _start_next_asr 竞态）。这里只停止唤醒监听，等 iat_start 启动麦克风。
+	        audio_spk_stop();
+	        vTaskDelay(pdMS_TO_TICKS(50));
+	        // tts_task_id 已在二进制处理器中清除（与 Arduino 一致）
+	        send_audio_over_internal("02");
+	        // Arduino wakeUp("continue"): esp_ai_session_id = ""
+	        // 清除旧 session_id，新 session_start 会设置新的
+	        if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
+	        s_current_session_id[0] = '\0';
+	        s_audio_over_sent = false;  // 新会话重置发送标志
+	        if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
+	        // 注意：不在这里调用 wakeup_pause()！WakeNet 已在上一轮 iat_end 重建并运行，
+	        // 这里提前销毁会导致 WakeNet 永久失效（需等 iat_end 才能重建）。
+	        // iat_start 处理器内部会检查 WakeNet 状态并自行暂停。
+	        display_show_status("聆听中");
         display_show_emotion("聆听中");
         display_show_text("");
     } else if (action == DRAIN_ACTION_SESSION_END) {
@@ -784,15 +785,21 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                                 ESP_LOGI(TAG, "ASR 结束，关闭麦克风");
                                 // 与 Arduino 一致：iat_end 不切换表情 GIF（保持"聆听中"）
                                 audio_mic_stop();
-                                // 注意：iat_end 不恢复语音唤醒（不重建 WakeNet）！
-                                // Arduino 在 iat_end 后恢复 WakeNet 以支持 TTS 播放中语音打断，
-                                // 但 C3 无 PSRAM：WakeNet 激活缓冲 ~33KB + MP3 解码器 45KB
-                                // 无法同时容纳（实测重建后堆剩 ~38KB < 45KB，MP3 分配失败→无声）。
-                                // 播放稳定优先：语音唤醒延迟到会话真正结束（session_end /
-                                // "03"/断线）由 wakeup_resume() 恢复；TTS 播放期间仍可用
-                                // 板载按钮打断（按钮唤醒任务独立运行，不依赖 WakeNet）。
-                                // 注意：I2S 互斥锁由 wakeup_pause 持有，直到 wakeup_resume
-                                // 释放；mic_task 不使用该锁，ASR 采集不受影响。
+                                // 恢复 WakeNet 以支持 TTS 播放中语音打断：
+                                // Arduino 在 iat_end 恢复 WakeNet 支持打断，但 C3 无 PSRAM 时
+                                // WakeNet 激活缓冲 ~33KB + MP3 解码器 45KB 无法同时容纳。
+                                // 有 PSRAM 时无此限制，无条件恢复打断能力。
+                                // 注意：wakeup_resume() 会释放 I2S 互斥锁，mic_task 不使用该锁
+                                // 所以 ASR 采集不受影响。
+#if !defined(CONFIG_IDF_TARGET_ESP32C3)
+                                wakeup_resume();
+                                ESP_LOGI(TAG, "TTS 阶段已恢复语音唤醒，支持打断");
+#else
+                                // C3 无 PSRAM：WakeNet 激活缓冲 ~33KB + MP3 解码器 45KB
+                                // 无法同时容纳，延迟到会话真正结束（session_end / "03"/断线）
+                                // 由 wakeup_resume() 恢复；TTS 播放期间仍可用板载按钮打断。
+                                ESP_LOGI(TAG, "C3 内存限制，TTS 阶段不恢复语音唤醒（按钮打断可用）");
+#endif
                             } else if (strcmp(status->valuestring, "tts_chunk_start") == 0) {
                                 ESP_LOGI(TAG, "TTS 音频开始");
                                 if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
