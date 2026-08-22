@@ -287,7 +287,9 @@ if __name__ == "__main__":
     else:
         try:
             if sys.platform == "win32":
-                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+                # 必须用 Proactor：Selector 事件循环在 Windows 上不支持子进程，
+                # 插件沙箱靠 create_subprocess_exec 运行，会抛 NotImplementedError。
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
             asyncio.run(main())
         except KeyboardInterrupt:
             print("\n[Server] Shutdown by user")

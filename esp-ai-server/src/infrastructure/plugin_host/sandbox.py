@@ -19,7 +19,6 @@ import builtins
 import importlib.machinery
 import importlib.util
 import os
-import site
 import sys
 from pathlib import Path
 from typing import Any
@@ -82,6 +81,30 @@ def set_allowed_extra(names: list[str]) -> None:
     _ALLOWED_EXTRA.update(names)
 
 
+def _stdlib_roots() -> list[str]:
+    """返回标准库根目录（realpath 后）。
+
+    必须 realpath：Windows 上 uv/pyenv 等独立版 Python 的 sys.prefix 可能是
+    指向真实安装目录（如 cpython-3.10.20-...）的符号链接（cpython-3.10-...），
+    而模块 origin 总是解析到真实目录，直接拼接前缀会导致 startswith 失配，
+    误拦截标准库模块（如 asyncio.to_thread 惰性导入 concurrent.futures.thread）。
+    """
+    roots = []
+    for base in (sys.base_prefix, sys.prefix):
+        try:
+            base = os.path.realpath(base)
+        except Exception:
+            continue
+        roots.append(os.path.join(base, "Lib") if os.name == "nt" else os.path.join(base, "lib"))
+    return roots
+
+
+def _is_site_packages(path: str) -> bool:
+    """判断路径是否位于 site-packages（第三方库）。"""
+    marker = os.sep + "site-packages" + os.sep
+    return marker in path or path.endswith(os.sep + "site-packages")
+
+
 def _is_stdlib_origin(origin: str | None) -> bool:
     """判断模块 origin 是否属于标准库目录（非 site-packages）。"""
     if not origin:
@@ -90,19 +113,12 @@ def _is_stdlib_origin(origin: str | None) -> bool:
         origin = os.path.realpath(origin)
     except Exception:
         return False
-    stdlib_dirs = []
-    for base in (sys.base_prefix, sys.prefix):
-        lib = os.path.join(base, "Lib") if os.name == "nt" else os.path.join(base, "lib")
-        stdlib_dirs.append(lib)
+    stdlib_dirs = _stdlib_roots()
     # 项目根（PYTHONPATH 中的服务器源码）也在白名单之外
     for lib in stdlib_dirs:
         if origin.startswith(lib):
             # 排除 site-packages（第三方库）
-            for sp in site.getsitepackages():
-                if origin.startswith(os.path.realpath(sp)):
-                    return False
-            usersp = site.getusersitepackages()
-            if usersp and origin.startswith(os.path.realpath(usersp)):
+            if _is_site_packages(origin):
                 return False
             return True
     return False
@@ -171,6 +187,9 @@ class _SandboxMetaPathFinder:
             if spec is None:
                 continue
             origin = getattr(spec, "origin", None)
+            # built-in / frozen 模块嵌入解释器内（如 _string、_thread），安全放行
+            if origin in ("built-in", "frozen"):
+                return None
             if origin and (_is_stdlib_origin(origin) or origin.startswith(self.plugin_dir)):
                 return None
             raise SandboxImportError(
@@ -215,14 +234,15 @@ def _is_write_mode(mode: Any, flags: Any) -> bool:
     return False
 
 
-def install_audit_hook(plugin_root: str, state_root: str, allow_file: bool) -> None:
+def install_audit_hook(plugin_root: str, state_root: str,
+                       allow_file_read: bool, allow_file_write: bool) -> None:
     """安装 sys.addaudithook，拦截危险系统调用。
 
     Args:
         plugin_root: 插件目录（读取自身代码/自带数据始终放行）。
         state_root: 插件专属状态目录。
-        allow_file: 是否声明了 file_read/file_write 权限（未声明时只能读取
-            插件自身目录，任何写入与状态目录访问都会被拦截）。
+        allow_file_read: 是否声明了 file_read 权限（未声明时状态目录读取被拦截）。
+        allow_file_write: 是否声明了 file_write 权限（未声明时所有写入被拦截）。
     """
     global _ALLOWED_FS_ROOTS, _PLUGIN_ROOT, _STATE_ROOT
     _PLUGIN_ROOT = os.path.realpath(plugin_root)
@@ -235,25 +255,20 @@ def install_audit_hook(plugin_root: str, state_root: str, allow_file: bool) -> N
             real = os.path.realpath(path)
         except Exception:
             return False
-        stdlib_dirs = []
-        for base in (sys.base_prefix, sys.prefix):
-            lib = os.path.join(base, "Lib") if os.name == "nt" else os.path.join(base, "lib")
-            stdlib_dirs.append(lib)
-            stdlib_dirs.append(os.path.join(base, "Lib", "site-packages"))
-        for lib in stdlib_dirs[:-1]:
+        for lib in _stdlib_roots():
             if real == lib or real.startswith(lib + os.sep):
-                for sp in site.getsitepackages():
-                    if real.startswith(os.path.realpath(sp)):
-                        return False
+                # 排除 site-packages（第三方库）
+                if _is_site_packages(real):
+                    return False
                 return True
         return False
 
     def _read_allowed(path: Any) -> bool:
-        # 插件自身目录读取始终放行；状态目录读取需声明 file_read/file_write；
+        # 插件自身目录读取始终放行；状态目录读取需声明 file_read；
         # 标准库源码读取放行（import stdlib 模块的必经路径）
         return (_in_root(path, _PLUGIN_ROOT)
                 or _is_stdlib_path(path)
-                or (allow_file and _path_allowed(path)))
+                or (allow_file_read and _path_allowed(path)))
 
     def _hook(event: str, args: tuple[Any, ...]) -> None:
         if event == "open":
@@ -265,14 +280,14 @@ def install_audit_hook(plugin_root: str, state_root: str, allow_file: bool) -> N
                 args[2] if len(args) > 2 else 0,
             )
             if write:
-                if not allow_file:
+                if not allow_file_write:
                     raise SandboxAuditError("插件未声明 file_write 权限，禁止写入文件")
                 if not _path_allowed(path):
                     raise SandboxAuditError(f"写入操作超出沙箱目录: {path!r}")
             else:
                 if not _read_allowed(path):
                     raise SandboxAuditError(
-                        "插件未声明 file_read/file_write 权限，禁止读取该文件"
+                        "插件未声明 file_read 权限，禁止读取该文件"
                     )
         elif event in ("os.system",):
             raise SandboxAuditError("沙箱禁止 os.system")
@@ -289,14 +304,22 @@ def install_audit_hook(plugin_root: str, state_root: str, allow_file: bool) -> N
         elif event in ("os.remove", "os.unlink", "os.rmdir", "os.removedirs",
                        "os.rename", "os.replace", "os.chmod", "os.chown",
                        "os.mkdir", "os.makedirs"):
-            if not allow_file:
+            if not allow_file_write:
                 raise SandboxAuditError(f"沙箱禁止文件系统写操作: {event}")
             if args and not _path_allowed(args[0]):
                 raise SandboxAuditError(f"文件系统操作超出沙箱目录: {args[0]!r}")
         elif event in ("os.listdir", "os.scandir"):
-            if args and not _path_allowed(args[0]):
+            # 标准库目录放行（import 探测模块时 PathFinder 会 scandir 标准库目录）
+            if args and not (_path_allowed(args[0]) or _is_stdlib_path(args[0])):
                 raise SandboxAuditError(f"目录操作超出沙箱目录: {args[0]!r}")
-        elif event in ("ctypes.dlopen", "marshal.loads", "marshal.load"):
+        elif event in ("os.popen", "os.fork", "os.dup", "os.dup2", "os.dup3",
+                       "os.pipe", "os.fdopen"):
+            raise SandboxAuditError(f"沙箱禁止文件描述符/进程操作: {event}")
+        elif event in ("ctypes.dlopen",):
+            # 注意：不拦截 marshal.loads/load——Python 导入系统加载 __pycache__
+            # 字节码缓存时必然走 marshal（如 asyncio.to_thread 惰性导入
+            # concurrent.futures.thread），拦截会破坏合法 stdlib 导入。
+            # 真正危险的是 ctypes 动态加载原生库，仍在此处拦截。
             raise SandboxAuditError(f"沙箱禁止低级动态加载: {event}")
 
     try:
@@ -337,13 +360,15 @@ def _purge_dangerous_modules() -> None:
                 sys.modules[name] = None
 
 
-def install_sandbox(plugin_dir: Path, state_dir: Path, allow_file: bool) -> dict:
+def install_sandbox(plugin_dir: Path, state_dir: Path,
+                    allow_file_read: bool, allow_file_write: bool) -> dict:
     """安装完整沙箱，返回诊断信息（供子进程上报）。
 
     Args:
         plugin_dir: 插件目录（允许读写的根之一）
         state_dir: 插件专属状态目录（允许读写的根之一）
-        allow_file: 是否允许文件读写（manifest 声明 file_read/file_write 时 True）
+        allow_file_read: 是否允许文件读取（manifest 声明 file_read 时 True）
+        allow_file_write: 是否允许文件写入（manifest 声明 file_write 时 True）
     """
     removed_env = scrub_environment()
     # stdio 固定 UTF-8 + 行缓冲（RPC 消息含中文；避免 Windows 本地编码破坏协议）
@@ -360,10 +385,11 @@ def install_sandbox(plugin_dir: Path, state_dir: Path, allow_file: bool) -> dict
     _purge_dangerous_modules()
     finder = _SandboxMetaPathFinder(plugin_dir)
     sys.meta_path.insert(0, finder)
-    install_audit_hook(str(plugin_dir), str(state_dir), allow_file)
+    install_audit_hook(str(plugin_dir), str(state_dir), allow_file_read, allow_file_write)
     _lock_builtins()
     return {"scrubbed_env": len(removed_env), "plugin_dir": str(plugin_dir),
-            "state_dir": str(state_dir), "allow_file": allow_file}
+            "state_dir": str(state_dir), "allow_file_read": allow_file_read,
+            "allow_file_write": allow_file_write}
 
 
 def _lock_builtins() -> None:

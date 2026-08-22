@@ -342,6 +342,14 @@ def skill_catalog_text(tool_manager=None) -> str:
     return client.send_sync("skill_catalog", {}) or ""
 
 
+def plugin_log(message: str, level: str = "info") -> None:
+    """插件自定义日志（通过 RPC 写入主进程日志存储，供 API 查询）。"""
+    try:
+        client.send_sync("plugin_log", {"level": level, "message": message})
+    except Exception:
+        pass
+
+
 def build_helpers_shim() -> types.ModuleType:
     mod = types.ModuleType("src.use_cases._plugin_helpers")
     mod.__dict__.update({
@@ -359,6 +367,7 @@ def build_helpers_shim() -> types.ModuleType:
         "get_diary_repository": get_diary_repository,
         "get_device_repository": get_device_repository,
         "skill_catalog_text": skill_catalog_text,
+        "plugin_log": plugin_log,
         "mask_secret": mask_secret,
         "is_secret_key": is_secret_key,
         "require_permission": require_permission,

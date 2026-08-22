@@ -53,6 +53,9 @@ INSTALLED_PLUGINS_DIR = _PROJECT_ROOT / "data" / "plugins" / "installed"
 # 插件包缓存目录（上传的 zip / 下载的 zip 临时存放）
 PLUGINS_CACHE_DIR = _PROJECT_ROOT / "data" / "plugins" / "cache"
 
+# 插件运行日志持久化目录（plugin.log 文件存储，跨重启存活）
+PLUGINS_STATE_DIR = _PROJECT_ROOT / "data" / "plugins" / "state"
+
 # 已加载插件 → 它注册的工具名列表（热加载时先注销旧工具，避免残留）
 _loaded_tools: dict[str, list[str]] = {}
 
@@ -134,6 +137,13 @@ async def _load_plugin(plugin_name: str) -> bool:
     # ── 安全门禁 1：静态审计 + 签名校验（在 import 执行前）──
     if not _security_gate(plugin_name, plugin_dir):
         return False
+
+    # 加载该插件的历史日志到内存（跨重启存活）
+    try:
+        from src.infrastructure.plugin_log_store import load_all_from_file
+        load_all_from_file(plugin_name)
+    except Exception:
+        pass
 
     # ── 安全门禁 2：工具名冲突检测（AST 提取声明工具名，与其它插件及系统工具比对）──
     try:
@@ -238,13 +248,13 @@ async def _unload_plugin(plugin_name: str) -> None:
     已安装插件：停止子进程沙箱 + 注销工具。
     """
     old_tools = _loaded_tools.pop(plugin_name, [])
+    old_source = _plugin_source.pop(plugin_name, None)
     _plugin_meta.pop(plugin_name, None)
-    _plugin_source.pop(plugin_name, None)
     _plugin_version.pop(plugin_name, None)
     _plugin_manifest.pop(plugin_name, None)
     module_name = _plugin_module_names.pop(plugin_name, None)
 
-    if _plugin_source.get(plugin_name) == "installed" or (INSTALLED_PLUGINS_DIR / plugin_name).is_dir():
+    if old_source == "installed" or (INSTALLED_PLUGINS_DIR / plugin_name).is_dir():
         try:
             from src.infrastructure.plugin_host.supervisor import get_plugin_supervisor
             await get_plugin_supervisor().unload_plugin(plugin_name)
@@ -345,6 +355,11 @@ async def load_plugins() -> list[str]:
     """
     loaded = []
     seen: set[str] = set()
+
+    # 初始化插件日志持久化目录，并加载历史日志到内存
+    PLUGINS_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    from src.infrastructure.plugin_log_store import set_state_dir
+    set_state_dir(str(PLUGINS_STATE_DIR))
 
     if INSTALLED_PLUGINS_DIR.is_dir():
         for entry in sorted(INSTALLED_PLUGINS_DIR.iterdir()):

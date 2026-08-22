@@ -24,6 +24,7 @@ from typing import Any
 from src.infrastructure.logging import get_logger
 from src.infrastructure.plugin_host.adjudicator import Adjudicator, CallContext, PermissionDenied
 from src.infrastructure.plugin_host.protocol import ProtocolError, decode, encode
+from src.infrastructure.plugin_log_store import add_log as _add_plugin_log
 from src.use_cases.tools_system import ToolDefinition, register_tool, unregister_tool
 
 logger = get_logger(__name__)
@@ -35,6 +36,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 CALL_TIMEOUT = 130.0
 # 启动超时（等待 ready 消息）
 START_TIMEOUT = 20.0
+# 子进程内存上限（MB），超过则终止
+MEMORY_LIMIT_MB = 512
+# 内存监控间隔（秒）
+MEM_CHECK_INTERVAL = 15.0
+# 自动重启最大尝试次数
+MAX_RESTART_ATTEMPTS = 3
+# 重启退避间隔（秒）
+RESTART_BACKOFF_BASE = 2.0
 
 _plugin_supervisor: "PluginSupervisor | None" = None
 
@@ -56,7 +65,8 @@ class SandboxedPlugin:
         self.manifest = manifest
         perms = list(getattr(manifest, "permissions", None) or [])
         self.adjudicator = Adjudicator(plugin_id, perms)
-        self.allow_file = bool({"file_read", "file_write"} & set(perms))
+        self.allow_file_read = "file_read" in perms
+        self.allow_file_write = "file_write" in perms
         self._proc: asyncio.subprocess.Process | None = None
         self._ready_future: asyncio.Future | None = None
         self._pending_calls: dict[int, asyncio.Future] = {}
@@ -67,6 +77,9 @@ class SandboxedPlugin:
         self.tools: dict[str, dict] = {}
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
+        self._memmon_task: asyncio.Task | None = None
+        self._restart_attempts = 0
+        self._auto_restarting = False
         self.crashed = False
 
     # ── 生命周期 ────────────────────────────────────────────
@@ -90,7 +103,8 @@ class SandboxedPlugin:
         cmd = [
             sys.executable, "-m", "src.infrastructure.plugin_host.runner",
             str(self.plugin_dir), self.plugin_id,
-            "1" if self.allow_file else "0",
+            "1" if self.allow_file_read else "0",
+            "1" if self.allow_file_write else "0",
         ]
         creationflags = 0
         if os.name == "nt":
@@ -107,11 +121,13 @@ class SandboxedPlugin:
             )
         except OSError as e:
             logger.error(f"[插件沙箱] 启动子进程失败 {self.plugin_id}: {e}")
+            _add_plugin_log(self.plugin_id, "error", f"子进程启动失败: {e}")
             return False
 
         self._ready_future = asyncio.get_running_loop().create_future()
         self._reader_task = asyncio.create_task(self._reader_loop())
         self._stderr_task = asyncio.create_task(self._stderr_loop())
+        self._memmon_task = asyncio.create_task(self._memmon_loop())
         try:
             ok = await asyncio.wait_for(self._ready_future, timeout=START_TIMEOUT)
             if not ok:
@@ -149,6 +165,9 @@ class SandboxedPlugin:
         if self._stderr_task is not None:
             self._stderr_task.cancel()
             self._stderr_task = None
+        if self._memmon_task is not None:
+            self._memmon_task.cancel()
+            self._memmon_task = None
 
     async def restart(self) -> bool:
         """崩溃后重启。返回是否成功。"""
@@ -195,13 +214,18 @@ class SandboxedPlugin:
             self.crashed = self._proc is not None and self._proc.returncode not in (0, None)
             if self._ready_future is not None and not self._ready_future.done():
                 self._ready_future.set_result(False)
+            if self.crashed:
+                _add_plugin_log(self.plugin_id, "error",
+                    f"子进程异常退出（code={self._proc.returncode if self._proc else '?'}）")
+            # 非正常退出时自动重启
+            if self.crashed and not self._auto_restarting:
+                asyncio.create_task(self._auto_restart())
 
     async def _stderr_loop(self) -> None:
         proc = self._proc
         if proc is None or proc.stderr is None:
             return
         try:
-            dropped = 0
             while True:
                 raw = await proc.stderr.readline()
                 if not raw:
@@ -209,12 +233,67 @@ class SandboxedPlugin:
                 text = raw.decode("utf-8", "replace").rstrip()
                 if not text:
                     continue
-                if dropped < 200:
-                    logger.debug(f"[插件沙箱:{self.plugin_id}] {text}")
-                else:
-                    dropped += 1
+                logger.debug(f"[插件沙箱:{self.plugin_id}] {text}")
+                _add_plugin_log(self.plugin_id, "stderr", text)
         except (asyncio.CancelledError, OSError, ValueError):
             pass
+
+    async def _memmon_loop(self) -> None:
+        """周期性检查子进程内存占用，超限则终止。"""
+        try:
+            import psutil
+        except ImportError:
+            return
+        while True:
+            try:
+                await asyncio.sleep(MEM_CHECK_INTERVAL)
+                proc = self._proc
+                if proc is None or proc.returncode is not None:
+                    continue
+                try:
+                    p = psutil.Process(proc.pid)
+                    mem_mb = p.memory_info().rss / (1024 * 1024)
+                    if mem_mb > MEMORY_LIMIT_MB:
+                        logger.warning(
+                            f"[插件沙箱] {self.plugin_id} 内存 {mem_mb:.0f}MB 超限"
+                            f"（>{MEMORY_LIMIT_MB}MB），终止进程"
+                        )
+                        proc.kill()
+                        await proc.wait()
+                        break
+                except (psutil.NoSuchProcess, ProcessLookupError):
+                    break
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                continue
+
+    async def _auto_restart(self) -> None:
+        """子进程异常退出后自动重启（带退避）。"""
+        if self._auto_restarting:
+            return
+        self._auto_restarting = True
+        try:
+            while self._restart_attempts < MAX_RESTART_ATTEMPTS:
+                self._restart_attempts += 1
+                backoff = RESTART_BACKOFF_BASE * self._restart_attempts
+                logger.info(
+                    f"[插件沙箱] {self.plugin_id} 自动重启"
+                    f"（第{self._restart_attempts}次，{backoff:.0f}s 后）"
+                )
+                await asyncio.sleep(backoff)
+                ok = await self._spawn()
+                if ok:
+                    logger.info(f"[插件沙箱] {self.plugin_id} 自动重启成功")
+                    self._restart_attempts = 0
+                    break
+            else:
+                logger.error(
+                    f"[插件沙箱] {self.plugin_id} 自动重启失败"
+                    f"（已达{MAX_RESTART_ATTEMPTS}次上限）"
+                )
+        finally:
+            self._auto_restarting = False
 
     async def _dispatch(self, msg: dict) -> None:
         mtype = msg.get("type")
@@ -243,11 +322,12 @@ class SandboxedPlugin:
             result = await self.adjudicator.handle(op, params, cctx)
             reply = {"ok": True, "result": result}
         except PermissionDenied as e:
-            # 前缀固定为 PermissionError，子进程据此还原为 PermissionError 语义
             reply = {"ok": False, "error": f"PermissionError: {e}"}
+            _add_plugin_log(self.plugin_id, "warn", f"SDK {op} 权限被拒: {e}")
         except Exception as e:
             logger.warning(f"[插件沙箱] SDK 操作 {op} 执行异常: {e}")
             reply = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            _add_plugin_log(self.plugin_id, "error", f"SDK {op} 异常: {type(e).__name__}: {e}")
         try:
             await self._write({"type": "sdk_reply", "id": msg.get("id"), **reply})
         except ConnectionError:
@@ -275,6 +355,7 @@ class SandboxedPlugin:
             self._pending_calls.pop(call_id, None)
             self._active_calls.pop(call_id, None)
             logger.error(f"[插件沙箱] 工具 {tool_name} 调用超时，终止进程 {self.plugin_id}")
+            _add_plugin_log(self.plugin_id, "error", f"工具 {tool_name} 调用超时（>{CALL_TIMEOUT}s）")
             await self.stop()
             return f"工具 {tool_name} 执行异常: 调用超时（沙箱已终止）"
         result = reply or {}
@@ -282,9 +363,19 @@ class SandboxedPlugin:
             from src.use_cases.tools_system import StopPipeline
             raise StopPipeline()
         if not result.get("ok"):
-            return f"工具 {tool_name} 执行异常: {result.get('error', '未知错误')}"
+            err_msg = result.get('error', '未知错误')
+            _add_plugin_log(self.plugin_id, "error", f"工具 {tool_name} 执行异常: {err_msg}")
+            return f"工具 {tool_name} 执行异常: {err_msg}"
         value = result.get("value")
-        return str(value) if value is not None else ""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        import json
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(value)
 
     def _fail_pending_calls(self, reason: str) -> None:
         for fut in list(self._pending_calls.values()):

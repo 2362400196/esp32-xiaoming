@@ -11,8 +11,8 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-import socket
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
@@ -45,6 +45,7 @@ _OP_PERMS: dict[str, str] = {
 # 无需显式权限的只读 op（设备 key 解析 / 技能目录 / 插件配置）
 _NO_PERM_OPS = frozenset({
     "device_key", "resolve_device_key", "plugin_config", "skill_catalog",
+    "plugin_log",
 })
 
 # 内置插件默认权限（内置插件仍可放宽，但已声明为准）
@@ -102,31 +103,43 @@ def _is_private_ip(ip: str) -> bool:
     return False
 
 
-def _hostname_to_ips(hostname: str) -> list[str]:
+async def _hostname_to_ips(hostname: str) -> list[str]:
+    """异步 DNS 解析，防止阻塞事件循环。"""
+    loop = asyncio.get_running_loop()
     try:
-        infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        infos = await asyncio.wait_for(
+            loop.getaddrinfo(hostname, None, family=0, type=0), timeout=10.0
+        )
         return sorted({info[4][0] for info in infos})
-    except (socket.gaierror, OSError):
+    except (asyncio.TimeoutError, OSError, ValueError):
         return []
 
 
-def validate_url(url: str, allowlist: set[str]) -> str | None:
-    """校验 HTTP URL 安全（防 SSRF）。通过返回 None，否则返回错误信息。"""
+async def validate_url(url: str, allowlist: set[str]) -> tuple[str | None, str | None]:
+    """校验 HTTP URL 安全（防 SSRF）。
+
+    异步版本：DNS 解析使用 asyncio event loop 的 getaddrinfo，
+    避免阻塞事件循环。
+
+    Returns:
+        (error, resolved_ip): error 为 None 表示通过；resolved_ip 为校验时解析的 IP，
+        传给 HTTP 客户端 pin 连接以防止 DNS 重绑定。
+    """
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        return f"仅允许 http/https 协议: {url}"
+        return f"仅允许 http/https 协议: {url}", None
     host = (parsed.hostname or "").lower()
     if not host:
-        return f"URL 缺少主机名: {url}"
+        return f"URL 缺少主机名: {url}", None
     if host in allowlist or host.endswith(tuple("." + h for h in allowlist if h)):
-        return None
-    ips = _hostname_to_ips(host)
+        return None, None
+    ips = await _hostname_to_ips(host)
     if not ips:
-        return f"无法解析主机名: {host}"
+        return f"无法解析主机名: {host}", None
     for ip in ips:
         if _is_private_ip(ip):
-            return f"URL 解析到内网/保留地址，已阻止（SSRF 防护）: {url} -> {ip}"
-    return None
+            return f"URL 解析到内网/保留地址，已阻止（SSRF 防护）: {url} -> {ip}", None
+    return None, ips[0]
 
 
 # ════════════════════════════════════════════════════════════
@@ -257,28 +270,37 @@ class Adjudicator:
     async def _op_http_request(self, params, ctx) -> list:
         from src.use_cases._plugin_helpers import http_request
 
+        import time as _time
+        _t0 = _time.time()
+
         method = str(params.get("method", "GET")).upper()
         url = str(params.get("url", ""))
-        err = validate_url(url, self.url_allowlist)
+        err, pin_ip = await validate_url(url, self.url_allowlist)
         if err:
-            logger.warning(f"[插件沙箱] 插件 {self.plugin_id} 的 HTTP 请求被拦截: {err}")
+            _t1 = _time.time()
+            logger.warning(f"[插件沙箱] 插件 {self.plugin_id} 的 HTTP 请求被拦截（{_t1-_t0:.2f}s）: {err}")
             return [None, None, err]
+        _t1 = _time.time()
         resp, http_err = await http_request(
             method, url,
             params=params.get("params"),
             headers=params.get("headers"),
             content=params.get("content"),
             timeout=float(params.get("timeout", 10.0)),
+            pin_ip=pin_ip,
         )
+        _t2 = _time.time()
         if http_err is not None:
+            logger.warning(f"[插件沙箱] 插件 {self.plugin_id} HTTP 请求失败（{_t2-_t1:.2f}s）: {http_err}")
             return [None, None, str(http_err)]
+        logger.info(f"[插件沙箱] 插件 {self.plugin_id} HTTP 请求成功（DNS={_t1-_t0:.2f}s, 请求={_t2-_t1:.2f}s）")
         return [resp.status_code, resp.text, None]
 
     async def _op_http_get_json(self, params, ctx) -> list:
         from src.use_cases._plugin_helpers import http_get_json
 
         url = str(params.get("url", ""))
-        err = validate_url(url, self.url_allowlist)
+        err, pin_ip = await validate_url(url, self.url_allowlist)
         if err:
             logger.warning(f"[插件沙箱] 插件 {self.plugin_id} 的 HTTP 请求被拦截: {err}")
             return [None, err]
@@ -287,6 +309,7 @@ class Adjudicator:
             params=params.get("params"),
             headers=params.get("headers"),
             timeout=float(params.get("timeout", 8.0)),
+            pin_ip=pin_ip,
         )
         if http_err is not None:
             return [None, str(http_err)]
@@ -430,6 +453,18 @@ class Adjudicator:
         from src.use_cases._plugin_helpers import skill_catalog_text
 
         return skill_catalog_text(ctx.tool_manager)
+
+    # ── 插件日志 ────────────────────────────────────────────
+
+    async def _op_plugin_log(self, params, ctx) -> None:
+        from src.infrastructure.plugin_log_store import add_log
+        level = str(params.get("level", "info")).lower()
+        if level not in ("debug", "info", "warn", "error"):
+            level = "info"
+        message = str(params.get("message", ""))
+        if message:
+            add_log(self.plugin_id, level, message)
+        return None
 
     # ── 设备作用域检查 ──────────────────────────────────────
 

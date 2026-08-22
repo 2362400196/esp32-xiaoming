@@ -1,6 +1,6 @@
 """子进程入口：加载插件并服务 RPC 调用。
 
-由主进程通过 `python -m src.infrastructure.plugin_host.runner <plugin_dir> <plugin_id> <allow_file>` 启动。
+由主进程通过 `python -m src.infrastructure.plugin_host.runner <plugin_dir> <plugin_id> <allow_read> <allow_write>` 启动。
 
 流程：
     1. 解析参数
@@ -21,11 +21,12 @@ import os
 import sys
 import traceback
 from pathlib import Path
+from typing import Any
 
 from . import client
 from . import sandbox
 from . import sdk_shim
-from .protocol import encode
+from .protocol import ProtocolError, encode
 
 # 插件模块注册到的名称（主进程注销时保持一致）
 MODULE_PREFIX = "esp_ai_sandbox_plugin_"
@@ -40,12 +41,13 @@ def _log(msg: str) -> None:
 
 
 def main() -> int:
-    if len(sys.argv) < 4:
-        sys.stderr.write("usage: runner <plugin_dir> <plugin_id> <allow_file>\n")
+    if len(sys.argv) < 5:
+        sys.stderr.write("usage: runner <plugin_dir> <plugin_id> <allow_read> <allow_write>\n")
         return 2
     plugin_dir = Path(sys.argv[1]).resolve()
     plugin_id = sys.argv[2]
-    allow_file = sys.argv[3].lower() in ("1", "true", "yes")
+    allow_file_read = sys.argv[3].lower() in ("1", "true", "yes")
+    allow_file_write = sys.argv[4].lower() in ("1", "true", "yes")
 
     # 事件循环须在沙箱安装前创建：Windows ProactorEventLoop 初始化会创建内部
     # socketpair（_make_self_pipe），安装审计钩子后会拦截 socket 导致崩溃。
@@ -62,7 +64,7 @@ def main() -> int:
         state_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
         state_dir = plugin_dir
-    diag = sandbox.install_sandbox(plugin_dir, state_dir, allow_file)
+    diag = sandbox.install_sandbox(plugin_dir, state_dir, allow_file_read, allow_file_write)
     _log(f"[sandbox] installed: {diag}")
     # 禁止字节码缓存写入（避免在插件目录写 __pycache__，也减少文件系统操作面）
     sys.dont_write_bytecode = True
@@ -146,7 +148,7 @@ async def _run_call(msg: dict) -> None:
                 result = await asyncio.wait_for(
                     asyncio.to_thread(_call_sync_func, tools, tool_name, args), CALL_TIMEOUT
                 )
-            _emit_result(call_id, {"ok": True, "value": str(result), "stop": False})
+            _emit_result(call_id, {"ok": True, "value": _coerce_result(result), "stop": False})
         except sdk_shim.StopPipeline:
             _emit_result(call_id, {"ok": True, "value": None, "stop": True})
         except asyncio.TimeoutError:
@@ -167,9 +169,39 @@ def _call_sync_func(tools, tool_name, args):
     return func(**args)
 
 
+def _coerce_result(result: Any) -> Any:
+    """将工具返回值转为 JSON 可序列化类型。
+
+    str/None/dict/list/int/float/bool 原样传递；
+    其他类型转为字符串（避免 str(dict) 产生单引号非 JSON 格式）。
+    """
+    if result is None:
+        return None
+    if isinstance(result, (str, dict, list, int, float, bool)):
+        return result
+    import json
+    try:
+        json.dumps(result)
+        return result
+    except (TypeError, ValueError):
+        return str(result)
+
+
 def _emit_result(call_id, result: dict) -> None:
-    sys.stdout.write(encode({"type": "result", "id": call_id, "result": result}))
-    sys.stdout.flush()
+    try:
+        payload = encode({"type": "result", "id": call_id, "result": result})
+    except ProtocolError:
+        # 消息过大则降级为简短错误
+        import json as _json
+        fallback = _json.dumps({"ok": False, "error": "结果过大，无法发送"}, ensure_ascii=False)
+        payload = f'{{"type":"result","id":{call_id},"result":{fallback}}}\n'
+    try:
+        sys.stdout.write(payload)
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        # stdout 管道异常（如主进程已关闭连接），不能继续
+        import os as _os
+        _os._exit(1)
 
 
 async def _serve() -> None:

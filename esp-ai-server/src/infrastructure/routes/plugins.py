@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
 
 from src.infrastructure.logging import get_logger
@@ -517,7 +517,10 @@ async def update_local_plugin_source(
             return {"code": 1, "message": "没有可写入的内容", "data": None}
 
         success = await reload_single_plugin(name)
-        _invalidate_tool_schema_cache(request)
+        try:
+            _invalidate_tool_schema_cache(request)
+        except Exception as cache_e:
+            logger.warning(f"[插件] 失效缓存异常: {cache_e}")
 
         logger.info(f"[插件] 源码已更新: {name}, 热重载: {'成功' if success else '失败'}")
         return {
@@ -526,8 +529,10 @@ async def update_local_plugin_source(
             "data": {"name": name, "reloaded": success},
         }
     except Exception as e:
-        logger.error(f"[插件] 更新源码失败: {e}")
-        return {"code": 1, "message": str(e), "data": None}
+        logger.error(f"[插件] 更新源码失败: type={type(e).__name__} msg={e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {"code": 1, "message": str(e) or str(type(e).__name__), "data": None}
 
 
 class CreateLocalPluginReq(BaseModel):
@@ -619,4 +624,39 @@ async def create_local_plugin(
         }
     except Exception as e:
         logger.error(f"[插件] 本地创建失败: {e}")
+        return {"code": 1, "message": str(e), "data": None}
+
+
+# ════════════════════════════════════════════════════════════
+# 插件日志 API（开发者调试用）
+# ════════════════════════════════════════════════════════════
+
+
+@router.get("/api/v1/plugins/{name}/logs")
+async def get_plugin_logs(
+    name: str,
+    limit: int = Query(100, ge=1, le=500, description="返回条数（最新在前）"),
+    level: str | None = Query(None, description="按级别过滤: debug/info/warn/error/stderr"),
+    _admin=Depends(require_admin),
+):
+    """查询插件运行日志（加载错误、工具异常、SDK 错误、开发者自定义日志）。
+
+    用法: GET /api/v1/plugins/weather/logs?limit=50&level=error
+    """
+    try:
+        from src.infrastructure.plugin_log_store import get_logs
+        entries = get_logs(name, limit=limit, level=level)
+        return {"code": 0, "message": "ok", "data": entries}
+    except Exception as e:
+        return {"code": 1, "message": str(e), "data": None}
+
+
+@router.delete("/api/v1/plugins/{name}/logs")
+async def clear_plugin_logs(name: str, _admin=Depends(require_admin)):
+    """清空插件日志。"""
+    try:
+        from src.infrastructure.plugin_log_store import clear_logs
+        count = clear_logs(name)
+        return {"code": 0, "message": f"已清除 {count} 条日志", "data": {"cleared": count}}
+    except Exception as e:
         return {"code": 1, "message": str(e), "data": None}

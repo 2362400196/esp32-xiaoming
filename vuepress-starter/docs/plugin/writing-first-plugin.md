@@ -29,9 +29,14 @@ hello/
   "id": "hello",
   "name": "打招呼",
   "version": "1.0.0",
-  "description": "一个打招呼的示例插件"
+  "description": "一个打招呼的示例插件",
+  "permissions": []
 }
 ```
+
+::: tip 权限说明
+此示例只返回文本，不调用任何 SDK 能力，所以 `permissions` 为 `[]`（空数组）。所有插件都必须显式声明权限，即使一个都不需要。
+:::
 
 **plugin.py**：
 
@@ -66,12 +71,119 @@ LLM 解析后调用 `say_hello(name="张三")`，设备播报："你好，张三
 :::
 
 ---
+## 插曲：权限声明（为什么插件需要"敲门"）
+
+在示例四和六中，你会在 `manifest.json` 里看到 `"permissions": ["network"]` 这样的字段。**这是插件向系统声明它需要什么能力**——没有声明，系统就拒绝提供服务。
+
+### 为什么需要声明权限？
+
+插件运行在**沙箱子进程**中（详见 [插件沙箱机制](./sandbox.md)），所有 SDK 能力（网络请求、设备指令、记忆读写等）都在主进程手里，插件只通过 RPC 调用。主进程的**裁决器**会检查 manifest 中声明的 `permissions`，未声明的操作直接拒绝：
+
+```json
+// ✅ 声明了 network → 可通过 http_request 调 API
+"permissions": ["network"]
+
+// ❌ 未声明 device → send_device_command 会返回 PermissionError
+// "permissions": ["device"]   // 忘了加这行
+```
+
+### 所有可用权限一览
+
+| 权限 | SDK 操作 | 能做什么 | 适用场景 |
+|------|----------|----------|----------|
+| `network` | `http_request` / `http_get_json` | 发起外部 HTTP 请求（含 SSRF 防护） | 查天气、调 API、爬数据 |
+| `device` | `send_device_command` / `send_instruct` / `request_device_result` | 给设备下发指令、获取回执 | 控制亮度、屏幕显示、播放音乐 |
+| `ltm` | `ltm_store` / `ltm_recall` / `ltm_list_all` / `ltm_update` / `ltm_forget` | 读写设备的长期记忆 | 记住用户偏好、学习习惯 |
+| `db` | `diary_*` / `device_config_*` | 读写数据库（日记、设备配置） | 记日记、读写设备配置 |
+| `env_read` | `get_plugin_config_or_env` 读环境变量 | 读取白名单内的环境变量 | 从环境变量读取 API Key 等配置 |
+| `file_read` | `open()` 读模式 / `Path.read_text()` 等 | 读取插件目录和状态目录的文件 | 读本地数据文件 |
+| `file_write` | `open()` 写模式 / `Path.write_text()` 等 | 写入插件目录和状态目录 | 缓存数据、写日志 |
+| `subprocess` | `subprocess.*` / `os.system` / `os.popen` 等 | 执行子进程命令 | **需要审核**，运行外部工具 |
+| `exec` | `eval()` / `exec()` / `compile()` | 动态执行代码 | **需要审核**，运行用户脚本 |
+
+### 声明方式
+
+在 `manifest.json` 的 `permissions` 数组中列出你需要的权限：
+
+```json
+{
+  "id": "my_plugin",
+  "name": "我的插件",
+  "version": "1.0.0",
+  "description": "一个需要多种权限的插件",
+  "permissions": ["network", "device"]
+}
+```
+
+### 常见组合
+
+| 插件类型 | 权限组合 | 说明 |
+|----------|----------|------|
+| 纯文本回复 | `[]`（不声明） | 只需 `@tool()`，不调任何 SDK |
+| 查询外部 API | `["network"]` | 查名言、查天气、查新闻 |
+| 控制设备 + 调 API | `["network", "device"]` | 天气卡片（查 API + 屏幕显示） |
+| 记忆 + 网络 | `["ltm", "network"]` | 记住用户偏好并联网查询 |
+| 读写文件 | `["file_read", "file_write"]` | 缓存数据、写自定义日志 |
+| 全功能 | `["network", "device", "ltm", "db"]` | 完整设备助手 |
+
+### 内置插件权限参考
+
+| 内置插件 | 声明权限 |
+|----------|----------|
+| `alarm` | `[]` |
+| `device_config` | `["device", "db"]` |
+| `device_control` | `["device"]` |
+| `diary` | `["db"]` |
+| `http_tool` | `["network"]` |
+| `media_player` | `["network", "device"]` |
+| `memory` | `["ltm"]` |
+| `screen` | `["device"]` |
+| `system_basic` | `["device"]` |
+| `weather` | `["network", "device"]` |
+
+### 常见报错
+
+| 报错 | 原因 | 解决 |
+|------|------|------|
+| `插件「x」未声明 device 权限，已阻止该操作` | 调了 `send_device_command` 但没声明 | 在 manifest 加上 `"permissions": ["device"]` |
+| `插件「x」未声明 network 权限，已阻止该操作` | 调了 `http_request` 但没声明 | 加上 `"permissions": ["network"]` |
+| `插件 cs 尝试读取非白名单环境变量 QUOTE_API_URL，已拒绝` | 环境变量名不是 `<插件id>_` 或 `PLUGIN_` 前缀 | 改用 `<插件id>_` 前缀，或加 `PLUGIN_ENV_ALLOWLIST` |
+
+### 静态审计：自动检查
+
+系统在加载插件时会**静态扫描你的代码**（AST 分析），自动检测代码中实际使用了哪些能力。如果发现代码用到了 `http_request` 但 `permissions` 里没写 `network`，加载会被拒绝：
+
+```
+[插件安全] 插件「my_plugin」实际使用 [network] 但未声明，拒绝加载
+```
+
+所以**请务必声明你实际用到的所有权限**，否则插件无法加载。
+
+---
 
 ## 示例二：控制设备亮度（设备指令 + 参数校验）
 
 **目标**：用户说"亮度调到 50"时，通过 WebSocket 下发指令控制设备屏幕亮度。引入 `tool_manager` 依赖注入和参数范围校验。
 
 ### 完整代码
+
+**manifest.json**：
+
+```json
+{
+  "id": "brightness",
+  "name": "屏幕亮度",
+  "version": "1.0.0",
+  "description": "控制设备屏幕亮度",
+  "permissions": ["device"]
+}
+```
+
+::: tip 权限说明
+调用了 `send_device_command` 下发设备指令，需要声明 `"permissions": ["device"]`。未声明时调用会返回 `PermissionError`。
+:::
+
+**plugin.py**：
 
 ```python
 from src.use_cases.tools_system import tool
@@ -166,6 +278,24 @@ LLM 偶尔会传入超范围值（如 `level=150`）。用 `max`/`min` 钳制到
 **目标**：在设备屏幕上显示自定义文字。通过 `execute_lua` 指令下发 Lua 脚本，直接操作 LVGL 屏幕控件。
 
 ### 完整代码
+
+**manifest.json**：
+
+```json
+{
+  "id": "screen_text",
+  "name": "屏幕显示",
+  "version": "1.0.0",
+  "description": "在设备屏幕上显示文字",
+  "permissions": ["device"]
+}
+```
+
+::: tip 权限说明
+同样使用 `send_device_command` 下发 Lua 脚本指令，需要 `"permissions": ["device"]`。
+:::
+
+**plugin.py**：
 
 ```python
 from src.use_cases.tools_system import tool
@@ -262,6 +392,10 @@ lua_code = (
 }
 ```
 
+::: tip 权限说明
+调用了 `http_request` 发起外部 HTTP 请求，需要声明 `"permissions": ["network"]`。沙箱的 SSRF 防护会自动阻止对内网地址的请求。
+:::
+
 ### 2. plugin.py
 
 ```python
@@ -352,6 +486,24 @@ if len(text) > 3000:
 **目标**：用户说"倒计时 10 秒"后，设备屏幕显示倒计时数字，到 0 时播报"时间到"。引入多指令组合、`StopPipeline` 中断机制。
 
 ### 完整代码
+
+**manifest.json**：
+
+```json
+{
+  "id": "countdown",
+  "name": "倒计时",
+  "version": "1.0.0",
+  "description": "在设备屏幕上显示倒计时",
+  "permissions": ["device"]
+}
+```
+
+::: tip 权限说明
+通过 `send_device_command` 反复下发 `execute_lua` 指令更新屏幕，需要 `"permissions": ["device"]`。
+:::
+
+**plugin.py**：
 
 ```python
 import asyncio
@@ -450,6 +602,10 @@ raise StopPipeline()                         # 无参数：静默结束
   "permissions": ["network", "device"]
 }
 ```
+
+::: tip 权限说明
+此示例同时使用了 `http_get_json`（查天气）和 `send_device_command`（显示卡片），需要同时声明 `"network"` 和 `"device"` 两个权限。
+:::
 
 ### 2. plugin.py
 

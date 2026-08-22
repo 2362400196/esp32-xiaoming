@@ -101,6 +101,13 @@ export const api = {
   updateLocalPluginSource: (name, pluginCode, files) =>
     request('/api/v1/plugins/' + encodeURIComponent(name) + '/source', 'PUT', files ? { files } : { plugin_code: pluginCode }),
   createLocalPlugin: (data) => request('/api/v1/plugins/create-local', 'POST', data),
+  // 插件运行日志（开发者调试用）
+  pluginLogs: (name, limit = 100, level = null) => {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (level) params.set('level', level)
+    return request('/api/v1/plugins/' + encodeURIComponent(name) + '/logs?' + params)
+  },
+  clearPluginLogs: (name) => request('/api/v1/plugins/' + encodeURIComponent(name) + '/logs', 'DELETE'),
   // 设备控制
   volume: (mac) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/volume'),
   // UI 层传 0-100 百分比，API 层需 0.0-1.0 浮点（与设备端 cmd_set_volume 契约一致）

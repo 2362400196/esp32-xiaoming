@@ -204,12 +204,29 @@ def get_plugin_config_or_env(tool_manager, plugin: str, key: str, env_var: str |
 
 
 async def http_request(method: str, url: str, *, params: dict | None = None, headers: dict | None = None,
-                       content=None, timeout: float = 10.0):
-    """发起 HTTP 请求。成功返回 (response, None)；失败返回 (None, error)。"""
+                       content=None, timeout: float = 10.0, pin_ip: str | None = None):
+    """发起 HTTP 请求。成功返回 (response, None)；失败返回 (None, error)。
+
+    Args:
+        pin_ip: 校验时解析的 IP，用于 pin 连接防止 DNS 重绑定。
+                 设置后会在 URL 中替换主机名为该 IP，并通过 Host header 保留原主机名。
+    """
     require_permission("network", f"发起 HTTP {method.upper()} 请求 {url}")
     try:
+        req_headers = dict(headers or {})
+        if pin_ip:
+            import urllib.parse as _up
+            parsed = _up.urlparse(url)
+            host = parsed.hostname or ""
+            if host and host != pin_ip and parsed.scheme == "http":
+                port = f":{parsed.port}" if parsed.port else ""
+                url = _up.urlunparse((
+                    parsed.scheme, f"{pin_ip}{port}",
+                    parsed.path, parsed.params, parsed.query, parsed.fragment
+                ))
+                req_headers.setdefault("Host", host)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.request(method, url, params=params, headers=headers, content=content)
+            resp = await client.request(method, url, params=params, headers=req_headers, content=content)
             resp.raise_for_status()
             return resp, None
     except Exception as e:
@@ -217,9 +234,9 @@ async def http_request(method: str, url: str, *, params: dict | None = None, hea
 
 
 async def http_get_json(url: str, params: dict | None = None, headers: dict | None = None,
-                        timeout: float = 8.0):
+                        timeout: float = 8.0, pin_ip: str | None = None):
     """GET 请求并解析 JSON。成功返回 (data, None)；失败返回 (None, error)。"""
-    resp, err = await http_request("GET", url, params=params, headers=headers, timeout=timeout)
+    resp, err = await http_request("GET", url, params=params, headers=headers, timeout=timeout, pin_ip=pin_ip)
     if err:
         return None, err
     try:
@@ -302,3 +319,22 @@ def skill_catalog_text(tool_manager) -> str:
     lines.append("")
     lines.append("提示: 使用 read_skill_document 工具(参数 skill_id)查看某个技能的详细使用说明，不要在回复中写出函数调用，要用 tool call API。")
     return "\n".join(lines)
+
+
+# ════════════════════════════════════════════════════════════
+# 插件日志
+# ════════════════════════════════════════════════════════════
+
+
+def plugin_log(message: str, level: str = "info") -> None:
+    """写入插件日志（内置插件直接写共享存储，开发者可通过 API 查看）。
+
+    Args:
+        message: 日志消息
+        level: 日志级别（debug/info/warn/error）
+    """
+    from src.infrastructure.plugin_log_store import add_log
+    from src.infrastructure.plugin_security import current_plugin
+    ctx = current_plugin()
+    plugin_id = ctx.plugin if ctx else "unknown"
+    add_log(plugin_id, level, message)

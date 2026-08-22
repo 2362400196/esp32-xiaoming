@@ -1,5 +1,5 @@
 <template>
-  <div class="dev-view" :class="{ 'editor-open': codeEditor.show || editorLeaving }">
+  <div class="dev-view" :class="{ 'editor-open': codeEditor.show }">
     <!-- 未登录 -->
     <div v-if="!isLoggedInUser" class="empty glass card-in">
       <div class="empty-icon">
@@ -39,13 +39,12 @@
     </div>
 
     <!-- 已是开发者 -->
-    <div v-else>
-      <!-- ===== 代码编辑器（页面主体，替代模态框） ===== -->
-      <Transition name="editor" mode="out-in" @leave="editorLeaving = true" @after-leave="editorLeaving = false">
-      <div v-if="codeEditor.show" key="editor" class="editor-page" :class="{ fullscreen: editorFullscreen }">
-        <!-- 顶栏 -->
-        <div class="editor-topbar glass">
-          <button class="editor-back" @click="closeEditor">
+	    <div v-else>
+	      <!-- ===== 代码编辑器（页面主体，替代模态框） ===== -->
+	      <div v-if="codeEditor.show" class="editor-page" :class="{ fullscreen: editorFullscreen }">
+	        <!-- 顶栏 -->
+	        <div class="editor-topbar glass">
+	          <button class="editor-back" @click="closeEditor">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
             </svg>
@@ -100,6 +99,30 @@
             <div class="meta-field">
               <label>版本号</label>
               <input v-model="codeEditor.version" placeholder="1.0.0" />
+            </div>
+            <div class="meta-field perms-field">
+              <label>权限</label>
+              <div class="perms-dropdown" @click="togglePermPanel">
+                <div class="perms-trigger" :class="{ empty: !codeEditor.permissions.length }">
+                  <template v-if="codeEditor.permissions.length">
+                    {{ permLabels(codeEditor.permissions) }}
+                  </template>
+                  <template v-else>选择权限…</template>
+                  <span class="arrow">▾</span>
+                </div>
+                <transition name="drop">
+                  <div v-if="permPanelOpen" class="perms-panel">
+                    <div v-for="perm in ALL_PERMS" :key="perm.id"
+                      class="perm-option"
+                      :class="{ selected: codeEditor.permissions.includes(perm.id) }"
+                      @click.stop="togglePerm(perm.id)">
+                      <span class="perm-check">✓</span>
+                      <span class="perm-label">{{ perm.id }}</span>
+                      <span class="perm-desc">{{ perm.desc }}</span>
+                    </div>
+                  </div>
+                </transition>
+              </div>
             </div>
           </template>
           <template v-else>
@@ -177,7 +200,7 @@
       </div>
 
       <!-- 仪表盘 -->
-      <div v-else key="dash" class="dev-dashboard">
+      <div v-else class="dev-dashboard">
       <!-- 开发者概览卡片 -->
       <div class="overview-card glass card-in">
         <div class="overview-left">
@@ -246,6 +269,15 @@
             <line x1="12" y1="3" x2="12" y2="15"/>
           </svg>
           上传插件
+        </button>
+        <button class="tab-btn" :class="{ active: activeTab === 'logs' }" @click="activeTab = 'logs'">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="9" y1="13" x2="15" y2="13"/>
+            <line x1="9" y1="17" x2="15" y2="17"/>
+          </svg>
+          运行日志
         </button>
       </div>
 
@@ -422,11 +454,72 @@
             </button>
           </div>
         </div>
-      </div>
-    </div>
-    </Transition>
 
-    <!-- ======================= 确认弹窗 ======================= -->
+        <!-- 运行日志 -->
+        <div v-if="activeTab === 'logs'" class="tab-pane glass card-in logs-pane">
+          <div class="pane-header">
+            <h3>运行日志</h3>
+            <div class="logs-controls">
+              <select v-model="logView.plugin" class="log-plugin-select" @change="loadLogs">
+                <option value="">选择插件…</option>
+                <option v-for="p in allPluginNames" :key="p" :value="p">{{ p }}</option>
+              </select>
+              <select v-model="logView.level" class="log-level-select" @change="loadLogs">
+                <option value="">全部级别</option>
+                <option value="error">Error</option>
+                <option value="warn">Warn</option>
+                <option value="info">Info</option>
+                <option value="debug">Debug</option>
+                <option value="stderr">Stderr</option>
+              </select>
+              <button class="btn-ghost btn-sm" @click="loadLogs" :disabled="!logView.plugin">刷新</button>
+              <button class="btn-ghost btn-sm log-auto-btn" :class="{ active: logView.autoRefresh }"
+                @click="toggleAutoRefresh">{{ logView.autoRefresh ? '自动 ✓' : '自动' }}</button>
+              <button class="btn-ghost btn-sm" @click="copyLogs" :disabled="!logView.entries.length">复制</button>
+              <button class="btn-ghost btn-sm log-clear-btn" @click="clearLogs" :disabled="!logView.plugin || !logView.entries.length">清空</button>
+            </div>
+          </div>
+
+          <div v-if="!logView.plugin" class="empty-pane">
+            <div class="empty-pane-icon">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+              </svg>
+            </div>
+            <p>选择一个插件查看运行日志</p>
+          </div>
+
+          <div v-else-if="logView.loading" class="log-loading">
+            <div class="spinner"></div>
+            <p>正在加载日志…</p>
+          </div>
+
+          <div v-else-if="!logView.entries.length" class="empty-pane">
+            <div class="empty-pane-icon">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round">
+                <circle cx="12" cy="12" r="10"/>
+                <path d="M8 14s1.5 2 4 2 4-2 4-2"/>
+                <line x1="9" y1="9" x2="9.01" y2="9"/>
+                <line x1="15" y1="9" x2="15.01" y2="9"/>
+              </svg>
+            </div>
+            <p>暂无日志记录</p>
+            <p class="log-hint">插件运行时的错误、SDK 调用异常和 plugin_log() 输出会显示在这里</p>
+          </div>
+
+          <div v-else class="terminal">
+            <div ref="pluginLogTerminalRef" class="terminal-content">
+              <div v-for="(entry, i) in logView.entries" :key="i" class="log-line" :class="'log-' + entry.level">
+                <span class="log-time">{{ formatLogTime(entry.time) }}</span>
+                <span class="log-content">{{ entry.message }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+	      </div>
+	      <!-- ======================= 确认弹窗 ======================= -->
     <transition name="pop">
       <div v-if="confirmData.show" class="confirm-mask" @click.self="confirmCancel">
         <div class="confirm-panel glass">
@@ -467,7 +560,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { api, isLoggedIn } from '../api'
 import CodeEditor from '../components/CodeEditor.vue'
 import { THEMES } from '../monaco-setup'
@@ -662,6 +755,96 @@ async function uninstallLocal(p) {
   uninstalling.value = ''
 }
 
+// ===== 运行日志 =====
+const logView = ref({
+  plugin: '',
+  level: '',
+  entries: [],
+  loading: false,
+  autoRefresh: false,
+})
+const pluginLogTerminalRef = ref(null)
+let _logTimer = null
+
+const allPluginNames = computed(() => {
+  return localInstalled.value.map(p => p.name).filter(Boolean).sort()
+})
+
+function scrollLogToBottom() {
+  nextTick(() => {
+    const el = pluginLogTerminalRef.value
+    if (el) el.scrollTop = el.scrollHeight
+  })
+}
+
+async function loadLogs() {
+  if (!logView.value.plugin) return
+  logView.value.loading = true
+  try {
+    const res = await api.pluginLogs(logView.value.plugin, 200, logView.value.level || null)
+    if (res.status === 200 && res.data?.code === 0) {
+      // 后端返回最新在前，反转后最新在底部（终端风格）
+      logView.value.entries = (res.data.data || []).reverse()
+      scrollLogToBottom()
+    } else {
+      emit('toast', res.data?.message || '获取日志失败')
+      logView.value.entries = []
+    }
+  } catch (e) {
+    emit('toast', '获取日志异常')
+    logView.value.entries = []
+  }
+  logView.value.loading = false
+}
+
+async function copyLogs() {
+  if (!logView.value.entries.length) return
+  const text = logView.value.entries
+    .map(e => `${formatLogTime(e.time)} [${String(e.level || '').toUpperCase()}] ${e.message}`)
+    .join('\n')
+  try {
+    await navigator.clipboard.writeText(text)
+    emit('toast', '日志已复制到剪贴板')
+  } catch (e) {
+    emit('toast', '复制失败，请手动选择复制')
+  }
+}
+
+async function clearLogs() {
+  if (!logView.value.plugin) return
+  const ok = await showConfirm({
+    title: '清空日志',
+    message: `确定清空「${logView.value.plugin}」的所有运行日志？`,
+    confirmText: '清空',
+    cancelText: '取消',
+    danger: true,
+  })
+  if (!ok) return
+  const res = await api.clearPluginLogs(logView.value.plugin)
+  if (res.status === 200 && res.data?.code === 0) {
+    logView.value.entries = []
+    emit('toast', '日志已清空')
+  } else {
+    emit('toast', res.data?.message || '清空失败')
+  }
+}
+
+function toggleAutoRefresh() {
+  logView.value.autoRefresh = !logView.value.autoRefresh
+  if (logView.value.autoRefresh) {
+    _logTimer = setInterval(() => {
+      if (logView.value.plugin) loadLogs()
+    }, 5000)
+  } else {
+    if (_logTimer) { clearInterval(_logTimer); _logTimer = null }
+  }
+}
+
+function formatLogTime(ts) {
+  if (!ts) return ''
+  return ts.replace('T', ' ').replace(/\.\d+$/, '')
+}
+
 // ===== 在线代码编辑器 =====
 const _TEMPLATE_PLUGIN = `"""插件：在此编写工具函数"""
 
@@ -681,7 +864,7 @@ def hello(name: str) -> str:
     return f"你好，{name}！"
 `
 
-const _TEMPLATE_MANIFEST = (slug, name, desc) => JSON.stringify({
+const _TEMPLATE_MANIFEST = (slug, name, desc, perms) => JSON.stringify({
   id: slug,
   name: name,
   version: "1.0.0",
@@ -690,8 +873,54 @@ const _TEMPLATE_MANIFEST = (slug, name, desc) => JSON.stringify({
   category: "general",
   tags: [],
   requires: [],
+  permissions: perms,
   config_fields: [],
 }, null, 2)
+
+const ALL_PERMS = [
+  { id: 'network', label: 'Network', desc: '发起外部 HTTP 请求（调 API、爬数据）' },
+  { id: 'device', label: 'Device', desc: '给设备下发指令、控制屏幕播放' },
+  { id: 'ltm', label: 'LTM', desc: '读写设备长期记忆（记住用户偏好）' },
+  { id: 'db', label: 'DB', desc: '读写数据库（日记、设备配置）' },
+  { id: 'env_read', label: 'Env', desc: '读取环境变量（获取 API Key 等配置）' },
+  { id: 'file_read', label: 'R File', desc: '读取插件目录和状态目录的文件' },
+  { id: 'file_write', label: 'W File', desc: '写入文件到插件目录和状态目录' },
+  { id: 'subprocess', label: 'Exec', desc: '执行子进程命令（运行外部工具，需审核）' },
+  { id: 'exec', label: 'Dyn Code', desc: '动态执行代码（运行用户脚本，需审核）' },
+]
+
+const permPanelOpen = ref(false)
+
+function togglePerm(id) {
+  const perms = codeEditor.value.permissions
+  const idx = perms.indexOf(id)
+  if (idx >= 0) {
+    perms.splice(idx, 1)
+  } else {
+    perms.push(id)
+  }
+}
+
+function permLabels(ids) {
+  return ids.map(id => ALL_PERMS.find(p => p.id === id)?.label || id).join(', ')
+}
+
+function togglePermPanel() {
+  permPanelOpen.value = !permPanelOpen.value
+}
+
+function closePermPanel() {
+  permPanelOpen.value = false
+}
+
+function onWindowClick(e) {
+  if (permPanelOpen.value) {
+    const el = document.querySelector('.perms-dropdown')
+    if (el && !el.contains(e.target)) {
+      permPanelOpen.value = false
+    }
+  }
+}
 
 const codeEditor = ref({
   show: false,
@@ -700,6 +929,7 @@ const codeEditor = ref({
   name: '',
   description: '',
   version: '1.0.0',
+  permissions: [],
   category: 'general',
   tags: [],
   changelog: '',
@@ -710,7 +940,6 @@ const codeEditor = ref({
 })
 
 const editorFullscreen = ref(false)
-const editorLeaving = ref(false)
 
 function toggleFullscreen() {
   editorFullscreen.value = !editorFullscreen.value
@@ -801,12 +1030,13 @@ function openCreateEditor() {
     name: '',
     description: '',
     version: '1.0.0',
+    permissions: [],
     category: 'general',
     tags: [],
     changelog: '',
     files: [
       { name: 'plugin.py', content: _TEMPLATE_PLUGIN },
-      { name: 'manifest.json', content: _TEMPLATE_MANIFEST('my_plugin', '我的插件', '插件描述') },
+      { name: 'manifest.json', content: _TEMPLATE_MANIFEST('my_plugin', '我的插件', '插件描述', []) },
     ],
     activeFile: 'plugin.py',
     loading: false,
@@ -901,6 +1131,23 @@ function manifestRawFromFiles() {
   return getFile('manifest.json')?.content || '{}'
 }
 
+function syncManifestFromForm() {
+  const ce = codeEditor.value
+  const mf = getFile('manifest.json')
+  if (!mf) return
+  try {
+    const obj = JSON.parse(mf.content)
+    obj.id = ce.slug.trim().toLowerCase()
+    obj.name = ce.name.trim()
+    obj.description = ce.description.trim()
+    obj.version = ce.version || '1.0.0'
+    obj.permissions = ce.permissions
+    mf.content = JSON.stringify(obj, null, 2)
+  } catch {
+    // manifest 格式有误时不覆盖，让用户自行修复
+  }
+}
+
 async function savePluginCode() {
   const ce = codeEditor.value
   let manifest
@@ -982,19 +1229,23 @@ async function saveLocalFromEditor() {
 
 async function createLocalFromEditor() {
   const ce = codeEditor.value
-  let manifest
-  try {
-    manifest = JSON.parse(manifestRawFromFiles())
-  } catch {
-    emit('toast', 'manifest.json 格式错误，请检查 JSON 语法')
-    return
-  }
   if (!ce.slug.trim() || !ce.name.trim()) {
     emit('toast', '请填写插件 ID 和名称')
     return
   }
   if (!pluginCodeFromFiles().trim()) {
     emit('toast', 'plugin.py 不能为空')
+    return
+  }
+
+  // 将表单字段同步到 manifest.json 文件内容，确保编辑器显示一致
+  syncManifestFromForm()
+
+  let manifest
+  try {
+    manifest = JSON.parse(manifestRawFromFiles())
+  } catch {
+    emit('toast', 'manifest.json 格式错误，请检查 JSON 语法')
     return
   }
   ce.saving = 'local'
@@ -1036,16 +1287,23 @@ function onKeydown(e) {
   if (e.key === 'Escape' && editorFullscreen.value) {
     editorFullscreen.value = false
   }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'l' && activeTab.value === 'logs' && logView.value.plugin) {
+    e.preventDefault()
+    clearLogs()
+  }
 }
 
 onMounted(() => {
   loadDevInfo()
   loadLocalInstalled()
   window.addEventListener('keydown', onKeydown)
+  window.addEventListener('click', onWindowClick)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('click', onWindowClick)
+  if (_logTimer) { clearInterval(_logTimer); _logTimer = null }
 })
 </script>
 
@@ -1332,16 +1590,12 @@ onBeforeUnmount(() => {
 .fullscreen-btn:hover { border-color: var(--mint-border); color: var(--mint-deep); background: var(--mint-softer); }
 .fullscreen-btn svg { display: block; }
 .editor-page {
+  position: relative;
   display: flex; flex-direction: column; gap: 10px;
   height: calc(100vh - 24px);
   min-height: 420px;
   background: linear-gradient(160deg, #f6fafc 0%, #e9f1f5 55%, #eef6f2 100%);
 }
-/* 编辑器进入/退出动画 */
-.editor-enter-active { transition: opacity 0.35s var(--ease), transform 0.35s var(--ease); }
-.editor-enter-from { opacity: 0; transform: translateY(16px) scale(0.985); }
-.editor-leave-active { transition: opacity 0.22s var(--ease), transform 0.22s var(--ease); }
-.editor-leave-to { opacity: 0; transform: translateY(10px) scale(0.99); }
 .editor-topbar {
   display: flex; align-items: center; gap: 14px;
   padding: 10px 16px; flex-shrink: 0;
@@ -1375,9 +1629,10 @@ onBeforeUnmount(() => {
 .theme-btn.active { background: rgba(255,255,255,0.7); opacity: 1; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
 
 .editor-meta {
-  display: flex; gap: 10px; padding: 10px 16px; flex-shrink: 0;
+  display: flex; flex-wrap: wrap; gap: 10px; padding: 10px 16px; flex-shrink: 0;
 }
-.meta-field { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.meta-field { flex: 1; min-width: 140px; display: flex; flex-direction: column; gap: 4px; }
+.meta-field.perms-field { min-width: 100%; }
 .meta-field label { font-size: 11px; font-weight: 600; color: var(--text-sub); }
 .meta-field input { padding: 7px 12px; font-size: 12px; border: 1px solid var(--glass-border); border-radius: var(--radius-sm); background: rgba(255,255,255,0.6); transition: all 0.2s var(--ease); width: 100%; box-sizing: border-box; }
 .meta-field input:focus { border-color: var(--mint); box-shadow: 0 0 0 3px var(--mint-softer); outline: none; background: rgba(255,255,255,0.85); }
@@ -1405,6 +1660,46 @@ onBeforeUnmount(() => {
 .ft-icon { font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; }
 .ft-icon.py { background: var(--mint-soft); color: var(--mint-deep); }
 .ft-icon.json { background: rgba(245, 158, 11, 0.14); color: #d97706; }
+
+/* ===== 权限下拉框 ===== */
+.perms-field { flex: 1; min-width: 100%; position: relative; }
+.perms-dropdown { position: relative; cursor: pointer; }
+.perms-trigger {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 12px; font-size: 12px;
+  border: 1px solid var(--glass-border); border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.6);
+  color: var(--text-main); min-height: 34px; box-sizing: border-box;
+  transition: all 0.2s var(--ease);
+}
+.perms-trigger:hover { border-color: var(--mint); }
+.perms-trigger.empty { color: var(--text-dim); }
+.perms-trigger .arrow { margin-left: auto; font-size: 10px; color: var(--text-dim); transition: transform 0.2s var(--ease); }
+.perms-panel {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 9999;
+  background: #fff; border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md); box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+  max-height: 320px; overflow-y: auto;
+}
+.perm-option {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; cursor: pointer; transition: background 0.1s;
+}
+.perm-option:hover { background: var(--mint-soft); }
+.perm-option.selected { background: var(--mint-soft); }
+.perm-check {
+  width: 16px; height: 16px; border-radius: 3px;
+  border: 1.5px solid var(--glass-border); flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; color: transparent; transition: all 0.15s;
+}
+.perm-option.selected .perm-check {
+  background: var(--mint); border-color: var(--mint); color: #fff;
+}
+.perm-label { font-size: 12px; font-weight: 600; color: var(--text-main); min-width: 72px; }
+.perm-desc { font-size: 11px; color: var(--text-dim); }
+.drop-enter-active, .drop-leave-active { transition: all 0.15s var(--ease); }
+.drop-enter-from, .drop-leave-to { opacity: 0; transform: translateY(-4px); }
 .file-tab.active .ft-icon.py { background: var(--grad-mint); color: #fff; }
 .file-tab.active .ft-icon.json { background: var(--amber); color: #fff; }
 .editor-body { flex: 1; min-height: 0; border: 1px solid var(--glass-border); border-radius: 0 var(--radius-md) var(--radius-md) var(--radius-md); overflow: hidden; }
@@ -1416,6 +1711,63 @@ onBeforeUnmount(() => {
 
 .pop-enter-active, .pop-leave-active { transition: all 0.3s var(--ease); }
 .pop-enter-from, .pop-leave-to { opacity: 0; transform: scale(0.95) translateY(10px); }
+
+/* ===== 运行日志 ===== */
+.logs-pane { padding: 20px; }
+.logs-controls {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.log-plugin-select, .log-level-select {
+  padding: 6px 12px; font-size: 13px;
+  border: 1px solid var(--glass-border); border-radius: var(--radius-sm);
+  background: var(--glass-bg-strong); color: var(--text-main);
+  cursor: pointer; transition: all 0.2s var(--ease);
+  outline: none;
+}
+.log-plugin-select:hover, .log-level-select:hover { border-color: var(--mint-border); }
+.log-plugin-select:focus, .log-level-select:focus { border-color: var(--mint); box-shadow: 0 0 0 3px var(--mint-softer); }
+.log-plugin-select { min-width: 160px; }
+.log-auto-btn.active { color: var(--mint-deep); border-color: var(--mint-border); background: var(--mint-soft); }
+.log-loading { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 48px 20px; color: var(--text-sub); }
+.log-hint { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+
+/* 终端风格日志 */
+.terminal {
+  height: 480px;
+  min-height: 320px;
+  max-height: 70vh;
+  background: #0d1117;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.terminal-content {
+  height: 100%;
+  padding: 14px 16px;
+  overflow-y: auto;
+}
+.terminal .log-line {
+  display: flex;
+  margin-bottom: 4px;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  transition: none;
+}
+.terminal .log-line:hover { background: rgba(255, 255, 255, 0.03); }
+.terminal .log-time { color: #8b949e; margin-right: 12px; min-width: 100px; font-size: 12px; flex-shrink: 0; }
+.terminal .log-content { flex: 1; min-width: 0; white-space: pre-wrap; color: #e6edf3; }
+.terminal .log-error .log-content { color: #f85149; }
+.terminal .log-warn .log-content { color: #f2cc60; }
+.terminal .log-info .log-content { color: #79c0ff; }
+.terminal .log-debug .log-content { color: #8b949e; }
+.terminal .log-stderr .log-content { color: #d2a8ff; }
+.terminal .log-line.log-error { background: rgba(248, 81, 73, 0.06); }
+.terminal .log-line.log-warn { background: rgba(242, 204, 96, 0.05); }
 
 /* ===== Responsive ===== */
 @media (max-width: 768px) {
@@ -1432,5 +1784,8 @@ onBeforeUnmount(() => {
   .editor-workbench { min-height: 480px; }
   .editor-title-wrap { flex-wrap: wrap; }
   .editor-slug { max-width: 100%; }
+  .logs-controls { width: 100%; }
+  .log-plugin-select { min-width: 0; flex: 1; }
+  .terminal { height: 400px; }
 }
 </style>

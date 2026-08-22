@@ -400,13 +400,21 @@ class PluginManager:
         # 2. 注销工具
         await self._do_unload(plugin_name)
 
-        # 3. 删除目录
+        # 3. 删除插件目录
         try:
             shutil.rmtree(plugin_dir, ignore_errors=True)
         except Exception as e:
             msg = f"删除插件目录失败: {e}"
             logger.error(f"[插件管理] {msg}")
             return {"success": False, "message": msg}
+
+        # 3.5 清理插件状态目录（data/plugins/state/<plugin_name>/）
+        state_dir = plugin_dir.parent.parent / "state" / plugin_name
+        if state_dir.is_dir():
+            try:
+                shutil.rmtree(state_dir, ignore_errors=True)
+            except Exception as e:
+                logger.warning(f"[插件管理] 清理插件状态目录失败（不影响卸载）: {e}")
 
         logger.info(f"[插件管理] 插件 {plugin_name} 已卸载")
         return {"success": True, "message": f"插件 {plugin_name} 已卸载"}
