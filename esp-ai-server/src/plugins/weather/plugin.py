@@ -15,18 +15,15 @@
 from src.use_cases._plugin_helpers import json_dumps
 
 from src.use_cases.tools_system import tool
-from src.use_cases._plugin_helpers import get_plugin_config_or_env, http_get_json, send_device_command
+from src.use_cases._plugin_helpers import http_get_json, send_device_command
+from src.use_cases.sdk.storage import kv_get, kv_set
 
 AMAP_WEATHER_URL = "https://restapi.amap.com/v3/weather/weatherInfo"
 
 
 def _get_amap_key(tool_manager) -> str:
-    """获取高德 Key：优先设备插件配置（商店「配置」），其次环境变量 WEATHER_AMAP_KEY。
-    旧变量名 AMAP_WEATHER_KEY 兼容保留（读取仍受环境变量白名单约束）。"""
-    key = get_plugin_config_or_env(tool_manager, "weather", "amap_key", "WEATHER_AMAP_KEY")
-    if key:
-        return key
-    return get_plugin_config_or_env(tool_manager, "weather", "amap_key", "AMAP_WEATHER_KEY")
+    """获取高德 Key：从插件专属 KV 存储读取（前端配置 → 插件存储，不经过主数据库）。"""
+    return kv_get("amap_key", default="", tool_manager=tool_manager) or ""
 
 # 天气 → 图标 id（设备端内置 ARGB8565 彩色图标表 fonts/weather_icons.c：
 # sun 晴 / sun_cloud 晴间多云 / cloud 多云 / overcast 阴 /
@@ -101,7 +98,7 @@ async def get_weather(city: str = "", tool_manager=None) -> str:
     用户只说"这里/本地/今天"等未指定城市时，city 留空（默认使用北京）。"""
     # 未指定城市时的默认城市（可改为设备所在城市）
     if not city or not city.strip():
-        city = "北京"
+        city = "西安"
     amap_key = _get_amap_key(tool_manager)
     if not amap_key:
         return "天气服务未配置，请在 App 插件商店中为「天气」插件配置高德 API Key，或联系管理员在 .env 中设置 WEATHER_AMAP_KEY"
@@ -165,3 +162,28 @@ async def get_weather(city: str = "", tool_manager=None) -> str:
     await send_device_command(tool_manager, "show_card", card_json)
 
     return speech
+
+
+@tool(cache=False)
+async def test_weather_query(city: str = "北京", tool_manager=None) -> str:
+    """测试天气查询（前端测试用，返回 JSON 格式天气数据，通过 SDK 调用高德 API）。"""
+    amap_key = _get_amap_key(tool_manager)
+    if not amap_key:
+        return json_dumps({"error": "请先配置高德 API Key"})
+    data, err = await http_get_json(
+        AMAP_WEATHER_URL, params={"key": amap_key, "city": city, "extensions": "base"},
+    )
+    if err:
+        return json_dumps({"error": f"网络错误: {err}"})
+    return json_dumps(data)
+
+
+@tool(cache=False)
+def save_config(amap_key: str = "", tool_manager=None) -> str:
+    """保存天气插件配置到插件专属 KV 存储（不经过主数据库）。
+    参数 amap_key: 高德 API Key。不传则返回当前配置。"""
+    if not amap_key:
+        current = kv_get("amap_key", default="", tool_manager=tool_manager)
+        return json_dumps({"ok": True, "amap_key": current})
+    kv_set("amap_key", amap_key, tool_manager=tool_manager)
+    return json_dumps({"ok": True, "message": "配置已保存"})

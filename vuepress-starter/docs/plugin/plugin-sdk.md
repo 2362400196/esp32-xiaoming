@@ -233,47 +233,76 @@ if status == "busy":
 
 ---
 
-## 四、插件配置读取：配置 → 环境变量 → 默认值
+## 四、插件配置存储：KV 存储优先
 
-插件可能需要用户配置 API Key，但老插件往往还要兼容"从环境变量读"的部署方式。`get_plugin_config_or_env` 统一了三者优先级：
+插件需要保存用户配置（如 API Key）时，**不要写入主数据库**，应使用插件专属的 KV 存储。
 
-```python
-from src.use_cases._plugin_helpers import get_plugin_config_or_env
-
-# 参数：tool_manager, 插件 id, 配置 key, 环境变量名（可空）, 默认值
-amap_key = get_plugin_config_or_env(
-    tool_manager, "weather", "amap_key",
-    env_var="AMAP_WEATHER_KEY", default="",
-)
-```
-
-**优先级**：`tool_manager.get_plugin_config()`（设备插件配置）→ 环境变量 → 默认值。
-
-::: warning 环境变量有白名单限制
-环境变量回退**不是随便什么变量都能读**。出于安全（沙箱机制的一部分），只允许读取：
-- 以 `<插件id>_` 开头（如插件 `quote` 可用 `QUOTE_API_URL`）
-- 或 `PLUGIN_` 开头
-- 或通过环境变量 `PLUGIN_ENV_ALLOWLIST`（逗号分隔）显式放行
-
-不符合规则的变量名会被拒绝，直接落到默认值。建议插件环境变量一律用 `<插件id>_` 前缀命名。
+::: tip 设计原则
+插件配置走 KV 存储，不经过主数据库 `device_config` 表。KV 存储是 JSON 文件，路径自动隔离（`data/plugins/kv/<插件id>.json`），插件之间互不可见。
 :::
 
-替换之前常见的 `_get_xxx_key` 手写回退逻辑：
+### 保存配置
 
 ```python
-# ❌ 旧写法：每个插件重复实现
-def _get_amap_key(tool_manager) -> str:
-    if tool_manager and hasattr(tool_manager, "get_plugin_config"):
-        cfg = tool_manager.get_plugin_config("weather", "amap_key", "")
-        if cfg:
-            return cfg
-    import os
-    return os.environ.get("AMAP_WEATHER_KEY", "")
+from src.use_cases.sdk.storage import kv_set, kv_get
 
-# ✅ 新写法：一行搞定
-amap_key = get_plugin_config_or_env(tool_manager, "weather", "amap_key",
-                                    env_var="AMAP_WEATHER_KEY", default="")
+# 保存（写入 data/plugins/kv/weather.json）
+kv_set("amap_key", "用户的key", tool_manager=tool_manager)
+
+# 读取
+amap_key = kv_get("amap_key", default="", tool_manager=tool_manager)
 ```
+
+### 配合前端
+
+前端通过通用工具调用接口来读写配置：
+
+```python
+@tool(cache=False)
+def save_config(amap_key: str = "", tool_manager=None) -> str:
+    """保存配置到插件 KV 存储。不传 amap_key 则返回当前配置。"""
+    if not amap_key:
+        current = kv_get("amap_key", default="", tool_manager=tool_manager)
+        return json_dumps({"ok": True, "amap_key": current})
+    kv_set("amap_key", amap_key, tool_manager=tool_manager)
+    return json_dumps({"ok": True, "message": "配置已保存"})
+```
+
+前端调用：
+
+```javascript
+// 保存
+await api('/plugins/weather/tool/save_config', {
+  method: 'POST',
+  body: { args: { amap_key: 'xxx' }, device_id }
+})
+
+// 读取（不传参数）
+const res = await api('/plugins/weather/tool/save_config', {
+  method: 'POST',
+  body: { args: {}, device_id }
+})
+// res.data.amap_key 即为当前配置
+```
+
+### 兼容旧环境变量
+
+如果还想支持通过环境变量配置（如 Docker 部署），可以在 `kv_get` 拿不到时回退到环境变量：
+
+```python
+import os
+
+amap_key = kv_get("amap_key", default="", tool_manager=tool_manager)
+if not amap_key:
+    amap_key = os.environ.get("WEATHER_AMAP_KEY", "")
+```
+
+::: warning 环境变量有白名单限制
+环境变量读取受沙箱限制，只允许读取：
+- 以 `<插件id>_` 开头（如 `WEATHER_AMAP_KEY`）
+- 或 `PLUGIN_` 开头
+- 或通过 `PLUGIN_ENV_ALLOWLIST` 显式放行
+:::
 
 ---
 
@@ -756,7 +785,7 @@ async def read_light_sensor(tool_manager=None) -> str:
 |------|------|
 | `src/use_cases/_plugin_helpers.py` | 插件 SDK 源码（唯一实现，本教程即基于此） |
 | `src/plugins/system_basic/plugin.py` | `send_device_command` + `request_device_result` 示例 |
-| `src/plugins/weather/plugin.py` | `get_plugin_config_or_env` + `http_get_json` + `send_device_command` 示例 |
+| `src/plugins/weather/plugin.py` | `kv_get` + `kv_set` + `http_get_json` + `send_device_command` 示例 |
 | `src/plugins/media_player/plugin.py` | `play_music_url` + `http_request` 示例 |
 | `src/plugins/memory/plugin.py` | `resolve_device_key` + LTM 服务示例 |
 | `src/plugins/diary/plugin.py` | `resolve_device_key` + `get_diary_repository` 示例 |

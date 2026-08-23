@@ -287,7 +287,7 @@ async def lifespan(app: FastAPI):
 
                     if not device_tool_mgr:
                         shared_tm.ensure_discovered()
-                        device_tool_mgr = PerUserToolManager(shared=shared_tm, channel=device_channel)
+                        device_tool_mgr = PerUserToolManager(shared=shared_tm, channel=device_channel, device_id=binding.device_mac)
                         logger.info(f"[WeChat] 使用共享工具管理器（无 MCP），channel={device_channel}")
                     else:
                         logger.info(f"[WeChat] 使用设备 session 的 tool_manager（含 MCP），channel={device_tool_mgr.channel}")

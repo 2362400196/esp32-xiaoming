@@ -1,5 +1,6 @@
 """插件管理路由：热加载、插件列表、设备级插件启用控制、插件包安装/卸载/更新"""
 
+import asyncio
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
@@ -185,6 +186,89 @@ async def set_plugin_config(
     except HTTPException:
         raise
     except Exception as e:
+        return {"code": 1, "message": str(e), "data": None}
+
+
+class PluginToolCallRequest(BaseModel):
+    """通用插件工具调用参数"""
+    args: dict = {}
+    device_id: str = ""
+
+
+@router.post("/api/v1/plugins/{plugin_name}/tool/{tool_name}")
+async def call_plugin_tool(
+    plugin_name: str,
+    tool_name: str,
+    body: PluginToolCallRequest,
+    user=Depends(get_current_user),
+):
+    """通用插件工具调用接口：前端通过此接口调用插件 @tool() 函数。
+    
+    插件内部使用 SDK（http_get_json 等）获取数据，API Key 不暴露到前端。
+    用法: POST /api/v1/plugins/weather/tool/test_weather_query
+      {"args": {"city": "北京"}, "device_id": "D8:3B:DA:6D:D9:3C"}
+    """
+    try:
+        from src.use_cases.tools_system import get_tool
+        td = get_tool(tool_name)
+        if td is None:
+            return {"code": 1, "message": f"插件 {plugin_name} 未找到工具 {tool_name}", "data": None}
+
+        # 构建 tool_manager 上下文（注入设备 ID 和设备插件配置，用于 KV 按设备隔离）
+        class _MockToolManager:
+            """模拟 PerUserToolManager.get_plugin_config，让插件 SDK 读到配置"""
+            def __init__(self):
+                self.plugin_configs = {}
+                self.device_id = ""
+            def get_plugin_config(self, plugin: str, key: str, default: str = "") -> str:
+                return str((self.plugin_configs.get(plugin) or {}).get(key) or default)
+
+        tool_manager = _MockToolManager()
+
+        device_id = body.device_id or ""
+        if device_id:
+            tool_manager.device_id = device_id  # 注入设备 ID，使 KV 存储按设备隔离
+            if not await _check_device_owner(device_id, user):
+                raise HTTPException(403, "Device not bound to you")
+            from src.infrastructure.db.repositories.device_repository import DeviceRepository
+            repo = DeviceRepository()
+            found = await repo.find_by_mac(device_id)
+            if found is None:
+                found = await repo.find_by_key(device_id)
+            if found:
+                real_device_id = found[0]
+                config_dict = await repo.get_device_config(real_device_id) or {}
+                tool_manager.plugin_configs = config_dict.get("plugin_configs") or {}
+
+        # 调用插件工具函数（注入插件上下文，使 kv_set/kv_get 能找到正确的插件 ID）
+        from src.infrastructure.plugin_security import set_plugin_context, reset_plugin_context
+        from src.infrastructure.plugin_loader import _plugin_meta
+        # 从 manifest 读取插件权限，用于设置上下文
+        meta = _plugin_meta.get(plugin_name, {})
+        perms = meta.get("permissions") or []
+        if not isinstance(perms, list):
+            perms = []
+        perm_token = set_plugin_context(plugin_name, perms)
+
+        kwargs = dict(body.args)
+        kwargs["tool_manager"] = tool_manager
+        try:
+            result = td.func(**kwargs)
+            if asyncio.iscoroutine(result):
+                result = await result
+        finally:
+            reset_plugin_context(perm_token)
+
+        import json
+        try:
+            data = json.loads(result)
+            return {"code": 0, "message": "ok", "data": data}
+        except (json.JSONDecodeError, TypeError):
+            return {"code": 0, "message": "ok", "data": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[插件工具调用] {plugin_name}/{tool_name} 异常: type={type(e).__name__} msg={e}")
         return {"code": 1, "message": str(e), "data": None}
 
 

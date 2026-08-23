@@ -122,35 +122,100 @@ def plugin_data_delete(path: str, tool_manager=None) -> bool:
 # ── 键值存储（KV Store）──
 
 
-def _get_kv_store_path() -> str:
-    """获取当前插件的 KV 存储文件路径。"""
+def _sanitize_device_id(device_id: str) -> str:
+    """清理设备 ID 中的非法文件名字符（Windows 不支持冒号等）。"""
+    import re
+    return re.sub(r'[\\/:*?"<>|]', '-', device_id)
+
+
+def _get_kv_store_path(device_id: str = "") -> str:
+    """获取当前插件的 KV 存储文件路径。
+
+    当 device_id 不为空时，按设备隔离存储：data/plugins/kv/{device_id}/{plugin_id}.json
+    当 device_id 为空时，使用全局存储：data/plugins/kv/{plugin_id}.json（兼容单设备场景）
+    """
     plugin_id = _get_plugin_id()
-    kv_dir = os.path.join(_get_project_root(), "data", "plugins", "kv")
+    root = _get_project_root()
+    if device_id:
+        # 设备级隔离：每个设备有自己的 kv 文件
+        safe_id = _sanitize_device_id(device_id)
+        kv_dir = os.path.join(root, "data", "plugins", "kv", safe_id)
+    else:
+        # 全局共享（兼容旧用法）
+        kv_dir = os.path.join(root, "data", "plugins", "kv")
     os.makedirs(kv_dir, exist_ok=True)
     return os.path.join(kv_dir, f"{plugin_id}.json")
 
 
-def _load_kv_store() -> dict:
-    """加载 KV 存储。"""
-    path = _get_kv_store_path()
+def _load_kv_store(device_id: str = "") -> dict:
+    """加载 KV 存储。
+
+    优先读取设备级文件，不存在时依次尝试：
+    1. 全局文件 kv/{plugin}.json（旧版单设备回退）
+    2. 扫描 kv/*/{plugin}.json 下任意已有数据（device_id 变更回退）
+    """
+    plugin_id = _get_plugin_id()
+    root = _get_project_root()
+
+    # 1. 设备级路径
+    path = _get_kv_store_path(device_id)
     if os.path.isfile(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError):
             return {}
+
+    # 2. 全局文件回退
+    if device_id:
+        global_path = _get_kv_store_path(device_id="")
+        if os.path.isfile(global_path):
+            try:
+                with open(global_path, "r", encoding="utf-8") as f:
+                    store = json.load(f)
+                    if store:
+                        _save_kv_store(store, device_id)
+                        return store
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    # 3. 扫描其他设备目录（device_id 变更迁移，如 bound_xxx → MAC）
+    if device_id:
+        kv_root = os.path.join(root, "data", "plugins", "kv")
+        if os.path.isdir(kv_root):
+            try:
+                for entry in os.listdir(kv_root):
+                    candidate = os.path.join(kv_root, entry, f"{plugin_id}.json")
+                    if os.path.isfile(candidate):
+                        with open(candidate, "r", encoding="utf-8") as f:
+                            store = json.load(f)
+                            if store:
+                                _save_kv_store(store, device_id)
+                                return store
+            except (OSError, json.JSONDecodeError):
+                pass
+
     return {}
 
 
-def _save_kv_store(store: dict) -> None:
+def _save_kv_store(store: dict, device_id: str = "") -> None:
     """保存 KV 存储。"""
-    path = _get_kv_store_path()
+    path = _get_kv_store_path(device_id)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(store, f, ensure_ascii=False, indent=2)
 
 
+def _resolve_device_id(tool_manager=None) -> str:
+    """从 tool_manager 中提取 device_id（如果有）。"""
+    if tool_manager and hasattr(tool_manager, "device_id"):
+        return tool_manager.device_id or ""
+    return ""
+
+
 def kv_get(key: str, default: Any = None, tool_manager=None) -> Any:
     """读取键值存储。
+
+    当 tool_manager 携带 device_id 时，按设备隔离存储，多用户互不干扰。
 
     Args:
         key: 键名
@@ -161,12 +226,15 @@ def kv_get(key: str, default: Any = None, tool_manager=None) -> Any:
         存储的值，键不存在时返回 default
     """
     require_permission("kv", "读取键值存储")
-    store = _load_kv_store()
+    device_id = _resolve_device_id(tool_manager)
+    store = _load_kv_store(device_id)
     return store.get(key, default)
 
 
 def kv_set(key: str, value: Any, tool_manager=None) -> None:
     """写入键值存储。
+
+    当 tool_manager 携带 device_id 时，按设备隔离存储，多用户互不干扰。
 
     Args:
         key: 键名
@@ -174,13 +242,16 @@ def kv_set(key: str, value: Any, tool_manager=None) -> None:
         tool_manager: 自动传入
     """
     require_permission("kv", "写入键值存储")
-    store = _load_kv_store()
+    device_id = _resolve_device_id(tool_manager)
+    store = _load_kv_store(device_id)
     store[key] = value
-    _save_kv_store(store)
+    _save_kv_store(store, device_id)
 
 
 def kv_delete(key: str, tool_manager=None) -> bool:
     """删除键值存储中的条目。
+
+    当 tool_manager 携带 device_id 时，按设备隔离存储。
 
     Args:
         key: 键名，为空时自动推断
@@ -190,16 +261,19 @@ def kv_delete(key: str, tool_manager=None) -> bool:
         True 表示删除成功，False 表示键不存在
     """
     require_permission("kv", "删除键值存储")
-    store = _load_kv_store()
+    device_id = _resolve_device_id(tool_manager)
+    store = _load_kv_store(device_id)
     if key in store:
         del store[key]
-        _save_kv_store(store)
+        _save_kv_store(store, device_id)
         return True
     return False
 
 
 def kv_list(prefix: str = "", tool_manager=None) -> list:
     """列出键值存储中的所有条目（可按前缀过滤）。
+
+    当 tool_manager 携带 device_id 时，按设备隔离存储。
 
     Args:
         prefix: 可选，只返回键以此前缀开头的条目
@@ -209,7 +283,8 @@ def kv_list(prefix: str = "", tool_manager=None) -> list:
         列表，每项包含 {"key": "...", "value": ...}
     """
     require_permission("kv", "列出键值存储")
-    store = _load_kv_store()
+    device_id = _resolve_device_id(tool_manager)
+    store = _load_kv_store(device_id)
     if prefix:
         return [{"key": k, "value": v} for k, v in store.items() if k.startswith(prefix)]
     return [{"key": k, "value": v} for k, v in store.items()]

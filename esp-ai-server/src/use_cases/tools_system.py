@@ -989,11 +989,13 @@ class PerUserToolManager:
         disabled_tools: list[str] = None,
         enabled_plugins: list[str] = None,
         device_has_display: bool = True,
+        device_id: str = "",  # 绑定设备 ID，用于 KV 按设备隔离存储
     ):
         self._shared = shared
         self.channel = channel
         self.ctx = ctx
         self.fsm = fsm
+        self.device_id = device_id  # 设备 ID，供 KV 存储等按设备隔离
         self._disabled_tools = set(disabled_tools) if disabled_tools else set()
         # 设备级插件白名单：None/空 = 无白名单限制（插件全部启用）；
         # 非空集合 = 仅白名单内插件生效（插件商店语义）
@@ -1413,9 +1415,7 @@ class PerUserToolManager:
                     kwargs["ctx"] = self.ctx
                 if self.fsm and "fsm" in sig.parameters:
                     kwargs["fsm"] = self.fsm
-                result = self._call_with_plugin_context(builtin, tool_name, kwargs)
-                if asyncio.iscoroutine(result):
-                    result = await result
+                result = await self._call_with_plugin_context(builtin, tool_name, kwargs)
                 return str(result)
             except StopPipeline:
                 raise
@@ -1441,7 +1441,7 @@ class PerUserToolManager:
         logger.warning(f"[ToolManager] 未找到工具: {tool_name}")
         return f"未找到工具: {tool_name}"
 
-    def _call_with_plugin_context(self, td, tool_name: str, kwargs: dict):
+    async def _call_with_plugin_context(self, td, tool_name: str, kwargs: dict):
         """在插件权限上下文中执行工具函数（运行时守卫的数据源）。
 
         非插件工具（内置/系统工具）不设上下文 → SDK 权限检查放行。
@@ -1454,7 +1454,10 @@ class PerUserToolManager:
             plugin = None
 
         if plugin is None:
-            return td.func(**kwargs)
+            result = td.func(**kwargs)
+            if asyncio.iscoroutine(result):
+                return await result
+            return result
 
         # 插件工具：注入权限上下文（permissions 来自 manifest）
         from src.infrastructure.plugin_security import reset_plugin_context, set_plugin_context
@@ -1469,7 +1472,10 @@ class PerUserToolManager:
             permissions = []
         token = set_plugin_context(plugin, permissions)
         try:
-            return td.func(**kwargs)
+            result = td.func(**kwargs)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return result
         finally:
             reset_plugin_context(token)
 

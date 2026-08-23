@@ -519,3 +519,50 @@ async def main():
 
 asyncio.run(main())
 ```
+
+---
+
+## 插件工具调用 API
+
+### 通用插件工具调用
+
+```
+POST /api/v1/plugins/{plugin_name}/tool/{tool_name}
+```
+
+**鉴权：** Bearer Token（需登录用户）
+
+**请求体：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `args` | object | 否 | 工具参数，如 `{"city": "北京"}` |
+| `device_id` | string | 否 | 设备 ID，用于注入该设备的插件配置 |
+
+**原理：** 后端通过 `get_tool(tool_name)` 获取插件工具定义，注入 `tool_manager` 上下文（含设备插件配置），然后调用插件工具函数。插件工具内部使用 `http_get_json` 等 SDK 函数获取数据，**API Key 等敏感信息不暴露到浏览器**。
+
+**cURL 示例：**
+
+```bash
+# 调用天气插件测试工具
+curl -X POST http://localhost:8088/api/v1/plugins/weather/tool/test_weather_query \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{"args": {"city": "北京"}, "device_id": "D8:3B:DA:6D:D9:3C"}'
+
+# 响应示例
+{"code": 0, "message": "ok", "data": {"status": "1", "lives": [...]}}
+```
+
+**Python 调用示例：**
+
+```python
+import httpx
+
+resp = httpx.post(
+    "http://localhost:8088/api/v1/plugins/weather/tool/test_weather_query",
+    json={"args": {"city": "北京"}, "device_id": "D8:3B:DA:6D:D9:3C"},
+    headers={"Authorization": "Bearer <token>"},
+)
+print(resp.json())
+```

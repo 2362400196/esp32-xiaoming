@@ -129,7 +129,7 @@ class WebSocketSessionHandler:
 
         shared_tool_mgr = getattr(get_app().state, 'shared_tool_manager', _shared_tool_manager)
         shared_tool_mgr.ensure_discovered()
-        tool_mgr = PerUserToolManager(shared=shared_tool_mgr, channel=channel)
+        tool_mgr = PerUserToolManager(shared=shared_tool_mgr, channel=channel, device_id=device_mac)
         tool_mgr.user_config = user_config
         self.tool_mgr = tool_mgr
 

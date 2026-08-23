@@ -13,17 +13,9 @@
         "width": "narrow"
     },
     "requires": [],
-    "config_fields": [
-        {
-            "key": "amap_key",
-            "label": "高德 API Key",
-            "type": "text",
-            "required": true,
-            "placeholder": "https://console.amap.com 获取（必填）"
-        }
-    ],
     "permissions": [
         "network",
-        "device"
+        "device",
+        "kv"
     ]
 }

@@ -593,9 +593,16 @@ class Adjudicator:
     # ── 设备作用域检查 ──────────────────────────────────────
 
     def _check_device_scope(self, target_device: str, ctx: CallContext, what: str) -> None:
-        """数据操作必须限定在本次调用绑定的设备（防越权读他人数据）。"""
+        """数据操作必须限定在本次调用绑定的设备（防越权读他人数据）。
+
+        强约束：没有绑定设备时（ctx.device_key 为空），拒绝任何指定了 target_device 的操作。
+        有绑定设备时，target_device 必须与 ctx.device_key 一致。
+        """
         if not ctx.device_key:
-            # 无绑定设备时允许插件使用调用方传入的设备标识（与进程内行为一致）
+            if target_device:
+                raise PermissionDenied(
+                    f"插件「{self.plugin_id}」未绑定设备，无法操作其他设备的数据（{what}），已阻止"
+                )
             return
         if target_device and target_device != ctx.device_key:
             raise PermissionDenied(

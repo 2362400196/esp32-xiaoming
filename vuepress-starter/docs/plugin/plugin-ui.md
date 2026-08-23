@@ -209,35 +209,49 @@ input:focus, select:focus, textarea:focus {
 .empty-state p { margin: 4px 0; }
 ```
 
-## 与后端 API 通信
+## 与后端 API 通信（postMessage 代理）
 
-### 获取 Token
-
-```javascript
-function getToken() {
-  return localStorage.getItem('espai_token') || '';
-}
-```
-
-Token 在用户登录时由主应用保存到 `localStorage`，键名为 `espai_token`。
+::: tip 设计原则
+插件前端（iframe 内）**不直接管理 JWT Token**，所有 API 调用通过 postMessage 交给父应用代理执行。父应用自动携带认证信息，插件前端无需关心鉴权细节。
+:::
 
 ### 通用 API 请求函数
 
+所有插件前端统一使用以下 SDK 封装：
+
 ```javascript
-async function api(path, method = 'GET', body = null) {
-  const token = getToken();
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = 'Bearer ' + token;
-  try {
-    const res = await fetch(path, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : null,
-    });
-    return await res.json();
-  } catch (e) {
-    return { code: 1, message: String(e) };
+let _apiId = 0
+const _pending = {}
+
+// 监听父应用返回的 API 结果
+window.addEventListener('message', function(e) {
+  const msg = typeof e.data === 'object' ? e.data : {}
+  if (msg.type === 'apiResult' && _pending[msg.id]) {
+    _pending[msg.id](msg)
+    delete _pending[msg.id]
   }
+})
+
+// 通过 postMessage 代理调用后端 API
+async function sdkApi(path, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const id = ++_apiId
+    _pending[id] = (msg) => {
+      if (msg.error) reject(new Error(msg.error))
+      else resolve({ data: msg.data, status: msg.status })
+    }
+    window.parent.postMessage({
+      type: 'api', id, path,
+      method: opts.method || 'GET',
+      body: opts.body || null
+    }, '*')
+  })
+}
+
+// 简化封装，自动处理返回格式
+async function api(path, opts = {}) {
+  const result = await sdkApi(path, opts)
+  return result.data
 }
 ```
 
@@ -245,19 +259,26 @@ async function api(path, method = 'GET', body = null) {
 
 ```javascript
 // GET 请求
-const res = await api('/api/v1/plugins/my_plugin/data');
-if (res.code === 0) {
-  console.log(res.data);
-}
+const data = await api('/api/v1/plugins/my_plugin/data')
+console.log(data)
 
 // POST 请求
-const res = await api('/api/v1/plugins/my_plugin/config', 'POST', { key: 'value' });
+const data = await api('/api/v1/plugins/my_plugin/config', {
+  method: 'POST',
+  body: { key: 'value' }
+})
 
 // PUT 请求
-const res = await api('/api/v1/plugins/my_plugin/config', 'PUT', { key: 'new_value' });
+const data = await api('/api/v1/plugins/my_plugin/config', {
+  method: 'PUT',
+  body: { key: 'new_value' }
+})
 
 // DELETE 请求
-const res = await api('/api/v1/plugins/my_plugin/config', 'DELETE');
+const data = await api('/api/v1/plugins/my_plugin/data', {
+  method: 'DELETE',
+  body: { id: 'xxx' }
+})
 ```
 
 ### API 返回格式
@@ -277,6 +298,16 @@ const res = await api('/api/v1/plugins/my_plugin/config', 'DELETE');
 ## 与主应用通信（postMessage）
 
 插件页面通过 `window.parent.postMessage` 与主应用通信。
+
+### 消息类型一览
+
+| 方向 | type | 用途 |
+|------|------|------|
+| 插件 → 父应用 | `ready` | 通知页面已加载 |
+| 插件 → 父应用 | `toast` | 显示提示消息 |
+| 插件 → 父应用 | `api` | 通过父应用代理调用后端 API |
+| 父应用 → 插件 | `apiResult` | API 调用结果返回 |
+| 父应用 → 插件 | `deviceChanged` | 推送当前设备信息 |
 
 ### 通知就绪
 
@@ -341,6 +372,33 @@ if (did) {
   // 初始化加载数据
 }
 ```
+
+## 调用插件工具（通用接口）
+
+前端通过 `POST /api/v1/plugins/{plugin_name}/tool/{tool_name}` 调用插件的 `@tool()` 工具函数。
+
+**设计原则：** 插件工具内部使用 `http_get_json` 等 SDK 函数获取数据，**API Key 等敏感信息不暴露到浏览器**。
+
+```javascript
+// 调用天气插件测试工具
+const data = await api('/api/v1/plugins/weather/tool/test_weather_query', {
+  method: 'POST',
+  body: {
+    args: { city: '北京' },
+    device_id: 'D8:3B:DA:6D:D9:3C'
+  }
+})
+// data 为插件工具返回的 JSON 结果
+```
+
+**请求体：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `args` | object | 否 | 工具参数，如 `{"city": "北京"}` |
+| `device_id` | string | 否 | 设备 ID，用于注入该设备的插件配置 |
+
+**原理：** 后端通过 `get_tool(tool_name)` 获取工具定义，注入 `tool_manager` 上下文（含设备插件配置），然后调用插件工具函数。所有插件共用此接口，无需为每个插件单独建路由。
 
 ## 本地 Toast 提示
 
@@ -502,47 +560,54 @@ input:focus, select:focus, textarea:focus { border-color: var(--mint); box-shado
 
 <script>
 let currentDevice = null;
-let items = [];
-let editingId = null;
+	let items = [];
+	let editingId = null;
 
-function getToken() { return localStorage.getItem('espai_token') || ''; }
+	function showToast(msg) {
+	  const old = document.querySelector('.toast');
+	  if (old) old.remove();
+	  const el = document.createElement('div');
+	  el.className = 'toast';
+	  el.textContent = msg;
+	  document.body.appendChild(el);
+	  setTimeout(() => el.remove(), 2200);
+	}
 
-function showToast(msg) {
-  const old = document.querySelector('.toast');
-  if (old) old.remove();
-  const el = document.createElement('div');
-  el.className = 'toast';
-  el.textContent = msg;
-  document.body.appendChild(el);
-  setTimeout(() => el.remove(), 2200);
-}
-
-async function api(path, method = 'GET', body = null) {
-  const token = getToken();
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = 'Bearer ' + token;
-  try {
-    const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : null });
-    return await res.json();
-  } catch (e) {
-    return { code: 1, message: String(e) };
-  }
-}
+	// --- postMessage SDK（无需管理 JWT） ---
+	let _apiId = 0;
+	const _pending = {};
+	window.addEventListener('message', function(e) {
+	  const msg = typeof e.data === 'object' ? e.data : {};
+	  if (msg.type === 'apiResult' && _pending[msg.id]) {
+	    _pending[msg.id](msg);
+	    delete _pending[msg.id];
+	  }
+	});
+	async function api(path, opts = {}) {
+	  return new Promise((resolve, reject) => {
+	    const id = ++_apiId;
+	    _pending[id] = (msg) => {
+	      if (msg.error) reject(new Error(msg.error));
+	      else resolve(msg.data);
+	    };
+	    window.parent.postMessage({ type: 'api', id, path, method: opts.method || 'GET', body: opts.body || null }, '*');
+	  });
+	}
 
 async function loadData() {
-  const mac = currentDevice?.device_id || '';
-  if (!mac) return;
-  document.getElementById('loading').style.display = 'flex';
-  document.getElementById('emptyState').style.display = 'none';
-  document.getElementById('list').innerHTML = '';
-  const res = await api('/api/v1/plugins/my_plugin/data?device_id=' + encodeURIComponent(mac));
-  document.getElementById('loading').style.display = 'none';
-  if (res.code === 0) {
-    items = res.data || [];
-    render();
-  } else {
-    showToast(res.message || '加载失败');
-  }
+	  const mac = currentDevice?.device_id || '';
+	  if (!mac) return;
+	  document.getElementById('loading').style.display = 'flex';
+	  document.getElementById('emptyState').style.display = 'none';
+	  document.getElementById('list').innerHTML = '';
+	  const data = await api('/api/v1/plugins/my_plugin/data?device_id=' + encodeURIComponent(mac));
+	  document.getElementById('loading').style.display = 'none';
+	  if (data && data.code === 0) {
+	    items = data.data || [];
+	    render();
+	  } else {
+	    showToast(data?.message || '加载失败');
+	  }
 }
 
 function render() {
@@ -603,29 +668,33 @@ async function save() {
   const btn = document.getElementById('saveBtn');
   btn.disabled = true;
   btn.textContent = '保存中…';
-  const res = await api('/api/v1/plugins/my_plugin/data', 'POST', {
-    device_id: mac, id: editingId, name, description: desc
-  });
-  btn.disabled = false;
-  btn.textContent = '保存';
-  if (res.code === 0) {
-    showToast(editingId ? '已更新' : '已添加');
-    closeForm();
-    await loadData();
-  } else {
-    showToast(res.message || '保存失败');
+  const data = await api('/api/v1/plugins/my_plugin/data', {
+	    method: 'POST',
+	    body: { device_id: mac, id: editingId, name, description: desc }
+	  });
+	  btn.disabled = false;
+	  btn.textContent = '保存';
+	  if (data && data.code === 0) {
+	    showToast(editingId ? '已更新' : '已添加');
+	    closeForm();
+	    await loadData();
+	  } else {
+	    showToast(data?.message || '保存失败');
   }
 }
 
 async function deleteItem(id) {
-  if (!confirm('确定要删除吗？')) return;
-  const mac = currentDevice?.device_id || '';
-  const res = await api('/api/v1/plugins/my_plugin/data', 'DELETE', { device_id: mac, id });
-  if (res.code === 0) {
-    showToast('已删除');
-    await loadData();
-  } else {
-    showToast(res.message || '删除失败');
+	  if (!confirm('确定要删除吗？')) return;
+	  const mac = currentDevice?.device_id || '';
+	  const data = await api('/api/v1/plugins/my_plugin/data', {
+	    method: 'DELETE',
+	    body: { device_id: mac, id }
+	  });
+	  if (data && data.code === 0) {
+	    showToast('已删除');
+	    await loadData();
+	  } else {
+	    showToast(data?.message || '删除失败');
   }
 }
 
@@ -700,8 +769,12 @@ if (did) {
 - 检查浏览器控制台是否有错误
 
 **API 请求返回 401 未授权**
-- 确保已登录（Token 会保存在 `localStorage` 中）
-- 检查 Token 是否过期
+- 确保已登录（Token 由父应用管理，无需手动处理）
+- 如使用 `api()` 函数仍出现 401，检查父应用是否正确维护 Token
+
+**保存配置后下次打开又没了**
+- 确认插件声明了 `kv` 权限，配置通过 `save_config` 工具写入 KV 存储
+- 配置存储在 `data/plugins/kv/<插件id>.json`，不依赖主数据库
 
 **postMessage 通信失败**
 - 确保在页面加载后调用了 `window.parent.postMessage({ type: 'ready' }, '*')`
@@ -730,4 +803,4 @@ POST /api/v1/plugins/reload
 5. **空状态**：无数据时应显示友好的空状态提示
 6. **命名规范**：插件 ID 使用英文小写和下划线，如 `my_plugin`
 7. **文件编码**：所有文件使用 UTF-8 编码
-8. **安全性**：不要在前端暴露敏感信息（密钥、密码等）
+8. **安全性**：不要在前端暴露敏感信息（密钥、密码等），所有 API 调用走 postMessage 代理，由父应用统一管理 JWT Token；插件配置通过 `save_config` 工具写入 KV 存储，不经过主数据库

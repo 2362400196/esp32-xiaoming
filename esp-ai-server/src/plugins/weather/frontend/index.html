@@ -34,12 +34,18 @@ body {
 .form-label {
   font-size: 13px; font-weight: 500; color: #475569; margin-bottom: 6px; display: block;
 }
-.form-input {
-  width: 100%; padding: 10px 12px; border: 1.5px solid #e2e8f0; border-radius: 10px;
-  font-size: 14px; color: #1e293b; background: #f8fafc; outline: none; transition: all .2s;
-}
+.form-input { width: 100%; padding: 10px 12px; border: 1.5px solid #e2e8f0; border-radius: 10px; font-size: 14px; color: #1e293b; background: #f8fafc; outline: none; transition: all .2s; }
 .form-input:focus { border-color: #5eead4; background: #fff; box-shadow: 0 0 0 3px rgba(94,234,212,0.15); }
 .form-input::placeholder { color: #94a3b8; }
+.form-input-wrap { position: relative; }
+.form-input-wrap .form-input { padding-right: 40px; }
+.eye-btn {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  background: none; border: none; cursor: pointer; padding: 4px;
+  color: #94a3b8; line-height: 1; display: flex; align-items: center;
+}
+.eye-btn:hover { color: #475569; }
+.eye-btn svg { display: block; }
 .form-tip { font-size: 12px; color: #94a3b8; margin-top: 4px; line-height: 1.4; }
 
 /* 按钮 */
@@ -96,7 +102,15 @@ body {
     <div class="card-title"><span>⚙</span> 高德 API 配置 <span class="badge">必填</span></div>
     <div class="form-group">
       <label class="form-label">API Key</label>
-      <input class="form-input" id="apiKey" type="password" placeholder="在 https://console.amap.com 获取">
+      <div class="form-input-wrap">
+        <input class="form-input" id="apiKey" type="password" placeholder="在 https://console.amap.com 获取">
+        <button class="eye-btn" id="eyeBtn" type="button" onclick="toggleEye()" aria-label="切换显示">
+          <svg id="eyeIcon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+        </button>
+      </div>
       <div class="form-tip">用于查询实时天气和预报数据</div>
     </div>
     <button class="btn btn-primary" id="saveBtn">保存配置</button>
@@ -108,7 +122,7 @@ body {
     <div class="form-group">
       <label class="form-label">城市</label>
       <div style="display:flex;gap:8px">
-        <input class="form-input" id="testCity" value="北京" placeholder="输入城市名" style="flex:1">
+        <input class="form-input" id="testCity" value="西安" placeholder="输入城市名" style="flex:1">
         <button class="btn btn-sm btn-outline" id="testBtn">查询</button>
       </div>
     </div>
@@ -128,6 +142,38 @@ body {
 const API_BASE = '/api/v1'
 const deviceId = new URLSearchParams(window.location.search).get('device_id')
 
+// ── postMessage SDK：通过父应用代理 API 调用（自动携带 JWT，无需前端管 token） ──
+let _apiId = 0
+const _pending = {}
+
+window.addEventListener('message', function(e) {
+  const msg = typeof e.data === 'object' ? e.data : {}
+  if (msg.type === 'apiResult' && _pending[msg.id]) {
+    _pending[msg.id](msg)
+    delete _pending[msg.id]
+  }
+})
+
+async function sdkApi(path, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const id = ++_apiId
+    _pending[id] = (msg) => {
+      if (msg.error) reject(new Error(msg.error))
+      else resolve({ data: msg.data, status: msg.status })
+    }
+    window.parent.postMessage({ type: 'api', id, path, method: opts.method || 'GET', body: opts.body || null }, '*')
+  })
+}
+
+async function api(path, opts = {}) {
+  try {
+    const result = await sdkApi(API_BASE + path, opts)
+    return result.data
+  } catch (e) {
+    throw e
+  }
+}
+
 function showToast(msg, isError = false) {
   const el = document.getElementById('toast')
   el.textContent = msg
@@ -136,67 +182,73 @@ function showToast(msg, isError = false) {
   setTimeout(() => el.classList.remove('show'), 2500)
 }
 
-async function api(path, opts = {}) {
-  const url = `${API_BASE}${path}`
-  const res = await fetch(url, {
-    ...opts,
-    headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
-  })
-  const data = await res.json()
-  if (data.code !== 0) throw new Error(data.message || '请求失败')
-  return data.data
+// --- 密码显隐切换 ---
+function toggleEye() {
+  const input = document.getElementById('apiKey')
+  const icon = document.getElementById('eyeIcon')
+  const isPassword = input.type === 'password'
+  input.type = isPassword ? 'text' : 'password'
+  icon.innerHTML = isPassword
+    ? '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>'
+    : '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>'
 }
 
-// --- 加载配置（从设备插件列表读取） ---
+// --- 加载配置（从插件 KV 存储读取，不经过主数据库） ---
 async function loadConfig() {
   try {
-    const data = await api(`/devices/${deviceId}/plugins`)
-    const configs = data.plugin_configs || {}
-    const weatherCfg = configs.weather || {}
-    if (weatherCfg.amap_key) {
-      document.getElementById('apiKey').value = weatherCfg.amap_key
+    const res = await api(`/plugins/weather/tool/save_config`, {
+      method: 'POST',
+      body: { args: {}, device_id: deviceId },
+    })
+    if (res && res.code === 0 && res.data && res.data.ok && res.data.amap_key) {
+      document.getElementById('apiKey').value = res.data.amap_key
     }
   } catch (e) {
     // 配置未设置是正常情况
   }
 }
 
-// --- 保存配置 ---
+// --- 保存配置（通过插件工具 save_config 写入 KV 存储，不经过主数据库） ---
 document.getElementById('saveBtn').addEventListener('click', async () => {
   const key = document.getElementById('apiKey').value.trim()
   if (!key) { showToast('请输入 API Key', true); return }
   const btn = document.getElementById('saveBtn')
   btn.disabled = true; btn.textContent = '保存中…'
   try {
-    await api(`/devices/${deviceId}/plugins/weather/config`, {
-      method: 'PUT',
-      body: JSON.stringify({ config: { amap_key: key } }),
+    const res = await api(`/plugins/weather/tool/save_config`, {
+      method: 'POST',
+      body: { args: { amap_key: key }, device_id: deviceId },
     })
-    showToast('配置已保存')
-    checkStatus()
+    if (res && res.code === 0 && res.data && res.data.ok) {
+      showToast('配置已保存')
+      await loadConfig()  // 回显已保存的 Key
+      checkStatus()
+    } else {
+      showToast(`保存失败: ${(res && res.data && res.data.error) || '未知错误'}`, true)
+    }
   } catch (e) {
     showToast(`保存失败: ${e.message}`, true)
   }
   btn.disabled = false; btn.textContent = '保存配置'
 })
 
-// --- 测试查询（通过高德 API 直接测试） ---
+// --- 测试查询（通过通用插件工具接口调用 SDK，API Key 不暴露到浏览器） ---
 document.getElementById('testBtn').addEventListener('click', async () => {
-  const city = document.getElementById('testCity').value.trim() || '北京'
-  const key = document.getElementById('apiKey').value.trim()
-  if (!key) { showToast('请先配置 API Key', true); return }
+  const city = document.getElementById('testCity').value.trim() || '西安'
   const el = document.getElementById('weatherResult')
   el.innerHTML = '<div class="loading"><span class="spin">⟳</span> 查询中…</div>'
   try {
-    const res = await fetch(
-      `https://restapi.amap.com/v3/weather/weatherInfo?key=${encodeURIComponent(key)}&city=${encodeURIComponent(city)}&extensions=base`
-    )
-    const data = await res.json()
-    if (data.status !== '1' || !data.lives || !data.lives[0]) {
-      el.innerHTML = `<div class="error">查询失败: ${data.info || '未知错误'}</div>`
+    const res = await api(`/plugins/weather/tool/test_weather_query`, {
+      method: 'POST',
+      body: { args: { city }, device_id: deviceId },
+    })
+    // res = {code: 0, message: "ok", data: {status: "1", lives: [...]}}
+    const weatherData = res && res.code === 0 ? res.data : null
+    if (!weatherData || weatherData.status !== '1' || !weatherData.lives || !weatherData.lives[0]) {
+      el.innerHTML = `<div class="error">查询失败: ${(weatherData && weatherData.info) || '未知错误'}</div>`
       return
     }
-    const live = data.lives[0]
+    const live = weatherData.lives[0]
     el.innerHTML = `
       <div class="weather-result">
         <div class="weather-city">${live.city || city}</div>
@@ -206,7 +258,7 @@ document.getElementById('testBtn').addEventListener('click', async () => {
       </div>
     `
   } catch (e) {
-    el.innerHTML = `<div class="error">网络错误: ${e.message}</div>`
+    el.innerHTML = `<div class="error">查询失败: ${e.message}</div>`
   }
 })
 
@@ -219,14 +271,15 @@ async function checkStatus() {
       el.innerHTML = '<span class="status-dot offline"></span>未配置 API Key'
       return
     }
-    const res = await fetch(
-      `https://restapi.amap.com/v3/weather/weatherInfo?key=${encodeURIComponent(key)}&city=北京&extensions=base`
-    )
-    const data = await res.json()
-    if (data.status === '1') {
+    const res = await api(`/plugins/weather/tool/test_weather_query`, {
+      method: 'POST',
+      body: { args: { city: '西安' }, device_id: deviceId },
+    })
+    const weatherData = res && res.code === 0 ? res.data : null
+    if (weatherData && weatherData.status === '1') {
       el.innerHTML = '<span class="status-dot online"></span>服务正常'
     } else {
-      el.innerHTML = `<span class="status-dot offline"></span>${data.info || '服务异常'}`
+      el.innerHTML = `<span class="status-dot offline"></span>${(weatherData && weatherData.info) || '服务异常'}`
     }
   } catch (e) {
     el.innerHTML = '<span class="status-dot offline"></span>网络不可达'

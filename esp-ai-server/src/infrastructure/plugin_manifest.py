@@ -174,6 +174,7 @@ class PluginManifest(BaseModel):
             "description": self.description,
             "requires": list(self.requires),
             "config_fields": list(self.config_fields),
+            "permissions": list(self.permissions),  # 运行时权限校验用
             "optional": self.optional,
             "frontend": self.frontend,
             "frontend_config": dict(self.frontend_config),

@@ -61,8 +61,30 @@ function handleMessage(e) {
     } else if (msg.type === 'ready') {
       // 插件页面就绪，发送设备信息
       sendToPlugin({ type: 'deviceChanged', device: props.currentDevice })
+    } else if (msg.type === 'api') {
+      // 代理插件前端调用后端 API（自动携带 JWT）
+      handleApiCall(msg)
     }
   } catch { /* 静默 */ }
+}
+
+async function handleApiCall(msg) {
+  const { id, path, method, body } = msg
+  try {
+    const token = localStorage.getItem('espai_token') || ''
+    const headers = { 'Content-Type': 'application/json' }
+    if (token) headers['Authorization'] = 'Bearer ' + token
+    const res = await fetch(path, {
+      method: method || 'GET',
+      headers,
+      body: body ? JSON.stringify(body) : null,
+    })
+    let data = null
+    try { data = await res.json() } catch { data = null }
+    sendToPlugin({ type: 'apiResult', id, data: data, status: res.status })
+  } catch (e) {
+    sendToPlugin({ type: 'apiResult', id, error: String(e), status: 0 })
+  }
 }
 
 watch(() => props.currentDevice, (d) => {
