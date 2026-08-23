@@ -125,7 +125,7 @@ async def update_device_mcp(mac: str, server_name: str, body: MCPServerConfig, u
             current_plugins.append(mcp_plugin_id)
             await repo.update_device_partial(device_id, {"enabled_plugins": current_plugins})
 
-        _hot_reload_device_config(mac)
+        _hot_reload_device_config(mac, force=True)
         return {"code": 0, "message": "ok", "data": server_cfg}
     except Exception as e:
         return {"code": 1, "message": f"更新失败: {e}", "data": None}
@@ -156,7 +156,7 @@ async def delete_device_mcp(mac: str, server_name: str, user: UserModel = Depend
             current_plugins = [p for p in current_plugins if p != mcp_plugin_id]
             await repo.update_device_partial(device_id, {"enabled_plugins": current_plugins})
 
-        _hot_reload_device_config(mac)
+        _hot_reload_device_config(mac, force=True)
         return {"code": 0, "message": "ok", "data": {"deleted": server_name}}
     except Exception as e:
         return {"code": 1, "message": f"删除失败: {e}", "data": None}
@@ -269,7 +269,7 @@ async def toggle_mcp_server(mac: str, server_name: str, disabled: bool = True, u
 
         repo = _get_repo()
         await repo.update_device_partial(device_id, {"disabled_mcp_servers": ds})
-        _hot_reload_device_config(mac)
+        _hot_reload_device_config(mac, force=True)
         return {"code": 0, "message": "ok", "data": {"disabled": disabled}}
     except Exception as e:
         return {"code": 1, "message": str(e), "data": None}
@@ -297,7 +297,7 @@ async def toggle_mcp_tool(mac: str, server_name: str, tool_name: str, disabled: 
 
         repo = _get_repo()
         await repo.update_device_partial(device_id, {"disabled_mcp_tools": dt})
-        _hot_reload_device_config(mac)
+        _hot_reload_device_config(mac, force=True)
         return {"code": 0, "message": "ok", "data": {"disabled": disabled}}
     except Exception as e:
         return {"code": 1, "message": str(e), "data": None}

@@ -789,14 +789,18 @@ def _check_device_config_unchanged(device_id: str) -> bool:
         return False
 
 
-def _hot_reload_device_config(device_id: str) -> None:
+def _hot_reload_device_config(device_id: str, force: bool = False) -> None:
     """热重载在线设备的 user_config，让新技能和 MCP 配置立即生效。
 
     阶段 3：数据源改为 DB（通过 load_devices()），并对比 updated_at 跳过未变更的设备。
+    
+    force: 为 True 时跳过 updated_at 检查，强制重载（MCP 工具开关等场景需要，
+           因为异步事务尚未 commit 时同步 session 读不到最新 updated_at）。
     """
     try:
         # 对比 updated_at：如果设备配置未变更，跳过重载
-        if _check_device_config_unchanged(device_id):
+        # force=True 时跳过检查（MCP 路由等可能需要异步事务提交后才能读到最新时间戳）
+        if not force and _check_device_config_unchanged(device_id):
             from src.infrastructure.logging import get_logger as _gl2
             _gl2(__name__).debug(f"[HotReload] 设备配置未变更，跳过重载: {device_id}")
             return

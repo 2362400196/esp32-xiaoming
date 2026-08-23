@@ -66,10 +66,7 @@ body {
 .card-actions { display: flex; gap: 6px; border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px; }
 .tools-section { margin-top: 8px; }
 .tools-title { font-size: 12px; font-weight: 600; color: var(--text-sub); margin-bottom: 6px; }
-.tools-list { display: flex; flex-direction: column; gap: 4px; max-height: 150px; overflow-y: auto; }
-.tool-item { display: flex; gap: 6px; font-size: 12px; padding: 4px 8px; background: rgba(0,0,0,0.03); border-radius: 6px; }
-.tool-name { font-weight: 600; color: var(--mint-deep); white-space: nowrap; }
-.tool-desc { color: var(--text-sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tools-list { display: flex; flex-direction: column; gap: 4px; max-height: 300px; overflow-y: auto; }
 .empty-state { text-align: center; padding: 50px 20px; color: var(--text-sub); }
 .empty-state svg { opacity: 0.35; margin-bottom: 10px; }
 .empty-state p { margin: 4px 0; }
@@ -90,6 +87,39 @@ input, select, textarea {
 input:focus, select:focus, textarea:focus { border-color: var(--mint); box-shadow: 0 0 0 3px var(--mint-soft); }
 textarea { resize: vertical; min-height: 60px; }
 .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+/* Toggle Switch */
+.toggle-wrap { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; flex-shrink: 0; }
+.toggle { position: relative; width: 32px; height: 18px; background: #cbd5e1; border-radius: 99px; transition: background 0.25s; flex-shrink: 0; }
+.toggle.on { background: var(--mint); }
+.toggle::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; background: #fff; border-radius: 50%; transition: transform 0.25s; box-shadow: 0 1px 3px rgba(0,0,0,0.15); }
+.toggle.on::after { transform: translateX(14px); }
+.toggle-label { font-size: 11px; color: var(--text-sub); white-space: nowrap; }
+.tool-item { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 5px 10px; background: rgba(0,0,0,0.03); border-radius: 8px; }
+.tool-item .tool-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.tool-item .tool-name { font-weight: 600; color: var(--mint-deep); font-size: 12px; }
+.tool-item .tool-desc { color: var(--text-sub); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-item.tool-off { opacity: 0.55; }
+.tool-item.tool-off .tool-name { color: var(--text-sub); }
+
+/* Tools Modal */
+.tool-modal-panel { width: 90%; max-width: 520px; max-height: 85vh; display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.tool-modal-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.tool-modal-header h3 { margin: 0; font-size: 16px; font-weight: 700; }
+.tool-modal-close { width: 28px; height: 28px; border: none; background: transparent; cursor: pointer; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--text-sub); font-size: 18px; transition: all 0.2s; }
+.tool-modal-close:hover { background: rgba(0,0,0,0.05); color: var(--text-main); }
+.tool-modal-body { padding: 12px 20px 20px; overflow-y: auto; flex: 1; }
+.tool-modal-count { font-size: 12px; color: var(--text-sub); margin: 0 0 10px; }
+.tool-modal-item { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; transition: background 0.2s; }
+.tool-modal-item:hover { background: rgba(0,0,0,0.03); }
+.tool-modal-item + .tool-modal-item { border-top: 1px solid var(--border); }
+.tool-modal-item .tool-info { flex: 1; min-width: 0; }
+.tool-modal-item .tool-name { font-weight: 600; font-size: 13px; color: var(--text-main); }
+.tool-modal-item .tool-name.off { color: var(--text-sub); }
+.tool-modal-item .tool-desc { font-size: 12px; color: var(--text-sub); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-modal-item .tool-badge { font-size: 10px; padding: 1px 6px; border-radius: 99px; font-weight: 600; }
+.tool-modal-footer { padding: 12px 20px 18px; border-top: 1px solid var(--border); text-align: center; flex-shrink: 0; }
+.tool-modal-empty { text-align: center; padding: 30px 20px; color: var(--text-sub); font-size: 13px; }
+
 .toast {
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
   padding: 10px 24px; background: var(--glass); border: 1px solid var(--glass-border);
@@ -158,11 +188,30 @@ textarea { resize: vertical; min-height: 60px; }
   </div>
 </div>
 
+<!-- 工具列表弹窗 -->
+<div class="modal-mask" id="toolModalMask" style="display:none" onclick="if(event.target===this)closeToolsModal()">
+  <div class="modal-panel tool-modal-panel card" onclick="event.stopPropagation()">
+    <div class="tool-modal-header">
+      <h3 id="toolModalTitle">工具列表</h3>
+      <button class="tool-modal-close" onclick="closeToolsModal()">✕</button>
+    </div>
+    <div class="tool-modal-body" id="toolModalBody">
+      <div class="tool-modal-count" id="toolModalCount"></div>
+      <div id="toolModalList"></div>
+    </div>
+    <div class="tool-modal-footer">
+      <button class="btn btn-ghost" onclick="closeToolsModal()">关闭</button>
+    </div>
+  </div>
+</div>
+
 <script>
 let currentDevice = null;
 let servers = {};
 let editingName = '';
 let disabledServers = [];
+let disabledTools = {}; // {server_name: [tool_name, ...]}
+let toolModalServer = ''; // 当前弹窗显示的服务器名
 
 function getToken() { return localStorage.getItem('espai_token') || ''; }
 
@@ -208,13 +257,20 @@ async function loadServers() {
   document.getElementById('loading').style.display = 'none';
   if (res.code === 0) {
     servers = res.data || {};
-    // 加载禁用状态
+    // 加载禁用状态（服务器 + 工具）
     const dRes = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/disabled');
     disabledServers = [];
+    disabledTools = {};
     if (dRes.code === 0 && dRes.data) {
       disabledServers = dRes.data.disabled_servers || [];
+      disabledTools = dRes.data.disabled_tools || {};
     }
     renderServers();
+    // 自动加载所有服务器的工具列表
+    const names = Object.keys(servers);
+    if (names.length) {
+      await Promise.all(names.map(name => loadTools(name)));
+    }
   } else {
     showToast(res.message || '加载失败');
   }
@@ -232,31 +288,27 @@ function renderServers() {
   empty.style.display = 'none';
   list.innerHTML = names.map(name => {
     const cfg = servers[name];
-    const disabled = disabledServers.includes(name);
+    const svrDisabled = disabledServers.includes(name);
     const icon = name.charAt(0).toUpperCase();
+    const tools = cfg._tools || [];
+    const enabledCount = svrDisabled ? 0 : tools.filter(t => !(disabledTools[name]||[]).includes(t.name)).length;
     return `<div class="card">
       <div class="card-head">
         <div class="card-icon">${icon}</div>
         <div class="card-info">
           <div class="card-title-row">
             <span class="card-name">${escapeHtml(name)}</span>
-            <span class="badge ${disabled ? 'badge-off' : 'badge-on'}">${disabled ? '已禁用' : '已启用'}</span>
+            <span class="badge ${svrDisabled ? 'badge-off' : 'badge-on'}">${svrDisabled ? '已禁用' : '已启用'}</span>
           </div>
           <div class="card-url">${escapeHtml(cfg.url || '')}</div>
         </div>
       </div>
-      <div class="card-meta">类型：${cfg.type || 'streamable_http'}</div>
-      <div class="tools-section">
-        <div class="tools-title">工具</div>
-        <div class="tools-list" id="tools_${name}">
-          ${cfg._tools ? cfg._tools.map(t => `<div class="tool-item"><span class="tool-name">${escapeHtml(t.name)}</span><span class="tool-desc">${escapeHtml(t.description || '')}</span></div>`).join('') : ''}
-        </div>
-        ${!cfg._tools ? `<button class="btn btn-ghost btn-xs" onclick="loadTools('${name}')">查看工具</button>` : ''}
-      </div>
+      <div class="card-meta">类型：${cfg.type || 'streamable_http'}${tools.length ? ` · 工具 ${enabledCount}/${tools.length}` : ''}</div>
       <div class="card-actions">
-        <button class="btn btn-ghost btn-xs" onclick="toggleServer('${name}', ${disabled})">${disabled ? '启用' : '禁用'}</button>
-        <button class="btn btn-ghost btn-xs" onclick="editServer('${name}')">编辑</button>
-        <button class="btn btn-ghost btn-xs btn-danger" onclick="deleteServer('${name}')">删除</button>
+        ${tools.length ? `<button class="btn btn-ghost btn-xs" onclick="openToolsModal('${q(name)}')">查看工具</button>` : `<button class="btn btn-ghost btn-xs" onclick="loadTools('${q(name)}')">加载工具</button>`}
+        <button class="btn btn-ghost btn-xs" onclick="toggleServer('${q(name)}', ${svrDisabled})">${svrDisabled ? '启用' : '禁用'}</button>
+        <button class="btn btn-ghost btn-xs" onclick="editServer('${q(name)}')">编辑</button>
+        <button class="btn btn-ghost btn-xs btn-danger" onclick="deleteServer('${q(name)}')">删除</button>
       </div>
     </div>`;
   }).join('');
@@ -270,9 +322,78 @@ async function loadTools(name) {
     if (!servers[name]) servers[name] = {};
     servers[name]._tools = res.data || [];
     renderServers();
+    // 如果弹窗打开着且是同一个服务器，同步刷新
+    if (toolModalServer === name) renderToolsModal(name);
   } else {
     showToast(res.message || '加载工具失败');
   }
+}
+
+async function toggleTool(serverName, toolName, currentlyDisabled) {
+  const mac = deviceMac();
+  if (!mac) return;
+  const newDisabled = !currentlyDisabled;
+  const res = await api(
+    '/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/' + encodeURIComponent(serverName) + '/tools/' + encodeURIComponent(toolName) + '/toggle',
+    'POST',
+    { disabled: newDisabled }
+  );
+  if (res.code === 0) {
+    if (!disabledTools[serverName]) disabledTools[serverName] = [];
+    if (newDisabled) {
+      if (!disabledTools[serverName].includes(toolName)) disabledTools[serverName].push(toolName);
+    } else {
+      disabledTools[serverName] = disabledTools[serverName].filter(t => t !== toolName);
+    }
+    renderServers();
+    // 如果弹窗打开着，同步刷新弹窗内容
+    if (toolModalServer === serverName) renderToolsModal(serverName);
+    showToast(`工具「${toolName}」已${newDisabled ? '禁用' : '启用'}`);
+  } else {
+    showToast(res.message || '操作失败');
+  }
+}
+
+function openToolsModal(name) {
+  toolModalServer = name;
+  document.getElementById('toolModalTitle').textContent = name + ' - 工具列表';
+  renderToolsModal(name);
+  document.getElementById('toolModalMask').style.display = 'flex';
+  // 如果工具还没加载，自动加载
+  const cfg = servers[name];
+  if (!cfg || !cfg._tools) loadTools(name);
+}
+
+function closeToolsModal() {
+  toolModalServer = '';
+  document.getElementById('toolModalMask').style.display = 'none';
+}
+
+function renderToolsModal(name) {
+  const cfg = servers[name];
+  if (!cfg) return;
+  const tools = cfg._tools || [];
+  const serverDisabled = disabledTools[name] || [];
+  const enabledCount = tools.filter(t => !serverDisabled.includes(t.name)).length;
+  document.getElementById('toolModalCount').textContent = `共 ${tools.length} 个工具，${enabledCount} 个启用`;
+  const list = document.getElementById('toolModalList');
+  if (!tools.length) {
+    list.innerHTML = '<div class="tool-modal-empty">暂无工具数据</div>';
+    return;
+  }
+  list.innerHTML = tools.map(t => {
+    const tDisabled = serverDisabled.includes(t.name);
+    return `<div class="tool-modal-item">
+      <div class="tool-info">
+        <div class="tool-name${tDisabled ? ' off' : ''}">${escapeHtml(t.name)}</div>
+        <div class="tool-desc">${escapeHtml(t.description || '')}</div>
+      </div>
+      <span class="toggle-wrap" onclick="toggleTool('${q(name)}','${q(t.name)}',${tDisabled})">
+        <span class="toggle${tDisabled ? '' : ' on'}"></span>
+        <span class="toggle-label">${tDisabled ? '禁用' : '启用'}</span>
+      </span>
+    </div>`;
+  }).join('');
 }
 
 async function toggleServer(name, currentlyDisabled) {
@@ -287,6 +408,7 @@ async function toggleServer(name, currentlyDisabled) {
       disabledServers = disabledServers.filter(s => s !== name);
     }
     renderServers();
+    if (toolModalServer === name) renderToolsModal(name);
     showToast(`「${name}」已${newDisabled ? '禁用' : '启用'}`);
   } else {
     showToast(res.message || '操作失败');
@@ -371,6 +493,16 @@ function escapeHtml(s) {
   d.textContent = s;
   return d.innerHTML;
 }
+
+function q(s) { return escapeHtml(String(s)).replace(/'/g,"\\'"); }
+
+// ESC 关闭弹窗
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') {
+    if (document.getElementById('toolModalMask').style.display === 'flex') closeToolsModal();
+    else if (document.getElementById('modalMask').style.display === 'flex') closeForm();
+  }
+});
 
 // 与主应用通信
 window.addEventListener('message', function(e) {
