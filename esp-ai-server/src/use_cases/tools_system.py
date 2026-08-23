@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import inspect
 import importlib
 import json
@@ -14,11 +13,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from src.infrastructure.logging import get_logger
 
+# 从独立模块导入 StopPipeline 和 ToolCache（保持向后兼容，重新导出）
+from src.use_cases.stop_pipeline import StopPipeline  # noqa: F401
+from src.use_cases.tool_cache import ToolCache  # noqa: F401
+
 logger = get_logger(__name__)
-
-
-class StopPipeline(Exception):
-    pass
 
 
 class ToolDefinition:
@@ -242,63 +241,6 @@ def auto_discover():
         logger.info(f"[Tools] 已自动发现 {tool_count} 个工具: {list(_registry.keys())}")
     else:
         logger.info("[Tools] 未发现任何工具")
-
-
-class ToolCache:
-    def __init__(self, ttl: int = 300, max_size: int = 1000):
-        self._ttl = ttl
-        self._max_size = max_size
-        self._cache: dict[str, tuple[float, Any]] = {}
-        self._lock = asyncio.Lock()
-        self._hits = 0
-        self._misses = 0
-
-    def _generate_key(self, tool_name: str, arguments: dict) -> str:
-        key_str = f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
-        return hashlib.md5(key_str.encode()).hexdigest()
-
-    async def get(self, tool_name: str, arguments: dict) -> Optional[Any]:
-        key = self._generate_key(tool_name, arguments)
-
-        async with self._lock:
-            if key in self._cache:
-                timestamp, result = self._cache[key]
-                if time.time() - timestamp < self._ttl:
-                    self._hits += 1
-                    return result
-                else:
-                    del self._cache[key]
-
-        self._misses += 1
-        return None
-
-    async def set(self, tool_name: str, arguments: dict, result: Any) -> None:
-        key = self._generate_key(tool_name, arguments)
-
-        async with self._lock:
-            if len(self._cache) >= self._max_size:
-                oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k][0])
-                del self._cache[oldest_key]
-
-            self._cache[key] = (time.time(), result)
-
-    async def clear(self) -> None:
-        async with self._lock:
-            self._cache.clear()
-            self._hits = 0
-            self._misses = 0
-
-    def get_stats(self) -> dict:
-        total = self._hits + self._misses
-        hit_rate = self._hits / total if total > 0 else 0
-        return {
-            "size": len(self._cache),
-            "max_size": self._max_size,
-            "ttl": self._ttl,
-            "hits": self._hits,
-            "misses": self._misses,
-            "hit_rate": hit_rate,
-        }
 
 
 class CircuitState(Enum):

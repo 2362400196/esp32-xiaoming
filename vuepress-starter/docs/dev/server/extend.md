@@ -280,7 +280,7 @@ class OpenAILLMGateway:
 
 ### StopPipeline 异常处理
 
-工具执行抛出 `StopPipeline`（定义于 `tools_system.py`）时，`stream_chat` 捕获后 `yield "__STOP_PIPELINE__"` 并 `return`。外层 `except StopPipeline: raise` 向上传播，不让通用 `Exception` 捕获吞掉。详见 [Pipeline 流式处理](./pipeline.md#stoppipeline-机制)。
+工具执行抛出 `StopPipeline`（定义于 `stop_pipeline.py`，从 `tools_system.py` 重新导出）时，`stream_chat` 捕获后 `yield "__STOP_PIPELINE__"` 并 `return`。外层 `except StopPipeline: raise` 向上传播，不让通用 `Exception` 捕获吞掉。详见 [Pipeline 流式处理](./pipeline.md#stoppipeline-机制)。
 
 ### 实现自定义 LLM
 

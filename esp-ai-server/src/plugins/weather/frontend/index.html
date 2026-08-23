@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>天气设置</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: #e9f0f4; color: #1e293b; min-height: 100vh; padding: 20px;
+}
+.container { max-width: 420px; margin: 0 auto; }
+
+/* 卡片 */
+.card {
+  background: #fff; border-radius: 16px; padding: 20px; margin-bottom: 16px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+}
+
+/* 标题 */
+.card-title {
+  font-size: 15px; font-weight: 600; color: #0f172a; margin-bottom: 16px;
+  display: flex; align-items: center; gap: 8px;
+}
+.card-title .badge {
+  font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 10px;
+  background: #e0f2fe; color: #0369a1;
+}
+
+/* 表单 */
+.form-group { margin-bottom: 14px; }
+.form-group:last-child { margin-bottom: 0; }
+.form-label {
+  font-size: 13px; font-weight: 500; color: #475569; margin-bottom: 6px; display: block;
+}
+.form-input {
+  width: 100%; padding: 10px 12px; border: 1.5px solid #e2e8f0; border-radius: 10px;
+  font-size: 14px; color: #1e293b; background: #f8fafc; outline: none; transition: all .2s;
+}
+.form-input:focus { border-color: #5eead4; background: #fff; box-shadow: 0 0 0 3px rgba(94,234,212,0.15); }
+.form-input::placeholder { color: #94a3b8; }
+.form-tip { font-size: 12px; color: #94a3b8; margin-top: 4px; line-height: 1.4; }
+
+/* 按钮 */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 9px 20px; border: none; border-radius: 10px; font-size: 13px; font-weight: 500;
+  cursor: pointer; transition: all .2s; width: 100%;
+}
+.btn-primary { background: #14b8a6; color: #fff; }
+.btn-primary:hover { background: #0d9488; }
+.btn-primary:disabled { background: #94a3b8; cursor: not-allowed; }
+.btn-outline {
+  background: transparent; color: #475569; border: 1.5px solid #e2e8f0;
+}
+.btn-outline:hover { background: #f1f5f9; border-color: #cbd5e1; }
+.btn-sm { padding: 6px 14px; width: auto; display: inline-flex; }
+
+/* 天气结果 */
+.weather-result {
+  text-align: center; padding: 8px 0;
+}
+.weather-temp {
+  font-size: 48px; font-weight: 700; color: #0f172a; line-height: 1.1;
+}
+.weather-temp sup { font-size: 20px; }
+.weather-desc { font-size: 15px; color: #475569; margin: 4px 0 2px; }
+.weather-detail { font-size: 13px; color: #94a3b8; }
+.weather-city { font-size: 14px; color: #64748b; margin-bottom: 4px; }
+
+/* 加载 */
+.loading { text-align: center; padding: 20px; color: #94a3b8; font-size: 14px; }
+.spin { display: inline-block; animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* 提示 */
+.success { color: #059669; font-size: 13px; }
+.error { color: #dc2626; font-size: 13px; }
+.toast {
+  position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+  background: #1e293b; color: #fff; padding: 10px 24px; border-radius: 10px;
+  font-size: 13px; z-index: 999; opacity: 0; transition: opacity .3s;
+  pointer-events: none;
+}
+.toast.show { opacity: 1; }
+.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.status-dot.online { background: #10b981; }
+.status-dot.offline { background: #94a3b8; }
+</style>
+</head>
+<body>
+<div class="container">
+  <!-- 配置 -->
+  <div class="card">
+    <div class="card-title"><span>⚙</span> 高德 API 配置 <span class="badge">必填</span></div>
+    <div class="form-group">
+      <label class="form-label">API Key</label>
+      <input class="form-input" id="apiKey" type="password" placeholder="在 https://console.amap.com 获取">
+      <div class="form-tip">用于查询实时天气和预报数据</div>
+    </div>
+    <button class="btn btn-primary" id="saveBtn">保存配置</button>
+  </div>
+
+  <!-- 测试查询 -->
+  <div class="card">
+    <div class="card-title"><span>🔍</span> 测试查询</div>
+    <div class="form-group">
+      <label class="form-label">城市</label>
+      <div style="display:flex;gap:8px">
+        <input class="form-input" id="testCity" value="北京" placeholder="输入城市名" style="flex:1">
+        <button class="btn btn-sm btn-outline" id="testBtn">查询</button>
+      </div>
+    </div>
+    <div id="weatherResult"></div>
+  </div>
+
+  <!-- 状态 -->
+  <div class="card" style="padding:14px 20px;display:flex;align-items:center;justify-content:space-between">
+    <span style="font-size:13px;color:#475569">连接状态</span>
+    <span id="statusText" style="font-size:13px;color:#94a3b8">检测中…</span>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API_BASE = '/api/v1'
+const deviceId = new URLSearchParams(window.location.search).get('device_id')
+
+function showToast(msg, isError = false) {
+  const el = document.getElementById('toast')
+  el.textContent = msg
+  el.style.background = isError ? '#dc2626' : '#1e293b'
+  el.classList.add('show')
+  setTimeout(() => el.classList.remove('show'), 2500)
+}
+
+async function api(path, opts = {}) {
+  const url = `${API_BASE}${path}`
+  const res = await fetch(url, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+  })
+  const data = await res.json()
+  if (data.code !== 0) throw new Error(data.message || '请求失败')
+  return data.data
+}
+
+// --- 加载配置（从设备插件列表读取） ---
+async function loadConfig() {
+  try {
+    const data = await api(`/devices/${deviceId}/plugins`)
+    const configs = data.plugin_configs || {}
+    const weatherCfg = configs.weather || {}
+    if (weatherCfg.amap_key) {
+      document.getElementById('apiKey').value = weatherCfg.amap_key
+    }
+  } catch (e) {
+    // 配置未设置是正常情况
+  }
+}
+
+// --- 保存配置 ---
+document.getElementById('saveBtn').addEventListener('click', async () => {
+  const key = document.getElementById('apiKey').value.trim()
+  if (!key) { showToast('请输入 API Key', true); return }
+  const btn = document.getElementById('saveBtn')
+  btn.disabled = true; btn.textContent = '保存中…'
+  try {
+    await api(`/devices/${deviceId}/plugins/weather/config`, {
+      method: 'PUT',
+      body: JSON.stringify({ config: { amap_key: key } }),
+    })
+    showToast('配置已保存')
+    checkStatus()
+  } catch (e) {
+    showToast(`保存失败: ${e.message}`, true)
+  }
+  btn.disabled = false; btn.textContent = '保存配置'
+})
+
+// --- 测试查询（通过高德 API 直接测试） ---
+document.getElementById('testBtn').addEventListener('click', async () => {
+  const city = document.getElementById('testCity').value.trim() || '北京'
+  const key = document.getElementById('apiKey').value.trim()
+  if (!key) { showToast('请先配置 API Key', true); return }
+  const el = document.getElementById('weatherResult')
+  el.innerHTML = '<div class="loading"><span class="spin">⟳</span> 查询中…</div>'
+  try {
+    const res = await fetch(
+      `https://restapi.amap.com/v3/weather/weatherInfo?key=${encodeURIComponent(key)}&city=${encodeURIComponent(city)}&extensions=base`
+    )
+    const data = await res.json()
+    if (data.status !== '1' || !data.lives || !data.lives[0]) {
+      el.innerHTML = `<div class="error">查询失败: ${data.info || '未知错误'}</div>`
+      return
+    }
+    const live = data.lives[0]
+    el.innerHTML = `
+      <div class="weather-result">
+        <div class="weather-city">${live.city || city}</div>
+        <div class="weather-temp">${live.temperature || '?'}<sup>°C</sup></div>
+        <div class="weather-desc">${live.weather || ''}</div>
+        <div class="weather-detail">${live.winddirection || ''} ${live.windpower || ''}级 · 湿度 ${live.humidity || '?'}%</div>
+      </div>
+    `
+  } catch (e) {
+    el.innerHTML = `<div class="error">网络错误: ${e.message}</div>`
+  }
+})
+
+// --- 检查状态 ---
+async function checkStatus() {
+  const el = document.getElementById('statusText')
+  try {
+    const key = document.getElementById('apiKey').value.trim()
+    if (!key) {
+      el.innerHTML = '<span class="status-dot offline"></span>未配置 API Key'
+      return
+    }
+    const res = await fetch(
+      `https://restapi.amap.com/v3/weather/weatherInfo?key=${encodeURIComponent(key)}&city=北京&extensions=base`
+    )
+    const data = await res.json()
+    if (data.status === '1') {
+      el.innerHTML = '<span class="status-dot online"></span>服务正常'
+    } else {
+      el.innerHTML = `<span class="status-dot offline"></span>${data.info || '服务异常'}`
+    }
+  } catch (e) {
+    el.innerHTML = '<span class="status-dot offline"></span>网络不可达'
+  }
+}
+
+try { window.parent.postMessage({ type: 'ready' }, '*') } catch(e) {}
+
+loadConfig()
+setTimeout(checkStatus, 500)
+</script>
+</body>
+</html>

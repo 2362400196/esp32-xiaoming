@@ -90,6 +90,7 @@ export default defineUserConfig({
           items: [
             { text: '插件开发教程', link: '/plugin/plugin-dev' },
             { text: '编写第一个插件', link: '/plugin/writing-first-plugin' },
+            { text: '插件 UI 开发', link: '/plugin/plugin-ui' },
           ],
         },
         {

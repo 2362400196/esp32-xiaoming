@@ -14,5 +14,5 @@
     },
     "requires": [],
     "config_fields": [],
-    "permissions": ["kv", "llm"]
+    "permissions": ["kv", "llm", "file_read", "file_write"]
 }

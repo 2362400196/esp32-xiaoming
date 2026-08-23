@@ -1,7 +1,7 @@
 import json
 
 from src.use_cases.tools_system import tool
-from src.use_cases._plugin_helpers import http_request as _http_request
+from src.use_cases._plugin_helpers import http_request as _http_request, json_dumps
 
 @tool()
 async def http_request(url: str, method: str = "GET", headers: str = "", body: str = "") -> str:
@@ -39,7 +39,7 @@ async def http_request(url: str, method: str = "GET", headers: str = "", body: s
     if "application/json" in content_type:
         try:
             parsed = json.loads(text)
-            text = json.dumps(parsed, ensure_ascii=False, indent=2)
+            text = json_dumps(parsed, indent=2)
         except Exception:
             pass
 

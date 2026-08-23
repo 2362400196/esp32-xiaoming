@@ -19,6 +19,8 @@ import shutil
 from dataclasses import dataclass, field
 from typing import Optional
 
+from src.use_cases._plugin_helpers import json_dumps
+
 from src.infrastructure.logging import get_logger
 
 logger = get_logger(__name__)
@@ -373,7 +375,7 @@ def create_skill(
         instructions.strip(),
     ]
 
-    content = "---\n" + json.dumps(frontmatter, ensure_ascii=False, indent=2) + "\n---\n\n" + "\n".join(body_lines) + "\n"
+    content = "---\n" + json_dumps(frontmatter, indent=2) + "\n---\n\n" + "\n".join(body_lines) + "\n"
 
     md_path = os.path.join(skill_dir, "SKILL.md")
     with open(md_path, "w", encoding="utf-8") as f:
@@ -424,7 +426,7 @@ def update_skill(
     }
 
     body = instructions.strip() if instructions else ""
-    content = "---\n" + json.dumps(frontmatter, ensure_ascii=False, indent=2) + "\n---\n\n" + body + "\n"
+    content = "---\n" + json_dumps(frontmatter, indent=2) + "\n---\n\n" + body + "\n"
 
     md_path = entry.file_path
     with open(md_path, "w", encoding="utf-8") as f:

@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>音乐播放</title>
+<style>
+:root {
+  --mint: #10b981; --mint-deep: #059669; --mint-soft: rgba(16,185,129,0.1);
+  --mint-border: rgba(16,185,129,0.25); --text-main: #1e293b; --text-sub: #64748b;
+  --bg: #f0f5f0; --border: rgba(0,0,0,0.06); --danger: #ef4444; --danger-soft: rgba(239,68,68,0.1);
+  --radius: 16px; --radius-sm: 10px; --shadow: 0 4px 20px rgba(0,0,0,0.06);
+  --glass: linear-gradient(155deg, rgba(255,255,255,0.85), rgba(255,255,255,0.55));
+  --glass-border: rgba(255,255,255,0.6);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg); color: var(--text-main); min-height: 100vh;
+}
+.container { max-width: 800px; margin: 0 auto; padding: 20px 16px 40px; }
+
+/* header */
+.header { margin-bottom: 20px; }
+.header h1 { font-size: 20px; font-weight: 800; margin: 0 0 4px; display: flex; align-items: center; gap: 10px; }
+.header h1 small { font-size: 12px; font-weight: 500; }
+.header p { font-size: 13px; color: var(--text-sub); margin: 0; }
+
+/* device-bar */
+.device-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; padding: 10px 16px; background: var(--glass); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); font-size: 13px; backdrop-filter: blur(12px); }
+.device-bar .label { color: var(--text-sub); }
+.device-bar .name { font-weight: 600; }
+.device-bar .no-device { color: var(--danger); font-weight: 600; }
+
+/* card */
+.card { background: var(--glass); border: 1px solid var(--glass-border); border-radius: var(--radius); padding: 18px; margin-bottom: 14px; backdrop-filter: blur(12px); box-shadow: var(--shadow); }
+.card-title { font-size: 14px; font-weight: 700; margin: 0 0 12px; display: flex; align-items: center; justify-content: space-between; }
+.card-title .badge { font-size: 11px; padding: 2px 8px; border-radius: 99px; font-weight: 600; }
+.badge-on { background: var(--mint-soft); color: var(--mint-deep); }
+.badge-off { background: var(--danger-soft); color: var(--danger); }
+
+/* btn */
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 18px; font-size: 13px; font-weight: 600; border: none; border-radius: var(--radius-sm); cursor: pointer; transition: all 0.25s; }
+.btn-primary { background: var(--mint); color: #fff; }
+.btn-primary:hover { background: var(--mint-deep); transform: translateY(-1px); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+.btn-ghost { background: transparent; color: var(--text-main); padding: 6px 14px; }
+.btn-ghost:hover { background: var(--mint-soft); }
+.btn-sm { padding: 6px 16px; font-size: 12px; border-radius: 8px; }
+
+/* form */
+.form-group { margin-bottom: 12px; }
+.form-label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; color: var(--text-sub); }
+.form-row { display: flex; gap: 10px; align-items: flex-end; }
+.form-row .form-group { flex: 1; }
+input, select { width: 100%; padding: 8px 12px; font-size: 13px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.8); color: var(--text-main); outline: none; font-family: inherit; }
+input:focus { border-color: var(--mint); box-shadow: 0 0 0 3px var(--mint-soft); }
+
+/* search */
+.search-row { display: flex; gap: 8px; }
+.search-row input { flex: 1; }
+.search-row .btn { flex-shrink: 0; }
+
+/* song list */
+.song-list { list-style: none; margin: 0; padding: 0; }
+.song-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.song-item:last-child { border-bottom: none; }
+.song-info { flex: 1; min-width: 0; }
+.song-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.song-artist { font-size: 12px; color: var(--text-sub); }
+.song-action { flex-shrink: 0; }
+
+/* now playing */
+.now-playing { text-align: center; padding: 24px 16px; }
+.now-playing .icon { font-size: 40px; margin-bottom: 10px; display: block; }
+.now-playing .title { font-size: 18px; font-weight: 700; }
+.now-playing .artist { font-size: 13px; color: var(--text-sub); margin-top: 4px; }
+.now-playing .status { font-size: 12px; color: var(--mint); margin-top: 8px; }
+.now-playing .empty { color: var(--text-sub); font-size: 14px; }
+
+/* status row */
+.status-row { display: flex; align-items: center; gap: 8px; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.status-dot.on { background: var(--mint); box-shadow: 0 0 6px var(--mint); }
+.status-dot.off { background: var(--danger); }
+
+/* tabs */
+.tabs { display: flex; gap: 4px; margin-bottom: 14px; background: rgba(255,255,255,0.5); border-radius: var(--radius-sm); padding: 3px; }
+.tab { flex: 1; padding: 8px 0; font-size: 13px; font-weight: 600; border: none; border-radius: 8px; cursor: pointer; transition: all 0.2s; background: transparent; color: var(--text-sub); }
+.tab.active { background: #fff; color: var(--text-main); box-shadow: 0 1px 6px rgba(0,0,0,0.06); }
+
+/* spinner */
+.spinner { width: 28px; height: 28px; border: 3px solid var(--mint-soft); border-top-color: var(--mint-deep); border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 40px; color: var(--text-sub); }
+
+/* empty */
+.empty-state { text-align: center; padding: 40px 20px; color: var(--text-sub); }
+.empty-state p { margin: 4px 0; }
+
+/* toast */
+.toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); padding: 10px 24px; background: var(--glass); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; backdrop-filter: blur(12px); box-shadow: 0 8px 30px rgba(0,0,0,0.1); z-index: 2000; animation: fadeInUp 0.3s ease; }
+@keyframes fadeInUp { from { opacity: 0; transform: translateX(-50%) translateY(16px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+
+/* config */
+.config-status { display: flex; align-items: center; justify-content: space-between; }
+.config-actions { display: flex; gap: 8px; margin-top: 12px; }
+</style>
+</head>
+<body>
+<div class="container" id="app">
+  <!-- header -->
+  <div class="header">
+    <h1>音乐播放 <small>media_player</small></h1>
+    <p>搜索、播放和管理音乐</p>
+  </div>
+
+  <!-- device bar -->
+  <div class="device-bar">
+    <span class="label">设备：<span class="name" id="deviceName">未选择</span></span>
+    <span class="no-device" id="noDevice" style="display:none">请先选择设备</span>
+  </div>
+
+  <!-- tabs -->
+  <div class="tabs">
+    <button class="tab active" data-tab="search" onclick="switchTab('search')">搜索</button>
+    <button class="tab" data-tab="now" onclick="switchTab('now')">正在播放</button>
+    <button class="tab" data-tab="config" onclick="switchTab('config')">设置</button>
+  </div>
+
+  <!-- tab: search -->
+  <div id="tabSearch" class="tab-content">
+    <div class="card">
+      <div class="card-title">搜索歌曲</div>
+      <div class="search-row">
+        <input id="searchInput" placeholder="输入歌名，如「晴天」「起风了」" onkeydown="if(event.key==='Enter')search()" />
+        <button class="btn btn-primary" onclick="search()">搜索</button>
+      </div>
+    </div>
+    <div id="searchResults"></div>
+    <div class="loading" id="searchLoading" style="display:none">
+      <div class="spinner"></div>
+      <p>搜索中…</p>
+    </div>
+    <div class="empty-state" id="searchEmpty" style="display:none">
+      <p>在上方输入歌名开始搜索</p>
+    </div>
+  </div>
+
+  <!-- tab: now playing -->
+  <div id="tabNow" class="tab-content" style="display:none">
+    <div class="card">
+      <div class="card-title">当前播放</div>
+      <div class="now-playing" id="nowPlaying">
+        <div class="empty">暂无播放信息</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- tab: config -->
+  <div id="tabConfig" class="tab-content" style="display:none">
+    <div class="card">
+      <div class="card-title">音乐服务配置</div>
+      <div class="config-status" id="statusDisplay">
+        <span class="status-row">
+          <span class="status-dot off" id="statusDot"></span>
+          <span id="statusText">检测中…</span>
+        </span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">服务地址</div>
+      <div class="form-group">
+        <label class="form-label">音乐服务 API 地址</label>
+        <input id="cfgApiUrl" placeholder="http://192.168.31.176:2233，留空用全局配置" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">歌词偏移（毫秒）</label>
+        <input id="cfgLyricsOffset" type="number" placeholder="留空默认为 0" />
+      </div>
+      <div class="config-actions">
+        <button class="btn btn-primary btn-sm" onclick="saveConfig()">保存配置</button>
+        <button class="btn btn-ghost btn-sm" onclick="testConnection()">测试连接</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentDevice = null;
+let currentTab = 'search';
+
+function getToken() { return localStorage.getItem('espai_token') || ''; }
+
+function showToast(msg) {
+  const old = document.querySelector('.toast');
+  if (old) old.remove();
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2200);
+}
+
+async function api(path, method = 'GET', body = null) {
+  const token = getToken();
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  try {
+    const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : null });
+    return await res.json();
+  } catch (e) {
+    return { code: 1, message: String(e) };
+  }
+}
+
+function deviceId() {
+  return currentDevice?.device_id || currentDevice?.id || '';
+}
+
+// === tab switching ===
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.tab[data-tab="${tab}"]`).classList.add('active');
+  document.querySelectorAll('.tab-content').forEach(tc => tc.style.display = 'none');
+  document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).style.display = 'block';
+  if (tab === 'config') loadConfig();
+  if (tab === 'now') loadNowPlaying();
+}
+
+// === search ===
+async function search() {
+  const q = document.getElementById('searchInput').value.trim();
+  if (!q) { showToast('请输入歌名'); return; }
+  const mac = deviceId();
+  if (!mac) { showToast('请先选择设备'); return; }
+  document.getElementById('searchLoading').style.display = 'flex';
+  document.getElementById('searchEmpty').style.display = 'none';
+  document.getElementById('searchResults').innerHTML = '';
+  try {
+    const apiUrl = document.getElementById('cfgApiUrl').value.trim() || '';
+    const url = apiUrl ? apiUrl.replace(/\/+$/, '') + '/stream_pcm?song=' + encodeURIComponent(q) : null;
+    if (!url) {
+      // 通过后端间接搜索
+      const res = await api('/api/v1/plugins/media_player/search?song=' + encodeURIComponent(q) + '&device_id=' + encodeURIComponent(mac));
+      if (res.code === 0) {
+        renderResults(res.data || []);
+      } else {
+        showToast(res.message || '搜索失败');
+      }
+    } else {
+      // 直接搜索
+      const resp = await fetch(url, { headers: { 'Authorization': 'Bearer ' + getToken() } });
+      const data = await resp.json();
+      if (data.success) {
+        renderResults([data]);
+      } else {
+        document.getElementById('searchEmpty').style.display = 'block';
+        document.getElementById('searchEmpty').innerHTML = '<p>未找到歌曲</p>';
+      }
+    }
+  } catch (e) {
+    showToast('搜索失败: ' + e.message);
+  }
+  document.getElementById('searchLoading').style.display = 'none';
+}
+
+function renderResults(songs) {
+  const el = document.getElementById('searchResults');
+  if (!songs || songs.length === 0) {
+    document.getElementById('searchEmpty').style.display = 'block';
+    el.innerHTML = '';
+    return;
+  }
+  document.getElementById('searchEmpty').style.display = 'none';
+  el.innerHTML = '<div class="card"><ul class="song-list">' + songs.map(s => `
+    <li class="song-item">
+      <div class="song-info">
+        <div class="song-title">${escHtml(s.title || '未知')}</div>
+        <div class="song-artist">${escHtml(s.artist || '未知')}</div>
+      </div>
+      <div class="song-action">
+        <button class="btn btn-primary btn-sm" onclick="playSong('${escHtml(s.audio_url || '')}')">播放</button>
+      </div>
+    </li>
+  `).join('') + '</ul></div>';
+}
+
+async function playSong(audioUrl) {
+  if (!audioUrl) { showToast('无播放链接'); return; }
+  const mac = deviceId();
+  if (!mac) { showToast('请先选择设备'); return; }
+  const res = await api('/api/v1/plugins/media_player/play', 'POST', {
+    device_id: mac, audio_url: audioUrl
+  });
+  if (res.code === 0) {
+    showToast('已发送播放指令');
+  } else {
+    showToast(res.message || '播放失败');
+  }
+}
+
+// === now playing ===
+async function loadNowPlaying() {
+  const el = document.getElementById('nowPlaying');
+  try {
+    const res = await api('/api/v1/plugins/media_player/now');
+    if (res.code === 0 && res.data) {
+      const d = res.data;
+      el.innerHTML = `
+        <div class="now-playing">
+          <div class="title">${escHtml(d.title || '—')}</div>
+          <div class="artist">${escHtml(d.artist || '—')}</div>
+          <div class="status">${d.playing ? '正在播放' : '已停止'}</div>
+        </div>
+      `;
+    } else {
+      el.innerHTML = '<div class="now-playing"><div class="empty">暂无播放信息</div></div>';
+    }
+  } catch {
+    el.innerHTML = '<div class="now-playing"><div class="empty">暂无播放信息</div></div>';
+  }
+}
+
+// === config ===
+async function loadConfig() {
+  const mac = deviceId();
+  if (!mac) return;
+  const res = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/plugins/media_player/config');
+  if (res.code === 0 && res.data) {
+    const cfg = res.data;
+    document.getElementById('cfgApiUrl').value = cfg.api_url || '';
+    document.getElementById('cfgLyricsOffset').value = cfg.lyrics_offset || '';
+  }
+  checkStatus();
+}
+
+async function saveConfig() {
+  const mac = deviceId();
+  if (!mac) { showToast('请先选择设备'); return; }
+  const apiUrl = document.getElementById('cfgApiUrl').value.trim();
+  const lyricsOffset = document.getElementById('cfgLyricsOffset').value.trim();
+  const res = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/plugins/media_player/config', 'PUT', {
+    api_url: apiUrl, lyrics_offset: lyricsOffset
+  });
+  if (res.code === 0) {
+    showToast('配置已保存');
+    checkStatus();
+  } else {
+    showToast(res.message || '保存失败');
+  }
+}
+
+async function checkStatus() {
+  const dot = document.getElementById('statusDot');
+  const text = document.getElementById('statusText');
+  const apiUrl = document.getElementById('cfgApiUrl').value.trim();
+  if (!apiUrl) {
+    // 尝试通过后端检测
+    const res = await api('/api/v1/plugins/media_player/status');
+    if (res.code === 0 && res.data?.connected) {
+      dot.className = 'status-dot on';
+      text.textContent = '已连接（全局配置）';
+    } else {
+      dot.className = 'status-dot off';
+      text.textContent = '未配置音乐服务地址';
+    }
+    return;
+  }
+  try {
+    const resp = await fetch(apiUrl.replace(/\/+$/, '') + '/random', { signal: AbortSignal.timeout(5000) });
+    const data = await resp.json();
+    if (data.success !== undefined) {
+      dot.className = 'status-dot on';
+      text.textContent = '已连接';
+    } else {
+      dot.className = 'status-dot off';
+      text.textContent = '服务异常';
+    }
+  } catch {
+    dot.className = 'status-dot off';
+    text.textContent = '无法连接';
+  }
+}
+
+async function testConnection() {
+  const apiUrl = document.getElementById('cfgApiUrl').value.trim();
+  if (!apiUrl) { showToast('请先填写服务地址'); return; }
+  showToast('测试中…');
+  try {
+    const resp = await fetch(apiUrl.replace(/\/+$/, '') + '/random', { signal: AbortSignal.timeout(5000) });
+    const data = await resp.json();
+    if (data.success !== undefined) {
+      showToast('连接成功！');
+    } else {
+      showToast('服务返回异常数据');
+    }
+  } catch {
+    showToast('无法连接到服务');
+  }
+  checkStatus();
+}
+
+function escHtml(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// === postMessage ===
+window.addEventListener('message', function(e) {
+  try {
+    const msg = typeof e.data === 'object' ? e.data : JSON.parse(e.data);
+    if (msg.type === 'deviceChanged' && msg.device) {
+      currentDevice = msg.device;
+      const mac = deviceId();
+      document.getElementById('deviceName').textContent = currentDevice?.name || mac || '未选择';
+      document.getElementById('noDevice').style.display = mac ? 'none' : 'inline';
+      if (mac && currentTab === 'config') loadConfig();
+    }
+  } catch {}
+});
+
+try { window.parent.postMessage({ type: 'ready' }, '*'); } catch(e) {}
+
+const did = new URLSearchParams(window.location.search).get('device_id');
+if (did) {
+  currentDevice = { device_id: did };
+  document.getElementById('deviceName').textContent = did;
+  document.getElementById('noDevice').style.display = 'none';
+}
+</script>
+</body>
+</html>

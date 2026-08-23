@@ -12,7 +12,7 @@ Web - Web服务器和路由（新架构完整版）
 - 辅助服务
 
 路由按业务域拆分到 src/infrastructure/routes/ 目录下各模块，
-由 _register_routes 统一调用各模块的 register_routes(app) 函数。
+由 _register_routes 统一通过 app.include_router() 注册各路由模块的 router。
 """
 from __future__ import annotations
 
@@ -911,24 +911,24 @@ def _register_routes(app: FastAPI) -> None:
     app.websocket("/")(handle_websocket)
     app.websocket("/connect_espai_node")(handle_websocket)
 
-    # 按业务域拆分的路由模块
-    from src.infrastructure.routes.system import register_routes as _register_system
-    _register_system(app)
+    # 按业务域拆分的路由模块（统一使用 app.include_router）
+    from src.infrastructure.routes.system import router as system_router
+    app.include_router(system_router)
 
-    from src.infrastructure.routes.devices import register_routes as _register_devices
-    _register_devices(app)
+    from src.infrastructure.routes.devices import router as devices_router
+    app.include_router(devices_router)
 
-    from src.infrastructure.routes.skills import register_routes as _register_skills
-    _register_skills(app)
+    from src.infrastructure.routes.skills import router as skills_router
+    app.include_router(skills_router)
 
-    from src.infrastructure.routes.mcp import register_routes as _register_mcp
-    _register_mcp(app)
+    from src.infrastructure.routes.mcp import router as mcp_router
+    app.include_router(mcp_router)
 
-    from src.infrastructure.routes.emos import register_routes as _register_emos
-    _register_emos(app)
+    from src.infrastructure.routes.emos import router as emos_router
+    app.include_router(emos_router)
 
-    from src.infrastructure.routes.growth import register_routes as _register_growth
-    _register_growth(app)
+    from src.infrastructure.routes.growth import router as growth_router
+    app.include_router(growth_router)
 
     # 用户认证路由
     from src.infrastructure.routes.auth import router as auth_router

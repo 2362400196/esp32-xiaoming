@@ -17,6 +17,7 @@
 |------|------|------|
 | 设备标识 | `get_device_key()` / `resolve_device_key()` | 拿到当前设备的 `bound_xxx` 标识，查询内部表必备 |
 | 指令下发 | `send_instruct()` / `send_device_command()` | 向设备发一条 `instruct` 指令 |
+| **音乐播放** | `play_music_url()` | 给一个链接即可播放音乐，支持歌词和元数据 |
 | 指令回执 | `request_device_result()` / `send_device_command_ack()` | 下发指令并**等待设备回复结果**（Lua 返回、状态查询、指令 ack） |
 | 配置读取 | `get_plugin_config_or_env()` | 插件配置 → 环境变量 → 默认值，三级回退 |
 | HTTP 请求 | `http_request()` / `http_get_json()` | 统一超时与错误处理的外部 API 调用 |
@@ -26,6 +27,7 @@
 | **LLM 对话** | `llm_chat()` / `llm_generate()` | 调用大模型进行对话或文本生成 |
 | **TTS 合成** | `tts_synthesize()` | 文本转语音，返回 MP3 音频数据 |
 | **设备状态** | `device_is_online()` / `device_get_info()` | 查询设备在线状态与基本信息 |
+| **设备 IO 控制** | `gpio_mode()` / `gpio_write()` / `gpio_read()` / `pwm_write()` / `adc_read()` / `servo_write()` | 控制设备 GPIO、PWM、ADC、舵机 |
 | **文件持久化** | `plugin_data_read()` / `plugin_data_write()` / `plugin_data_list()` / `plugin_data_delete()` | 读写插件专属数据目录 |
 | **键值存储** | `kv_get()` / `kv_set()` / `kv_delete()` / `kv_list()` | 插件专属的持久化键值存储 |
 | **用户画像** | `get_user_profile_summary()` | 获取当前设备用户的画像摘要 |
@@ -114,7 +116,61 @@ async def set_brightness(level: int, tool_manager=None) -> str:
 
 ---
 
-## 三、指令回执：等待设备回复
+## 三、音乐播放 SDK
+
+### `play_music_url(url, title="", artist="", duration=0, device_key="", lyric_url="", lyrics_offset=0) -> str`
+
+给一个音频链接即可让设备播放音乐。支持同时发送歌曲信息和歌词，适合从其他插件（如闹钟）调用。
+
+**基础用法（只给链接）：**
+
+```python
+from src.use_cases._plugin_helpers import play_music_url
+
+result = await play_music_url("http://192.168.1.100:2233/music/xxx.mp3")
+if result == "ok":
+    print("播放成功")
+else:
+    print(f"播放失败: {result}")
+```
+
+**完整用法（带歌曲信息和歌词）：**
+
+```python
+await play_music_url(
+    url="http://192.168.1.100:2233/music/xxx.mp3",
+    title="晴天",
+    artist="周杰伦",
+    duration=270,
+    lyric_url="http://192.168.1.100:2233/lyrics/xxx.lrc",
+    lyrics_offset=0,
+)
+```
+
+**指定设备：**
+
+```python
+# 不传 device_key 会自动选择第一个在线设备
+await play_music_url("http://...", device_key="bound_xxx")
+```
+
+**参数说明：**
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|:----:|------|
+| `url` | str | ✓ | 音频文件 URL，设备可直接 HTTP 下载播放 |
+| `title` | str | | 歌曲标题，显示在设备屏幕上 |
+| `artist` | str | | 歌手名称 |
+| `duration` | int | | 歌曲时长（秒） |
+| `device_key` | str | | 设备标识，不传自动选第一个在线设备 |
+| `lyric_url` | str | | LRC 歌词文件 URL，会自动下载并逐行推送 |
+| `lyrics_offset` | int | | 歌词时间偏移（毫秒） |
+
+**返回值：** 成功返回 `"ok"`，失败返回错误描述字符串。
+
+---
+
+## 四、指令回执：等待设备回复
 
 普通指令"发出即成功"，但有些指令需要设备**执行后回传结果**：
 
@@ -621,6 +677,79 @@ from src.use_cases._plugin_helpers import json_loads
 data = json_loads('{"name": "小明"}')
 ```
 
+---
+
+## 十一、设备 IO 控制：控制 GPIO、PWM、舵机
+
+插件可以直接通过 SDK 控制 ESP32 设备的硬件引脚，无需编写 Lua 代码。
+
+| 函数 | 用途 | 读写 |
+|------|------|------|
+| `gpio_mode(pin, mode)` | 配置引脚模式（output/input/input_pullup） | 写 |
+| `gpio_write(pin, value)` | 写入数字信号（0 或 1） | 写 |
+| `gpio_read(pin)` | 读取数字信号（返回 0 或 1） | 读 |
+| `pwm_write(pin, duty, freq)` | PWM 输出，duty 0-1023，freq 默认 5000Hz | 写 |
+| `adc_read(pin)` | 读取模拟值（GPIO1-10，返回 0-4095） | 读 |
+| `servo_write(pin, angle)` | 控制舵机角度（0-180 度） | 写 |
+
+### 写操作：GPIO 输出 / PWM / 舵机
+
+写操作通过 `hardware-fns` 消息直接发送到设备，无需等待返回：
+
+```python
+from src.use_cases._plugin_helpers import gpio_mode, gpio_write, pwm_write, servo_write
+
+@tool()
+async def turn_on_led(tool_manager=None) -> str:
+    """打开 LED 灯（GPIO2）"""
+    err = await gpio_mode(2, "output", tool_manager=tool_manager)
+    if err != "ok":
+        return err
+    err = await gpio_write(2, 1, tool_manager=tool_manager)
+    return "LED 已打开" if err == "ok" else err
+
+@tool()
+async def set_motor_speed(speed: int, tool_manager=None) -> str:
+    """设置电机转速（PWM 输出）。speed: 0-1023"""
+    return await pwm_write(4, speed, tool_manager=tool_manager)
+
+@tool()
+async def rotate_servo(angle: int, tool_manager=None) -> str:
+    """控制舵机旋转到指定角度。angle: 0-180"""
+    return await servo_write(5, angle, tool_manager=tool_manager)
+```
+
+### 读操作：数字读取 / 模拟读取
+
+读操作通过 `execute_lua` 指令在设备端执行 Lua 代码并返回结果：
+
+```python
+from src.use_cases._plugin_helpers import gpio_read, adc_read
+
+@tool()
+async def check_sensor(tool_manager=None) -> str:
+    """读取传感器状态"""
+    val = await gpio_read(4, tool_manager=tool_manager)
+    if val == -1:
+        return "读取失败"
+    return f"传感器状态: {'高电平' if val else '低电平'}"
+
+@tool()
+async def read_light_sensor(tool_manager=None) -> str:
+    """读取光线传感器（ADC，GPIO1）"""
+    val = await adc_read(1, tool_manager=tool_manager)
+    if val == -1:
+        return "读取失败"
+    return f"光线强度: {val}/4095"
+```
+
+### 注意事项
+
+- **GPIO48 已被板载情绪灯占用**，不能用作普通 GPIO
+- **ADC 仅限 GPIO1-10**（ESP32-S3 ADC1 通道）
+- 读操作需要 `tool_manager` 参数，写操作可选 `device_key` 参数
+- 写操作先发送硬件配置再发送数据，无需手动调用 `pinMode`
+
 ## 参考文件
 
 | 文件 | 说明 |
@@ -628,7 +757,8 @@ data = json_loads('{"name": "小明"}')
 | `src/use_cases/_plugin_helpers.py` | 插件 SDK 源码（唯一实现，本教程即基于此） |
 | `src/plugins/system_basic/plugin.py` | `send_device_command` + `request_device_result` 示例 |
 | `src/plugins/weather/plugin.py` | `get_plugin_config_or_env` + `http_get_json` + `send_device_command` 示例 |
-| `src/plugins/media_player/plugin.py` | `send_instruct` + `http_request` 示例 |
+| `src/plugins/media_player/plugin.py` | `play_music_url` + `http_request` 示例 |
 | `src/plugins/memory/plugin.py` | `resolve_device_key` + LTM 服务示例 |
 | `src/plugins/diary/plugin.py` | `resolve_device_key` + `get_diary_repository` 示例 |
 | `src/use_cases/skill_tools.py` | `skill_catalog_text` 示例 |
+| `src/plugins/device_control/plugin.py` | `gpio_mode` + `gpio_read` + `pwm_write` 等 IO SDK 示例 |

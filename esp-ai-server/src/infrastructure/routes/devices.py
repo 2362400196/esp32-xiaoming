@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from typing import Optional
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, Body
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, Body
 from pydantic import BaseModel, Field
 
 from src.infrastructure.logging import get_logger
@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from src.infrastructure.web import get_device_registry, get_speaker
 
 logger = get_logger(__name__)
+
+router = APIRouter(prefix="/api/v1", tags=["devices"])
 
 # 保持后台 Pipeline 任务引用，防止被 GC 回收
 _bg_tasks: set = set()
@@ -408,263 +410,267 @@ async def _device_action(device_id: str, action: str, text: str) -> dict:
     return {"code": 0, "message": "执行完成", "data": None}
 
 
-def register_routes(app: FastAPI) -> None:
-    """注册设备管理相关路由
-
-    所有业务路由注册到 ``/api/v1/`` 前缀下，使用 JWT 用户认证。
-    """
-    router = APIRouter(prefix="/api/v1", tags=["devices"])
-
-    # 辅助：校验设备归属
-    async def _check_device_owner(device_id: str, user: UserModel) -> bool:
-        from sqlalchemy import or_
-        async with get_session_ctx() as session:
-            result = await session.execute(
-                select(DeviceModel).where(
-                    or_(
-                        DeviceModel.device_id == device_id,
-                        DeviceModel.mac_address == device_id,
-                        DeviceModel.device_key == device_id,
-                    ),
-                    DeviceModel.user_id == user.id,
-                )
-            )
-            return result.scalar_one_or_none() is not None
-
-    # ============================================================
-    #  设备列表 / 绑定 / 创建 / 详情
-    # ============================================================
-
-    @router.get("/devices")
-    async def api_get_devices(user: UserModel = Depends(get_current_user)):
-        """获取当前用户绑定的所有设备"""
-        async with get_session_ctx() as session:
-            result = await session.execute(
-                select(DeviceModel).where(DeviceModel.user_id == user.id)
-            )
-            devices = result.scalars().all()
-        registry = get_device_registry()
-        device_list = []
-        for d in devices:
-            online = False
-            if registry:
-                # 依次尝试 device_id / mac_address / device_key 查找在线状态
-                info = registry.resolve(d.device_id)
-                if not info and d.mac_address:
-                    info = registry.get_by_mac(d.mac_address)
-                if not info and d.device_key:
-                    info = registry.resolve(d.device_key)
-                if info:
-                    channel = info.get("channel")
-                    online = getattr(channel, "connected", False) if channel else False
-            device_list.append({
-                "device_id": d.device_id,
-                "name": d.name,
-                "mac": d.mac_address,
-                "device_key": d.device_key,
-                "online": online,
-                "bound_at": d.bound_at,
-            })
-        return {"code": 0, "message": "ok", "data": {"devices": device_list}}
-
-    @router.post("/devices")
-    async def api_create_device(body: CreateDeviceRequest, user: UserModel = Depends(get_current_user)):
-        """创建新设备（自动绑定到当前用户）"""
-        result = await _create_device(body)
-        if result.get("code") == 0:
-            device_id = body.mac
-            async with get_session_ctx() as session:
-                dev = await session.execute(
-                    select(DeviceModel).where(DeviceModel.device_id == device_id)
-                )
-                device = dev.scalar_one_or_none()
-                if device:
-                    device.user_id = user.id
-                    device.bound_at = datetime.now(timezone.utc).timestamp()
-                    session.add(device)
-        return result
-
-    @router.post("/devices/{device_id}/bind")
-    async def api_bind_device(device_id: str, body: BindRequest, user: UserModel = Depends(get_current_user)):
-        """绑定设备到当前用户"""
-        async with get_session_ctx() as session:
-            result = await session.execute(
-                select(DeviceModel).where(DeviceModel.device_id == body.device_id)
-            )
-            device = result.scalar_one_or_none()
-            if not device:
-                raise HTTPException(404, "Device not found")
-            if device.user_id is not None:
-                raise HTTPException(400, "Device already bound to another user")
-            if device.bind_code != body.bind_code:
-                raise HTTPException(400, "Invalid bind code")
-            if device.bind_code_expires is None or datetime.now(timezone.utc).timestamp() > device.bind_code_expires:
-                raise HTTPException(400, "Bind code expired")
-
-            # 检查用户设备数上限
-            count_result = await session.execute(
-                select(DeviceModel).where(DeviceModel.user_id == user.id)
-            )
-            device_count = len(count_result.scalars().all())
-            if device_count >= user.max_devices:
-                raise HTTPException(400, f"Device limit reached ({user.max_devices})")
-
-            device.user_id = user.id
-            device.bound_at = datetime.now(timezone.utc).timestamp()
-            device.bind_code = None
-            device.bind_code_expires = None
-            session.add(device)
-
-        return {"code": 0, "message": "Device bound successfully"}
-
-    @router.post("/bind")
-    async def api_bind_by_code(body: BindByCodeRequest, user: UserModel = Depends(get_current_user)):
-        """通过绑定码绑定设备（无需知道 device_id）"""
-        async with get_session_ctx() as session:
-            result = await session.execute(
-                select(DeviceModel).where(DeviceModel.bind_code == body.bind_code)
-            )
-            device = result.scalar_one_or_none()
-            if not device:
-                raise HTTPException(404, "Device not found or bind code invalid")
-            if device.user_id is not None:
-                raise HTTPException(400, "Device already bound to another user")
-            if device.bind_code_expires is None or datetime.now(timezone.utc).timestamp() > device.bind_code_expires:
-                raise HTTPException(400, "Bind code expired")
-
-            count_result = await session.execute(
-                select(DeviceModel).where(DeviceModel.user_id == user.id)
-            )
-            device_count = len(count_result.scalars().all())
-            if device_count >= user.max_devices:
-                raise HTTPException(400, f"Device limit reached ({user.max_devices})")
-
-            device.user_id = user.id
-            device.bind_code = "BOUND"
-            device.bind_code_expires = None
-            import secrets
-            device.device_key = "bound_" + secrets.token_hex(8)
-            # 绑定时可指定设备名称
-            if body.name:
-                device.name = body.name
-            session.add(device)
-
-        return {"code": 0, "message": "Device bound successfully", "device_id": device.device_id}
-
-    @router.post("/devices/{device_id}/unbind")
-    async def api_unbind_device(device_id: str, user: UserModel = Depends(get_current_user)):
-        """解绑设备"""
-        async with get_session_ctx() as session:
-            result = await session.execute(
-                select(DeviceModel).where(
+async def _check_device_owner(device_id: str, user: UserModel) -> bool:
+    from sqlalchemy import or_
+    async with get_session_ctx() as session:
+        result = await session.execute(
+            select(DeviceModel).where(
+                or_(
                     DeviceModel.device_id == device_id,
-                    DeviceModel.user_id == user.id,
-                )
+                    DeviceModel.mac_address == device_id,
+                    DeviceModel.device_key == device_id,
+                ),
+                DeviceModel.user_id == user.id,
             )
-            device = result.scalar_one_or_none()
-            if not device:
-                raise HTTPException(404, "Device not found or not yours")
-            device.user_id = None
-            device.bound_at = None
-            session.add(device)
-        return {"code": 0, "message": "Device unbound"}
+        )
+        return result.scalar_one_or_none() is not None
 
-    @router.get("/devices/{device_id}")
-    async def api_get_device(device_id: str, user: UserModel = Depends(get_current_user)):
-        """获取设备详情（需校验归属）"""
-        if not await _check_device_owner(device_id, user):
-            raise HTTPException(403, "Device not bound to you")
-        return await _get_device(device_id)
 
-    # ============================================================
-    #  唤醒 / 播放 / 停止 控制 API（需校验设备归属）
-    # ============================================================
+# ============================================================
+#  设备列表 / 绑定 / 创建 / 详情
+# ============================================================
 
-    @router.post("/wakeup")
-    async def api_wakeup(body: WakeupRequest, user: UserModel = Depends(get_current_user)):
-        if not await _check_device_owner(body.device_id, user):
-            raise HTTPException(403, "Device not bound to you")
-        return await _wakeup(body.device_id)
 
-    @router.post("/devices/{device_id}/wakeup")
-    async def api_device_wakeup(device_id: str, user: UserModel = Depends(get_current_user)):
-        """兼容路由：/api/v1/devices/{mac}/wakeup"""
-        if not await _check_device_owner(device_id, user):
-            raise HTTPException(403, "Device not bound to you")
-        return await _wakeup(device_id)
+@router.get("/devices")
+async def api_get_devices(user: UserModel = Depends(get_current_user)):
+    """获取当前用户绑定的所有设备"""
+    async with get_session_ctx() as session:
+        result = await session.execute(
+            select(DeviceModel).where(DeviceModel.user_id == user.id)
+        )
+        devices = result.scalars().all()
+    registry = get_device_registry()
+    device_list = []
+    for d in devices:
+        online = False
+        if registry:
+            # 依次尝试 device_id / mac_address / device_key 查找在线状态
+            info = registry.resolve(d.device_id)
+            if not info and d.mac_address:
+                info = registry.get_by_mac(d.mac_address)
+            if not info and d.device_key:
+                info = registry.resolve(d.device_key)
+            if info:
+                channel = info.get("channel")
+                online = getattr(channel, "connected", False) if channel else False
+        device_list.append({
+            "device_id": d.device_id,
+            "name": d.name,
+            "mac": d.mac_address,
+            "device_key": d.device_key,
+            "online": online,
+            "bound_at": d.bound_at,
+        })
+    return {"code": 0, "message": "ok", "data": {"devices": device_list}}
 
-    @router.post("/speak")
-    async def api_speak(body: SpeakRequest, user: UserModel = Depends(get_current_user)):
-        if not await _check_device_owner(body.device_id, user):
-            raise HTTPException(403, "Device not bound to you")
-        return await _speak(body.device_id, body.text)
 
-    @router.post("/devices/{device_id}/speak")
-    async def api_device_speak(device_id: str, body: dict = Body(...), user: UserModel = Depends(get_current_user)):
-        """兼容路由：/api/v1/devices/{mac}/speak"""
-        if not await _check_device_owner(device_id, user):
-            raise HTTPException(403, "Device not bound to you")
-        text = body.get("text", "") if body else ""
-        if not text:
-            raise HTTPException(422, "text is required")
-        return await _speak(device_id, text)
+@router.post("/devices")
+async def api_create_device(body: CreateDeviceRequest, user: UserModel = Depends(get_current_user)):
+    """创建新设备（自动绑定到当前用户）"""
+    result = await _create_device(body)
+    if result.get("code") == 0:
+        device_id = body.mac
+        async with get_session_ctx() as session:
+            dev = await session.execute(
+                select(DeviceModel).where(DeviceModel.device_id == device_id)
+            )
+            device = dev.scalar_one_or_none()
+            if device:
+                device.user_id = user.id
+                device.bound_at = datetime.now(timezone.utc).timestamp()
+                session.add(device)
+    return result
 
-    @router.post("/devices/{device_id}/action")
-    async def api_device_action(device_id: str, body: DeviceActionRequest, user: UserModel = Depends(get_current_user)):
-        """执行设备快捷指令（真实功能：天气/音乐/闹钟/日记/自由对话）"""
-        if not await _check_device_owner(device_id, user):
-            raise HTTPException(403, "Device not bound to you")
-        return await _device_action(device_id, body.action, body.text)
 
-    @router.post("/stop")
-    async def api_stop(body: StopRequest, user: UserModel = Depends(get_current_user)):
-        if not await _check_device_owner(body.device_id, user):
-            raise HTTPException(403, "Device not bound to you")
-        return await _stop(body.device_id)
+@router.post("/devices/{device_id}/bind")
+async def api_bind_device(device_id: str, body: BindRequest, user: UserModel = Depends(get_current_user)):
+    """绑定设备到当前用户"""
+    async with get_session_ctx() as session:
+        result = await session.execute(
+            select(DeviceModel).where(DeviceModel.device_id == body.device_id)
+        )
+        device = result.scalar_one_or_none()
+        if not device:
+            raise HTTPException(404, "Device not found")
+        if device.user_id is not None:
+            raise HTTPException(400, "Device already bound to another user")
+        if device.bind_code != body.bind_code:
+            raise HTTPException(400, "Invalid bind code")
+        if device.bind_code_expires is None or datetime.now(timezone.utc).timestamp() > device.bind_code_expires:
+            raise HTTPException(400, "Bind code expired")
 
-    # ============================================================
-    #  工具查询 API
-    # ============================================================
-    @router.get("/tools")
-    async def list_tools(request: Request, user: UserModel = Depends(get_current_user)):
-        """列出所有可用工具的名称和描述（含 MCP）"""
-        try:
-            from src.use_cases.tools_system import get_openai_tools_schema
-            all_tools = list(get_openai_tools_schema())
-            seen = set()
-            result = []
+        # 检查用户设备数上限
+        count_result = await session.execute(
+            select(DeviceModel).where(DeviceModel.user_id == user.id)
+        )
+        device_count = len(count_result.scalars().all())
+        if device_count >= user.max_devices:
+            raise HTTPException(400, f"Device limit reached ({user.max_devices})")
 
-            # 全局内置工具
-            for t in all_tools:
-                fn = t.get("function", {})
-                name = fn.get("name", "")
-                if name and name not in seen:
-                    seen.add(name)
-                    result.append({"type": "global", "name": name, "description": fn.get("description", ""), "parameters": fn.get("parameters", {})})
+        device.user_id = user.id
+        device.bound_at = datetime.now(timezone.utc).timestamp()
+        device.bind_code = None
+        device.bind_code_expires = None
+        session.add(device)
 
-            # MCP 工具：从 app.state 获取
-            for _attempt in range(2):
-                tm = getattr(request.app.state, 'tool_manager', None)
-                if (_attempt == 1 or not tm):
-                    from src.infrastructure.web import get_app as _gapp
-                    _a = _gapp()
-                    if _a:
-                        tm = getattr(_a.state, 'tool_manager', None)
-                if tm:
-                    try:
-                        mcp_schemas = getattr(tm, '_mcp_tool_schemas', {})
-                        for schema_list in mcp_schemas.values():
-                            for t in schema_list:
-                                name = t.get("function", {}).get("name", "")
-                                if name and name not in seen:
-                                    seen.add(name)
-                                    result.append({"type": "mcp", "name": name, "description": t.get("function", {}).get("description", ""), "parameters": t.get("function", {}).get("parameters", {})})
-                    except Exception as e:
-                        logger.debug(f"[Tools] 收集 MCP 工具列表异常: {e}")
-                break
+    return {"code": 0, "message": "Device bound successfully"}
 
-            return {"code": 0, "message": "ok", "data": result}
-        except Exception as e:
-            return {"code": 1, "message": str(e), "data": None}
 
-    app.include_router(router)
+@router.post("/bind")
+async def api_bind_by_code(body: BindByCodeRequest, user: UserModel = Depends(get_current_user)):
+    """通过绑定码绑定设备（无需知道 device_id）"""
+    async with get_session_ctx() as session:
+        result = await session.execute(
+            select(DeviceModel).where(DeviceModel.bind_code == body.bind_code)
+        )
+        device = result.scalar_one_or_none()
+        if not device:
+            raise HTTPException(404, "Device not found or bind code invalid")
+        if device.user_id is not None:
+            raise HTTPException(400, "Device already bound to another user")
+        if device.bind_code_expires is None or datetime.now(timezone.utc).timestamp() > device.bind_code_expires:
+            raise HTTPException(400, "Bind code expired")
+
+        count_result = await session.execute(
+            select(DeviceModel).where(DeviceModel.user_id == user.id)
+        )
+        device_count = len(count_result.scalars().all())
+        if device_count >= user.max_devices:
+            raise HTTPException(400, f"Device limit reached ({user.max_devices})")
+
+        device.user_id = user.id
+        device.bind_code = "BOUND"
+        device.bind_code_expires = None
+        import secrets
+        device.device_key = "bound_" + secrets.token_hex(8)
+        # 绑定时可指定设备名称
+        if body.name:
+            device.name = body.name
+        session.add(device)
+
+    return {"code": 0, "message": "Device bound successfully", "device_id": device.device_id}
+
+
+@router.post("/devices/{device_id}/unbind")
+async def api_unbind_device(device_id: str, user: UserModel = Depends(get_current_user)):
+    """解绑设备"""
+    async with get_session_ctx() as session:
+        result = await session.execute(
+            select(DeviceModel).where(
+                DeviceModel.device_id == device_id,
+                DeviceModel.user_id == user.id,
+            )
+        )
+        device = result.scalar_one_or_none()
+        if not device:
+            raise HTTPException(404, "Device not found or not yours")
+        device.user_id = None
+        device.bound_at = None
+        session.add(device)
+    return {"code": 0, "message": "Device unbound"}
+
+
+@router.get("/devices/{device_id}")
+async def api_get_device(device_id: str, user: UserModel = Depends(get_current_user)):
+    """获取设备详情（需校验归属）"""
+    if not await _check_device_owner(device_id, user):
+        raise HTTPException(403, "Device not bound to you")
+    return await _get_device(device_id)
+
+
+# ============================================================
+#  唤醒 / 播放 / 停止 控制 API（需校验设备归属）
+# ============================================================
+
+@router.post("/wakeup")
+async def api_wakeup(body: WakeupRequest, user: UserModel = Depends(get_current_user)):
+    if not await _check_device_owner(body.device_id, user):
+        raise HTTPException(403, "Device not bound to you")
+    return await _wakeup(body.device_id)
+
+
+@router.post("/devices/{device_id}/wakeup")
+async def api_device_wakeup(device_id: str, user: UserModel = Depends(get_current_user)):
+    """兼容路由：/api/v1/devices/{mac}/wakeup"""
+    if not await _check_device_owner(device_id, user):
+        raise HTTPException(403, "Device not bound to you")
+    return await _wakeup(device_id)
+
+
+@router.post("/speak")
+async def api_speak(body: SpeakRequest, user: UserModel = Depends(get_current_user)):
+    if not await _check_device_owner(body.device_id, user):
+        raise HTTPException(403, "Device not bound to you")
+    return await _speak(body.device_id, body.text)
+
+
+@router.post("/devices/{device_id}/speak")
+async def api_device_speak(device_id: str, body: dict = Body(...), user: UserModel = Depends(get_current_user)):
+    """兼容路由：/api/v1/devices/{mac}/speak"""
+    if not await _check_device_owner(device_id, user):
+        raise HTTPException(403, "Device not bound to you")
+    text = body.get("text", "") if body else ""
+    if not text:
+        raise HTTPException(422, "text is required")
+    return await _speak(device_id, text)
+
+
+@router.post("/devices/{device_id}/action")
+async def api_device_action(device_id: str, body: DeviceActionRequest, user: UserModel = Depends(get_current_user)):
+    """执行设备快捷指令（真实功能：天气/音乐/闹钟/日记/自由对话）"""
+    if not await _check_device_owner(device_id, user):
+        raise HTTPException(403, "Device not bound to you")
+    return await _device_action(device_id, body.action, body.text)
+
+
+@router.post("/stop")
+async def api_stop(body: StopRequest, user: UserModel = Depends(get_current_user)):
+    if not await _check_device_owner(body.device_id, user):
+        raise HTTPException(403, "Device not bound to you")
+    return await _stop(body.device_id)
+
+
+# ============================================================
+#  工具查询 API
+# ============================================================
+@router.get("/tools")
+async def list_tools(request: Request, user: UserModel = Depends(get_current_user)):
+    """列出所有可用工具的名称和描述（含 MCP）"""
+    try:
+        from src.use_cases.tools_system import get_openai_tools_schema
+        all_tools = list(get_openai_tools_schema())
+        seen = set()
+        result = []
+
+        # 全局内置工具
+        for t in all_tools:
+            fn = t.get("function", {})
+            name = fn.get("name", "")
+            if name and name not in seen:
+                seen.add(name)
+                result.append({"type": "global", "name": name, "description": fn.get("description", ""), "parameters": fn.get("parameters", {})})
+
+        # MCP 工具：从 app.state 获取
+        for _attempt in range(2):
+            tm = getattr(request.app.state, 'tool_manager', None)
+            if (_attempt == 1 or not tm):
+                from src.infrastructure.web import get_app as _gapp
+                _a = _gapp()
+                if _a:
+                    tm = getattr(_a.state, 'tool_manager', None)
+            if tm:
+                try:
+                    mcp_schemas = getattr(tm, '_mcp_tool_schemas', {})
+                    for schema_list in mcp_schemas.values():
+                        for t in schema_list:
+                            name = t.get("function", {}).get("name", "")
+                            if name and name not in seen:
+                                seen.add(name)
+                                result.append({"type": "mcp", "name": name, "description": t.get("function", {}).get("description", ""), "parameters": t.get("function", {}).get("parameters", {})})
+                except Exception as e:
+                    logger.debug(f"[Tools] 收集 MCP 工具列表异常: {e}")
+            break
+
+        return {"code": 0, "message": "ok", "data": result}
+    except Exception as e:
+        return {"code": 1, "message": str(e), "data": None}

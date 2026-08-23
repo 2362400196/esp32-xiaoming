@@ -144,8 +144,8 @@
             <button class="file-tab" v-for="f in codeEditor.files" :key="f.name"
               :class="{ active: codeEditor.activeFile === f.name }"
               @click="codeEditor.activeFile = f.name">
-              <span class="ft-icon" :class="f.name.endsWith('.json') ? 'json' : 'py'">
-                {{ f.name.endsWith('.json') ? 'JSON' : 'PY' }}
+              <span class="ft-icon" :class="fileIcon(f.name).cls">
+                {{ fileIcon(f.name).label }}
               </span>
               {{ f.name }}
               <span class="file-remove" v-if="!isCoreFile(f.name)" title="删除文件"
@@ -870,12 +870,65 @@ const _TEMPLATE_MANIFEST = (slug, name, desc, perms) => JSON.stringify({
   version: "1.0.0",
   description: desc,
   api_version: "1.0",
+  frontend: true,
+  frontend_config: {
+    nav_label: name,
+    nav_icon: "box",
+    width: "full"
+  },
   category: "general",
   tags: [],
   requires: [],
   permissions: perms,
   config_fields: [],
 }, null, 2)
+
+const _TEMPLATE_FRONTEND = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>插件页面</title>
+<style>
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #e9f0f4; color: #1e293b; min-height: 100vh;
+}
+.card {
+  background: rgba(255,255,255,0.85); backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.6); border-radius: 16px;
+  padding: 24px; max-width: 640px; margin: 0 auto;
+}
+h2 { margin: 0 0 4px; font-size: 20px; }
+p { margin: 0 0 16px; color: #64748b; font-size: 14px; }
+.device-bar { font-size: 13px; color: #64748b; margin-bottom: 16px; }
+.device-bar .name { color: #059669; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>插件页面</h2>
+  <p>欢迎使用你的插件！</p>
+  <div class="device-bar">当前设备：<span class="name" id="deviceName">—</span></div>
+  <div id="content">
+    <p>在这里编写你的插件 UI 内容。</p>
+  </div>
+</div>
+<script>
+const did = new URLSearchParams(window.location.search).get('device_id');
+if (did) document.getElementById('deviceName').textContent = did;
+async function api(path, opts) {
+  let token = localStorage.getItem('espai_token') || '';
+  let headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  let res = await fetch(path, { headers, ...opts });
+  return res.json();
+}
+try { window.parent.postMessage({ type: 'ready' }, '*'); } catch(e) {}
+<\/script>
+</body>
+</html>`
 
 const ALL_PERMS = [
   { id: 'network', label: 'Network', desc: '发起外部 HTTP 请求（调 API、爬数据）' },
@@ -969,6 +1022,27 @@ function fileLang(name) {
   return map[ext] || 'plaintext'
 }
 
+// 文件标签图标
+function fileIcon(name) {
+  const ext = (name.split('.').pop() || '').toLowerCase()
+  const map = {
+    py:    { label: 'PY',   cls: 'py' },
+    json:  { label: '{}',   cls: 'json' },
+    html:  { label: '<>',   cls: 'html' },
+    css:   { label: '#',    cls: 'css' },
+    js:    { label: 'JS',   cls: 'js' },
+    ts:    { label: 'TS',   cls: 'ts' },
+    md:    { label: 'MD',   cls: 'md' },
+    yaml:  { label: 'YM',   cls: 'yaml' },
+    yml:   { label: 'YM',   cls: 'yaml' },
+    sh:    { label: '>_',   cls: 'sh' },
+    toml:  { label: 'CF',   cls: 'toml' },
+    ini:   { label: 'CF',   cls: 'toml' },
+    txt:   { label: 'T',    cls: 'txt' },
+  }
+  return map[ext] || { label: '?', cls: 'unknown' }
+}
+
 // 当前编辑文件
 const activeFileEntry = computed(() =>
   codeEditor.value.files.find(f => f.name === codeEditor.value.activeFile) || null
@@ -1037,6 +1111,7 @@ function openCreateEditor() {
     files: [
       { name: 'plugin.py', content: _TEMPLATE_PLUGIN },
       { name: 'manifest.json', content: _TEMPLATE_MANIFEST('my_plugin', '我的插件', '插件描述', []) },
+      { name: 'frontend/index.html', content: _TEMPLATE_FRONTEND },
     ],
     activeFile: 'plugin.py',
     loading: false,
@@ -1660,6 +1735,16 @@ onBeforeUnmount(() => {
 .ft-icon { font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; }
 .ft-icon.py { background: var(--mint-soft); color: var(--mint-deep); }
 .ft-icon.json { background: rgba(245, 158, 11, 0.14); color: #d97706; }
+.ft-icon.html { background: rgba(239, 68, 68, 0.12); color: #dc2626; }
+.ft-icon.css { background: rgba(99, 102, 241, 0.12); color: #4f46e5; }
+.ft-icon.js { background: rgba(234, 179, 8, 0.14); color: #ca8a04; }
+.ft-icon.ts { background: rgba(37, 99, 235, 0.12); color: #2563eb; }
+.ft-icon.md { background: rgba(107, 114, 128, 0.12); color: #4b5563; }
+.ft-icon.yaml { background: rgba(249, 115, 22, 0.12); color: #ea580c; }
+.ft-icon.sh { background: rgba(34, 197, 94, 0.12); color: #16a34a; }
+.ft-icon.toml { background: rgba(139, 92, 246, 0.12); color: #7c3aed; }
+.ft-icon.txt { background: rgba(107, 114, 128, 0.08); color: #6b7280; }
+.ft-icon.unknown { background: rgba(107, 114, 128, 0.08); color: #6b7280; }
 
 /* ===== 权限下拉框 ===== */
 .perms-field { flex: 1; min-width: 100%; position: relative; }
@@ -1702,6 +1787,16 @@ onBeforeUnmount(() => {
 .drop-enter-from, .drop-leave-to { opacity: 0; transform: translateY(-4px); }
 .file-tab.active .ft-icon.py { background: var(--grad-mint); color: #fff; }
 .file-tab.active .ft-icon.json { background: var(--amber); color: #fff; }
+.file-tab.active .ft-icon.html { background: #dc2626; color: #fff; }
+.file-tab.active .ft-icon.css { background: #4f46e5; color: #fff; }
+.file-tab.active .ft-icon.js { background: #ca8a04; color: #fff; }
+.file-tab.active .ft-icon.ts { background: #2563eb; color: #fff; }
+.file-tab.active .ft-icon.md { background: #4b5563; color: #fff; }
+.file-tab.active .ft-icon.yaml { background: #ea580c; color: #fff; }
+.file-tab.active .ft-icon.sh { background: #16a34a; color: #fff; }
+.file-tab.active .ft-icon.toml { background: #7c3aed; color: #fff; }
+.file-tab.active .ft-icon.txt { background: #6b7280; color: #fff; }
+.file-tab.active .ft-icon.unknown { background: #6b7280; color: #fff; }
 .editor-body { flex: 1; min-height: 0; border: 1px solid var(--glass-border); border-radius: 0 var(--radius-md) var(--radius-md) var(--radius-md); overflow: hidden; }
 .editor-loading { display: flex; flex-direction: column; align-items: center; gap: 12px; height: 100%; color: var(--text-sub); justify-content: center; }
 .spinner { width: 28px; height: 28px; border: 3px solid rgba(16,185,129,0.15); border-top-color: var(--mint); border-radius: 50%; animation: spin 0.8s linear infinite; }

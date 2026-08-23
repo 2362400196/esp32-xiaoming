@@ -13,11 +13,10 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-import httpx
-
 from src.infrastructure.config import get_settings
 from src.infrastructure.logging import get_logger
 from src.infrastructure.db.repositories.growth_repositories import DiaryRepository
+from src.use_cases._plugin_helpers import http_get_json
 
 logger = get_logger(__name__)
 
@@ -173,10 +172,9 @@ class ProactiveBrain:
             import json as _json
             # 用西安坐标查天气
             url = "https://api.open-meteo.com/v1/forecast?latitude=34.26&longitude=108.94&current=weathercode,temperature_2m,precipitation&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=Asia%2FShanghai&forecast_days=1"
-            async with httpx.AsyncClient(timeout=5.0) as _wx_client:
-                _wx_resp = await _wx_client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-                _wx_resp.raise_for_status()
-                weather_data = _wx_resp.json()
+            weather_data, err = await http_get_json(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5.0)
+            if err:
+                raise Exception(err)
             # 提取当前天气
             wcode = weather_data.get("current", {}).get("weathercode", 0)
             temp = weather_data.get("current", {}).get("temperature_2m", 0)

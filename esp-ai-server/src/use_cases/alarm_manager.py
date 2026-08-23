@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 from src.infrastructure.logging import get_logger
 from src.infrastructure.db.repositories.growth_repositories import AlarmRepository
+from src.use_cases._plugin_helpers import http_request, play_music_url
 
 logger = get_logger("alarm")
 
@@ -283,13 +284,8 @@ class AlarmManager:
                 logger.error(f"[Alarm] TTS 播报失败: {e}")
 
         elif item.alarm_type == "alarm":
-            # 闹钟：搜索歌曲获取 audio_url 并播放
+            # 闹钟：通过 SDK 搜索并播放音乐
             # item.text 为歌名，为空时随机推荐一首
-            import urllib.request as _urllib_req
-            import json as _json
-            import urllib.parse as _urlparse
-
-            # 获取音乐 API 地址:设备级配置优先,回退全局 .env
             from src.infrastructure.config import get_settings
             settings = get_settings()
             _user_cfg = device.get("user_config")
@@ -303,38 +299,32 @@ class AlarmManager:
                 logger.error("[Alarm] 音乐服务未配置，无法播放闹钟铃声")
                 return
 
-            if item.text:
-                # 指定歌名搜索
-                search_url = f"{music_api_url}/stream_pcm?song={_urlparse.quote(item.text)}"
-            else:
-                # 未指定歌名，随机推荐
-                search_url = f"{music_api_url}/random"
-
             try:
-                with _urllib_req.urlopen(search_url, timeout=10) as resp:
-                    result = _json.loads(resp.read().decode("utf-8"))
-                    if result.get("success"):
-                        audio_url = result.get("audio_url", "")
-                        title = result.get("title", item.text or "随机")
-                        if audio_url:
-                            # URL 编码路径部分（避免双重编码）
-                            parsed = _urlparse.urlsplit(audio_url)
-                            if parsed.path:
-                                decoded_path = _urlparse.unquote(parsed.path)
-                                encoded_path = _urlparse.quote(decoded_path, safe="/")
-                                audio_url = _urlparse.urlunsplit(
-                                    (parsed.scheme, parsed.netloc, encoded_path, parsed.query, parsed.fragment)
-                                )
-                            await channel.send_json({
-                                "type": "instruct",
-                                "command_id": "play_music",
-                                "data": audio_url,
-                            })
-                            logger.info(f"[Alarm] 已发送闹钟铃声: {title} -> {audio_url}")
-                        else:
-                            logger.warning(f"[Alarm] 歌曲无音频链接: {title}")
-                    else:
-                        logger.warning(f"[Alarm] 未找到歌曲: {item.text or '随机'}")
+                if item.text:
+                    resp, err = await http_request("GET", f"{music_api_url}/stream_pcm", params={"song": item.text}, timeout=10)
+                else:
+                    resp, err = await http_request("GET", f"{music_api_url}/random", timeout=10)
+                if err:
+                    raise err
+                data = resp.json()
+                if not data.get("success"):
+                    logger.warning(f"[Alarm] 未找到歌曲: {item.text or '随机'}")
+                    return
+
+                audio_url = data.get("audio_url", "")
+                if not audio_url:
+                    logger.warning(f"[Alarm] 歌曲无音频链接: {data.get('title', item.text or '随机')}")
+                    return
+
+                result = await play_music_url(
+                    url=audio_url,
+                    title=data.get("title", item.text or "随机"),
+                    artist=data.get("artist", ""),
+                    duration=data.get("duration", 0),
+                    device_key=item.device_key,
+                    lyric_url=data.get("lyric_url", ""),
+                )
+                logger.info(f"[Alarm] 闹钟铃声: {data.get('title', item.text or '随机')}, SDK 结果: {result}")
             except Exception as e:
                 logger.error(f"[Alarm] 搜索歌曲失败: {e}")
 

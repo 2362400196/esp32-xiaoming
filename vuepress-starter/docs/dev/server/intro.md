@@ -252,8 +252,19 @@ src/
 │   ├── session.py        #   会话核心 + Watchdog
 │   ├── pipeline.py       #   4-Worker 流水线
 │   ├── session_fsm.py    #   状态机
-│   ├── tools_system.py   #   工具框架 + MCP
+│   ├── tools_system.py   #   工具框架 + MCP + 断路器
+│   ├── stop_pipeline.py  #   Pipeline 停止信号
+│   ├── tool_cache.py     #   工具结果缓存
 │   ├── builtin_tools.py  #   内置工具
+│   ├── sdk/              #   插件 SDK 子模块
+│   │   ├── utils.py      #     工具函数
+│   │   ├── device.py     #     设备指令下发
+│   │   ├── http.py       #     HTTP 请求
+│   │   ├── music.py      #     音乐播放
+│   │   ├── io.py         #     GPIO/PWM/ADC/舵机
+│   │   ├── storage.py    #     文件存储
+│   │   └── services.py   #     服务查询
+│   ├── _plugin_helpers.py #   SDK 统一导出层（兼容旧导入）
 │   ├── custom/           #   自定义工具（@tool 自动注册）
 │   ├── skill_system.py   #   技能系统
 │   ├── skill_tools.py    #   技能工具
@@ -326,7 +337,13 @@ src/
 │       ├── skills.py     #     技能管理
 │       ├── mcp.py        #     MCP 配置
 │       ├── emos.py       #     表情包管理
-│       └── growth.py     #     成长系统
+│       ├── growth.py     #     成长系统
+│       ├── auth.py       #     用户认证
+│       ├── wechat.py     #     微信集成
+│       ├── plugins.py    #     插件管理
+│       ├── plugin_frontend.py # 插件前端页面
+│       ├── marketplace.py #    云市场
+│       └── admin.py      #     管理员后台
 │
 ├── skills/               # 技能定义（SKILL.md）
 │   ├── guess_number/

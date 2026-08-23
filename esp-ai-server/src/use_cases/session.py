@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 from src.domain.entities import SessionState
 from src.infrastructure.logging import get_logger, trace_id_var
-from src.infrastructure.db.repositories.short_term_memory_repo import SqlShortTermMemoryRepository
 from src.infrastructure.monitoring import get_metrics
 from src.use_cases.auxiliary_services import AudioProcessor, ConversationMemory
 from src.use_cases.pipeline import ConversationPipeline, PipelineConfig, SentenceSplitter
@@ -110,8 +109,8 @@ class Session:
         self._current_pipeline = None
         self._precomputed_skill_catalog: Optional[str] = None  # 预渲染的 skill catalog，避免首轮 Pipeline 阻塞
 
-        # 通过构造函数注入会话记忆仓储；未注入时回退到默认实现（向后兼容）
-        repository = memory_repository if memory_repository is not None else SqlShortTermMemoryRepository()
+        # 通过构造函数注入会话记忆仓储（由接口层负责提供具体实现）
+        repository = memory_repository
         self.conversation_memory = ConversationMemory(device_id=self.device_id, repository=repository)
 
         self._tts_playing = False

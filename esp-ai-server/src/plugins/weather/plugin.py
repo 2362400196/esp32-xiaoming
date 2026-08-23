@@ -12,7 +12,7 @@
 文档：https://lbs.amap.com/api/webservice/guide/api-advanced/weatherinfo
 """
 
-import json
+from src.use_cases._plugin_helpers import json_dumps
 
 from src.use_cases.tools_system import tool
 from src.use_cases._plugin_helpers import get_plugin_config_or_env, http_get_json, send_device_command
@@ -88,7 +88,7 @@ def _build_card_json(city_cn: str, weather_cn: str, temp: str,
              "y": 130, "color": "888888", "font": "puhui", "align": "center"},
         ],
     }
-    return json.dumps(card, ensure_ascii=False)
+    return json_dumps(card)
 
 
 @tool(cache=False)

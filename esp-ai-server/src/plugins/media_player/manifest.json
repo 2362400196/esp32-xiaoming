@@ -1,24 +1,33 @@
 {
-    "id":  "media_player",
-    "name":  "音乐播放",
-    "version":  "1.0.0",
-    "author":  "system",
-    "description":  "搜索和播放音乐，支持随机推荐和指定歌曲",
-    "api_version":  "1.0",
-    "requires":  [
-
-                 ],
-    "config_fields":  [
-                          {
-                              "key":  "api_url",
-                              "label":  "音乐服务地址",
-                              "type":  "text",
-                              "required":  false,
-                              "placeholder":  "如 http://192.168.31.176:2233，留空用全局配置"
-                          }
-                      ],
-    "permissions":  [
-                        "network",
-                        "device"
-                    ]
+    "id": "media_player",
+    "name": "音乐播放",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "搜索和播放音乐，支持随机推荐和指定歌曲，可查看播放历史和歌词",
+    "api_version": "1.0",
+    "optional": true,
+    "frontend": true,
+    "frontend_config": {
+        "nav_label": "音乐",
+        "nav_icon": "tool",
+        "width": "full"
+    },
+    "requires": [],
+    "config_fields": [
+        {
+            "key": "api_url",
+            "label": "音乐服务地址",
+            "type": "text",
+            "required": false,
+            "placeholder": "如 http://192.168.31.176:2233，留空用全局配置"
+        },
+        {
+            "key": "lyrics_offset",
+            "label": "歌词偏移（毫秒）",
+            "type": "number",
+            "required": false,
+            "placeholder": "留空默认为 0"
+        }
+    ],
+    "permissions": ["network", "device", "kv"]
 }

@@ -1,7 +1,7 @@
 """远程配置插件：查询设备远程配置、上报状态、管理缓存。"""
 
 from src.use_cases.tools_system import tool
-from src.use_cases._plugin_helpers import get_device_key
+from src.use_cases._plugin_helpers import get_device_key, json_dumps
 
 
 @tool()
@@ -18,8 +18,7 @@ async def get_device_remote_config(device_key: str = "", tool_manager=None) -> s
     provider = get_remote_config_provider()
     config = await provider.get_device_config(device_key)
     if config:
-        import json
-        return f"设备远程配置：\n{json.dumps(config, ensure_ascii=False, indent=2)}"
+        return f"设备远程配置：\n{json_dumps(config, indent=2)}"
     return "该设备没有远程配置，或远程配置服务未连接"
 
 
