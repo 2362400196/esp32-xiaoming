@@ -23,7 +23,7 @@ from typing import Any
 
 from src.infrastructure.logging import get_logger
 from src.infrastructure.plugin_host.adjudicator import Adjudicator, CallContext, PermissionDenied
-from src.infrastructure.plugin_host.protocol import ProtocolError, decode, encode
+from src.infrastructure.plugin_host.protocol import MAX_MSG_BYTES, ProtocolError, decode, encode
 from src.infrastructure.plugin_log_store import add_log as _add_plugin_log
 from src.use_cases.tools_system import ToolDefinition, register_tool, unregister_tool
 
@@ -180,7 +180,11 @@ class SandboxedPlugin:
         if self._proc is None or self._proc.stdin is None:
             raise ConnectionError(f"插件 {self.plugin_id} 子进程未运行")
         async with self._write_lock:
-            self._proc.stdin.write(encode(msg).encode("utf-8"))
+            try:
+                raw = encode(msg)
+            except ProtocolError as e:
+                raise ConnectionError(f"消息过大（>{MAX_MSG_BYTES//1024}KB），已阻止发送: {e}")
+            self._proc.stdin.write(raw.encode("utf-8"))
             await self._proc.stdin.drain()
 
     def _next_call_id(self) -> int:
