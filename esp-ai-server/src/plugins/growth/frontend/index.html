@@ -2,24 +2,94 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>成长系统</title>
 <style>
-:root{--mint:#10b981;--mint-deep:#059669;--mint-soft:rgba(16,185,129,0.1);--text-main:#1e293b;--text-sub:#64748b;--bg:#f0f5f0;--border:rgba(0,0,0,0.06);--radius:16px;--radius-sm:10px;--shadow:0 4px 20px rgba(0,0,0,0.06);--glass:linear-gradient(155deg,rgba(255,255,255,0.85),rgba(255,255,255,0.55));--glass-border:rgba(255,255,255,0.6)}
-*{box-sizing:border-box}
-body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text-main);min-height:100vh}
+:root{--mint:#10b981;--mint-deep:#059669;--mint-soft:rgba(16,185,129,0.1);--mint-border:rgba(16,185,129,0.25);--mint-light:rgba(16,185,129,0.06);--text-main:#1e293b;--text-sub:#64748b;--text-light:#94a3b8;--bg:#f0f5f0;--radius:16px;--radius-sm:10px;--radius-xs:8px;--shadow:0 4px 20px rgba(0,0,0,0.06);--shadow-lg:0 12px 40px rgba(0,0,0,0.12);--glass:linear-gradient(155deg,rgba(255,255,255,0.85),rgba(255,255,255,0.55));--glass-border:rgba(255,255,255,0.6);--transition:0.3s cubic-bezier(0.4,0,0.2,1)}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text-main);min-height:100vh;padding:0;overflow-x:hidden}
 .container{max-width:640px;margin:0 auto;padding:20px 16px 40px}
+
+/* Hero */
 .hero-bar{position:relative;overflow:hidden;padding:28px 30px;border-radius:var(--radius);background:var(--glass);border:1px solid var(--glass-border);backdrop-filter:blur(12px);margin-bottom:20px}
 .watermark{position:absolute;right:-8px;bottom:-18px;font-size:90px;font-weight:900;color:rgba(16,185,129,0.08);line-height:1;pointer-events:none;user-select:none}
 .hero-title{font-size:22px;font-weight:700;margin:0}.highlight{color:var(--mint-deep)}
 .hero-sub{font-size:13px;color:var(--text-sub);margin:4px 0 0}
-.card{background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius);padding:18px;margin-bottom:12px;backdrop-filter:blur(12px);box-shadow:var(--shadow)}
-.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
-.stat-card{background:rgba(0,0,0,0.02);border-radius:12px;padding:16px;text-align:center}
-.stat-value{font-size:26px;font-weight:800;color:var(--mint-deep);margin:0 0 4px}
-.stat-label{font-size:12px;color:var(--text-sub);margin:0}
-.spinner{width:28px;height:28px;border:3px solid var(--mint-soft);border-top-color:var(--mint-deep);border-radius:50%;animation:spin 0.8s linear infinite;margin:20px auto}
+
+/* Loading */
+.spinner{width:28px;height:28px;border:3px solid var(--mint-soft);border-top-color:var(--mint-deep);border-radius:50%;animation:spin 0.8s linear infinite;margin:40px auto}
 @keyframes spin{to{transform:rotate(360deg)}}
+.loading-text{text-align:center;font-size:13px;color:var(--text-sub);margin-top:8px}
+
+/* Stats */
+.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+.stat-card{background:var(--glass);border:1px solid var(--glass-border);border-radius:12px;padding:14px 8px;text-align:center;backdrop-filter:blur(8px);box-shadow:var(--shadow);transition:transform var(--transition)}
+.stat-card:hover{transform:translateY(-2px)}
+.stat-value{font-size:24px;font-weight:800;color:var(--mint-deep);margin:0 0 3px;line-height:1.2}
+.stat-label{font-size:11px;color:var(--text-sub);margin:0}
+
+/* Card */
+.card{background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius);padding:20px;margin-bottom:14px;backdrop-filter:blur(12px);box-shadow:var(--shadow);transition:box-shadow var(--transition)}
+.card:hover{box-shadow:0 6px 24px rgba(0,0,0,0.08)}
+.card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.card-title{font-size:15px;font-weight:700;display:flex;align-items:center;gap:8px}
+.card-title .badge{font-size:11px;font-weight:400;color:var(--text-sub);background:rgba(0,0,0,0.04);padding:2px 8px;border-radius:20px}
+.card-action{font-size:12px;color:var(--mint-deep);font-weight:600;cursor:pointer;background:none;border:none;padding:4px 8px;border-radius:6px;transition:background var(--transition)}
+.card-action:hover{background:var(--mint-soft)}
+
+/* Diary List */
+.diary-list{list-style:none;margin:0;padding:0}
+.diary-item{position:relative;padding:16px 0;border-bottom:1px solid var(--mint-border);cursor:pointer;transition:background var(--transition);border-radius:var(--radius-xs);margin:0 -8px;padding:12px 8px}
+.diary-item:last-child{border-bottom:none}
+.diary-item:hover{background:var(--mint-light)}
+.diary-item-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.diary-date{font-size:12px;font-weight:700;color:var(--mint-deep);display:flex;align-items:center;gap:6px}
+.diary-date::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--mint-deep)}
+.diary-arrow{font-size:11px;color:var(--text-light);transition:transform var(--transition)}
+.diary-item:hover .diary-arrow{transform:translateX(3px);color:var(--mint-deep)}
+.diary-preview{font-size:13px;color:var(--text-sub);line-height:1.6;margin:0;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.diary-empty{text-align:center;padding:40px 0;font-size:13px;color:var(--text-sub)}
+.diary-empty-icon{font-size:36px;margin-bottom:8px;opacity:0.3}
+
+/* Profile */
+.profile-grid{display:grid;gap:10px}
+.profile-item{display:flex;gap:8px;font-size:13px;line-height:1.6}
+.profile-label{color:var(--text-sub);white-space:nowrap;min-width:72px;font-weight:600}
+.profile-value{color:var(--text-main)}
+.profile-empty{font-size:13px;color:var(--text-sub);text-align:center;padding:16px 0}
+
+/* Modal Overlay */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.45);backdrop-filter:blur(6px);z-index:1000;display:flex;align-items:center;justify-content:center;padding:16px;animation:fadeIn 0.2s ease}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.modal{background:#fff;border-radius:var(--radius);max-width:600px;width:100%;max-height:85vh;display:flex;flex-direction:column;box-shadow:var(--shadow-lg);animation:slideUp 0.3s ease}
+@keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+.modal-header{display:flex;align-items:center;justify-content:space-between;padding:18px 20px 14px;border-bottom:1px solid #eef2f6;flex-shrink:0}
+.modal-date{font-size:15px;font-weight:700;color:var(--text-main);display:flex;align-items:center;gap:8px}
+.modal-date .weekday{font-size:12px;font-weight:400;color:var(--text-sub)}
+.modal-close{width:32px;height:32px;border-radius:50%;border:none;background:rgba(0,0,0,0.04);color:var(--text-sub);font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all var(--transition);flex-shrink:0}
+.modal-close:hover{background:rgba(0,0,0,0.08);color:var(--text-main)}
+.modal-body{padding:20px;overflow-y:auto;flex:1;font-size:14px;line-height:1.8;color:var(--text-main);white-space:pre-wrap;word-break:break-word}
+.modal-body p{margin-bottom:12px}
+.modal-body strong{color:var(--text-main)}
+.modal-body em{color:var(--text-sub)}
+.modal-loading{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;gap:12px}
+.modal-loading .spinner{margin:0}
+
+/* Notification */
+.toast{position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:2000;background:var(--text-main);color:#fff;font-size:13px;padding:10px 20px;border-radius:var(--radius-xs);box-shadow:var(--shadow-lg);animation:toastIn 0.3s ease;pointer-events:none}
+@keyframes toastIn{from{opacity:0;transform:translateX(-50%) translateY(-10px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+
+/* Responsive */
+@media(max-width:480px){
+  .container{padding:12px 10px 32px}
+  .hero-bar{padding:20px 18px}
+  .hero-title{font-size:19px}
+  .stat-grid{gap:6px}
+  .stat-card{padding:12px 4px}
+  .stat-value{font-size:20px}
+  .modal{margin:8px;max-height:90vh}
+  .modal-body{padding:16px;font-size:13px}
+}
 </style>
 </head>
 <body>
@@ -29,70 +99,226 @@ body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',
     <h2 class="hero-title">成长<span class="highlight">系统</span></h2>
     <p class="hero-sub">用户画像分析 · 情绪检测 · 日记自动生成 · 自学习技能</p>
   </div>
-  <div id="loading"><div class="spinner"></div></div>
+
+  <div id="loading">
+    <div class="spinner"></div>
+    <div class="loading-text">加载中...</div>
+  </div>
+
   <div id="content" style="display:none">
+    <!-- 统计卡片 -->
     <div class="stat-grid">
       <div class="stat-card"><p class="stat-value" id="diaryCount">--</p><p class="stat-label">日记篇数</p></div>
       <div class="stat-card"><p class="stat-value" id="emotionCount">--</p><p class="stat-label">情绪记录</p></div>
       <div class="stat-card"><p class="stat-value" id="skillCount">--</p><p class="stat-label">学习技能</p></div>
       <div class="stat-card"><p class="stat-value" id="activeDays">--</p><p class="stat-label">活跃天数</p></div>
     </div>
+
+    <!-- 日记区域 -->
+    <div class="card" id="diaryCard">
+      <div class="card-header">
+        <span class="card-title">日记 <span class="badge" id="diaryBadge"></span></span>
+      </div>
+      <div id="diaryList"><div class="diary-empty"><div class="diary-empty-icon">📝</div>暂无日记</div></div>
+    </div>
+
+    <!-- 用户画像 -->
     <div class="card" id="profileCard">
-      <h3 style="font-size:14px;font-weight:700;margin:0 0 8px">用户画像</h3>
-      <div id="profileContent" style="font-size:13px;color:var(--text-sub)">暂无数据</div>
+      <div class="card-header">
+        <span class="card-title">用户画像</span>
+      </div>
+      <div id="profileContent" class="profile-empty">暂无数据</div>
     </div>
   </div>
 </div>
+
+<!-- 日记详情弹窗 -->
+<div id="modalOverlay" class="modal-overlay" style="display:none" onclick="closeModal(event)">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div class="modal-date">
+        <span id="modalDate"></span>
+        <span class="weekday" id="modalWeekday"></span>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div id="modalBody" class="modal-body"><div class="modal-loading"><div class="spinner"></div></div></div>
+  </div>
+</div>
+
 <script>
 let deviceMac = '';
+const WEEKDAYS = ['星期日','星期一','星期二','星期三','星期四','星期五','星期六'];
+
 function getToken(){return localStorage.getItem('espai_token')||''}
+function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
 async function api(path,method='GET',body=null){
   const token=getToken();const headers={'Content-Type':'application/json'};
   if(token)headers['Authorization']='Bearer '+token;
   try{const r=await fetch(path,{method,headers,body:body?JSON.stringify(body):null});return await r.json()}catch(e){return{code:1,message:String(e)}}
 }
+
+function showToast(msg){
+  const t=document.createElement('div');t.className='toast';t.textContent=msg;
+  document.body.appendChild(t);setTimeout(()=>t.remove(),2000)
+}
+
+// 日记详情弹窗
+function openModal(date,deviceId){
+  document.getElementById('modalDate').textContent=date;
+  // 计算星期
+  const d=new Date(date);if(!isNaN(d.getTime())){
+    document.getElementById('modalWeekday').textContent=WEEKDAYS[d.getDay()]
+  }else{
+    document.getElementById('modalWeekday').textContent=''
+  }
+  document.getElementById('modalBody').innerHTML='<div class="modal-loading"><div class="spinner"></div></div>';
+  document.getElementById('modalOverlay').style.display='flex';
+  document.body.style.overflow='hidden';
+  // 获取完整日记内容
+  api('/api/v1/growth/diary/'+encodeURIComponent(deviceId)+'/'+encodeURIComponent(date)).then(res=>{
+    if(res.code===0&&res.data&&res.data.content){
+      const content=res.data.content;
+      document.getElementById('modalBody').innerHTML='<div>'+renderMarkdown(content)+'</div>'
+    }else{
+      document.getElementById('modalBody').innerHTML='<div style="text-align:center;padding:40px 0;color:var(--text-sub)">日记内容加载失败</div>'
+    }
+  }).catch(()=>{
+    document.getElementById('modalBody').innerHTML='<div style="text-align:center;padding:40px 0;color:var(--text-sub)">网络错误，请重试</div>'
+  })
+}
+function closeModal(e){
+  if(e&&e.target!==e.currentTarget)return;
+  document.getElementById('modalOverlay').style.display='none';
+  document.body.style.overflow=''
+}
+// 键盘 ESC 关闭
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape')closeModal({target:document.getElementById('modalOverlay'),currentTarget:document.getElementById('modalOverlay')})
+})
+
+// 简单 Markdown 渲染
+function renderMarkdown(text){
+  if(!text)return '';
+  let html=escHtml(text);
+  // 标题
+  html=html.replace(/^### (.+)$/gm,'<strong style="font-size:15px;display:block;margin:16px 0 8px;color:var(--mint-deep)">$1</strong>');
+  html=html.replace(/^## (.+)$/gm,'<strong style="font-size:16px;display:block;margin:20px 0 10px;color:var(--mint-deep)">$1</strong>');
+  html=html.replace(/^# (.+)$/gm,'<strong style="font-size:18px;display:block;margin:24px 0 12px;color:var(--mint-deep)">$1</strong>');
+  // 粗体 + 斜体
+  html=html.replace(/\*\*\*(.+?)\*\*\*/g,'<strong><em>$1</em></strong>');
+  html=html.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+  html=html.replace(/\*(.+?)\*/g,'<em>$1</em>');
+  // 列表
+  html=html.replace(/^- (.+)$/gm,'<span style="display:block;padding-left:12px;position:relative;margin:3px 0">&bull; $1</span>');
+  // 引用
+  html=html.replace(/^> (.+)$/gm,'<span style="display:block;padding:6px 12px;margin:8px 0;background:var(--mint-light);border-left:3px solid var(--mint);border-radius:4px;color:var(--text-sub)">$1</span>');
+  // 段落（连续非空行）
+  html=html.replace(/\n\n/g,'</p><p>');
+  html='<p>'+html+'</p>';
+  // 清理孤立的空段落
+  html=html.replace(/<p>\s*<\/p>/g,'');
+  return html
+}
+
+// 渲染日记列表
+function renderDiaryList(diaries,deviceId){
+  if(!diaries||!diaries.length)return '<div class="diary-empty"><div class="diary-empty-icon">📝</div>暂无日记</div>';
+  return '<div class="diary-list">'+diaries.map(d=>{
+    const date=d.date||'';
+    let raw=d.summary||'';
+    // 尝试解析 JSON
+    try{const p=JSON.parse(raw);if(p.日记)raw=p.日记;else if(p.content)raw=p.content}catch(e){}
+    // 清理markdown标记用于预览
+    const preview=raw.replace(/[#*_>`\[\]]/g,'').replace(/\n+/g,' ').trim().slice(0,120);
+    const did='d_'+date.replace(/-/g,'');
+    return '<div class="diary-item" onclick="openModal(\''+date+'\',\''+deviceId+'\')">'
+      +'<div class="diary-item-top">'
+      +'<span class="diary-date">'+escHtml(date)+'</span>'
+      +'<span class="diary-arrow">查看全文 →</span>'
+      +'</div>'
+      +'<div class="diary-preview">'+escHtml(preview+(raw.length>120?'...':''))+'</div>'
+      +'</div>'
+  }).join('')+'</div>'
+}
+
+// 主数据加载
 async function loadData(){
-  if(!deviceMac){document.getElementById('loading').style.display='none';return}
-  document.getElementById('loading').style.display='block'
-  document.getElementById('content').style.display='none'
+  if(!deviceMac){
+    document.getElementById('loading').style.display='none';
+    document.getElementById('content').style.display='block';
+    document.getElementById('diaryList').innerHTML='<div class="diary-empty"><div class="diary-empty-icon">📝</div>请先选择设备</div>';
+    return
+  }
+  document.getElementById('loading').style.display='block';
+  document.getElementById('content').style.display='none';
+
   const [profileRes, diaryRes] = await Promise.all([
     api('/api/v1/growth/profile/'+encodeURIComponent(deviceMac)),
     api('/api/v1/growth/diary/'+encodeURIComponent(deviceMac)+'?limit=999')
-  ])
-  document.getElementById('loading').style.display='none'
-  document.getElementById('content').style.display='block'
-  const diaryCount = diaryRes.code===0 ? (diaryRes.data?.count||0) : 0
-  document.getElementById('diaryCount').textContent = diaryCount
-  if(profileRes.code===0 && profileRes.data){
-    const p = profileRes.data.profile || {}
-    const es = profileRes.data.emotion_summary || {}
-    document.getElementById('emotionCount').textContent = es.total_records || 0
-    document.getElementById('skillCount').textContent = p.learned_skills_count || p.learned_skills?.length || 0
-    document.getElementById('activeDays').textContent = p.active_days || p.days_active || 0
-    const traits = p.personality_traits || p.traits || []
-    const interests = p.interests || []
-    let html = ''
-    if(traits.length) html += '<div style="margin-bottom:6px"><strong>性格特征：</strong>'+traits.join('、')+'</div>'
-    if(interests.length) html += '<div><strong>兴趣爱好：</strong>'+interests.join('、')+'</div>'
-    if(!html) html = '暂无画像数据'
-    document.getElementById('profileContent').innerHTML = html
+  ]);
+
+  document.getElementById('loading').style.display='none';
+  document.getElementById('content').style.display='block';
+
+  // 日记
+  let diaryCount=0;
+  if(diaryRes.code===0&&diaryRes.data&&diaryRes.data.diaries){
+    const d=diaryRes.data;
+    diaryCount=d.count||0;
+    document.getElementById('diaryCount').textContent=diaryCount;
+    document.getElementById('diaryBadge').textContent='共 '+diaryCount+' 篇';
+    document.getElementById('diaryList').innerHTML=renderDiaryList(d.diaries,deviceMac);
   }else{
-    document.getElementById('emotionCount').textContent = '0'
-    document.getElementById('skillCount').textContent = '0'
-    document.getElementById('activeDays').textContent = '0'
+    document.getElementById('diaryCount').textContent='0';
+    document.getElementById('diaryBadge').textContent='';
+    document.getElementById('diaryList').innerHTML='<div class="diary-empty"><div class="diary-empty-icon">📝</div>暂无日记</div>';
+  }
+
+  // 画像
+  if(profileRes.code===0&&profileRes.data){
+    const p=profileRes.data.profile||{};
+    const es=profileRes.data.emotion_summary||{};
+    document.getElementById('emotionCount').textContent=es.total_records||0;
+    document.getElementById('skillCount').textContent=p.learned_skills_count||p.learned_skills?.length||0;
+    document.getElementById('activeDays').textContent=p.active_days||p.days_active||0;
+
+    const traits=p.personality_traits||p.traits||[];
+    const interests=p.interests||[];
+    const name=p.name||'';
+    const occupation=p.occupation||'';
+    let html='';
+    if(name)html+='<div class="profile-item"><span class="profile-label">称呼</span><span class="profile-value">'+escHtml(name)+'</span></div>';
+    if(occupation)html+='<div class="profile-item"><span class="profile-label">职业</span><span class="profile-value">'+escHtml(occupation)+'</span></div>';
+    if(traits.length)html+='<div class="profile-item"><span class="profile-label">性格</span><span class="profile-value">'+traits.map(t=>escHtml(t)).join('、')+'</span></div>';
+    if(interests.length)html+='<div class="profile-item"><span class="profile-label">兴趣</span><span class="profile-value">'+interests.map(t=>escHtml(t)).join('、')+'</span></div>';
+    if(!html)html='<div class="profile-empty">暂无画像数据，多在对话中才会逐步建立</div>';
+    else html='<div class="profile-grid">'+html+'</div>';
+    document.getElementById('profileContent').innerHTML=html;
+  }else{
+    document.getElementById('emotionCount').textContent='0';
+    document.getElementById('skillCount').textContent='0';
+    document.getElementById('activeDays').textContent='0';
+    document.getElementById('profileContent').innerHTML='<div class="profile-empty">暂无画像数据</div>';
   }
 }
+
+// 消息通信
 window.addEventListener('message',function(e){
   try{const m=typeof e.data==='object'?e.data:JSON.parse(e.data)
   if(m.type==='deviceChanged'&&m.device){
-    deviceMac=m.device.device_id||m.device.id||m.device.mac||''
-    if(deviceMac)loadData()
+    const newMac=m.device.device_id||m.device.id||m.device.mac||'';
+    if(newMac&&newMac!==deviceMac){deviceMac=newMac;loadData()}
   }}catch{}
-})
+});
 try{window.parent.postMessage({type:'ready'},'*')}catch(e){}
 
-// 从 URL 参数读取设备 ID
-(function(){const did=new URLSearchParams(window.location.search).get('device_id');if(did){deviceMac=did;loadData()}})();
+// URL 参数
+(function(){
+  const did=new URLSearchParams(window.location.search).get('device_id');
+  if(did){deviceMac=did;loadData()}
+})();
 </script>
 </body>
 </html>

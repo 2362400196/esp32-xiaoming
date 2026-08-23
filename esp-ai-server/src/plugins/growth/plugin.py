@@ -1,11 +1,27 @@
 """成长系统插件：用户画像、情绪分析、日记生成、自学习技能。"""
 
+import json
+
 from src.use_cases.tools_system import tool
 from src.use_cases._plugin_helpers import (
     get_device_key,
     get_user_profile_summary,
     llm_generate,
 )
+
+
+@tool()
+async def get_diary_entries(limit: int = 999, tool_manager=None) -> str:
+    """获取日记列表，返回包含完整内容的日记条目 JSON。"""
+    from src.use_cases.growth.diary_service import DiaryService
+    device_id = getattr(tool_manager, 'device_id', '') or get_device_key(tool_manager)
+    if not device_id:
+        return json.dumps({"success": False, "error": "未获取到设备信息"})
+    diary_svc = DiaryService()
+    entries = await diary_svc.get_all_entries(device_id)
+    diary_list = [{"date": e.date, "content": e.content} for e in entries[-limit:]]
+    diary_list.reverse()
+    return json.dumps({"success": True, "count": len(diary_list), "diaries": diary_list}, ensure_ascii=False)
 
 
 @tool()

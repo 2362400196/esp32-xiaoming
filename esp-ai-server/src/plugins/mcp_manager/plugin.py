@@ -17,7 +17,7 @@ async def list_mcp_servers(device_mac: str, tool_manager=None) -> str:
         if not config:
             return f"设备 {device_mac} 未找到或未配置 MCP"
         servers = config.get("mcp_servers", {})
-        disabled_servers = set(config.get("disabled_servers", []))
+        disabled_servers = set(config.get("disabled_mcp_servers", []))
         if not servers:
             return f"设备 {device_mac} 没有配置 MCP 服务器"
         lines = []
@@ -53,8 +53,14 @@ async def add_mcp_server(
             return f"设备 {device_mac} 未找到"
         servers = config.get("mcp_servers", {})
         servers[server_name] = {"type": server_type, "url": server_url, "headers": {}, "auth": {}}
-        # 更新配置
+        # 更新 MCP 服务器配置
         await repo.update(device_id, {"mcp_servers": servers})
+        # 将 MCP 服务器加入 enabled_plugins，确保其工具对 AI 可见
+        mcp_plugin_id = f"mcp:{server_name}"
+        current_plugins = list(config.get("enabled_plugins", []) or [])
+        if current_plugins and mcp_plugin_id not in current_plugins:
+            current_plugins.append(mcp_plugin_id)
+            await repo.update_device_partial(device_id, {"enabled_plugins": current_plugins})
         return f"MCP 服务器「{server_name}」已添加到设备 {device_mac}"
     except Exception as e:
         return f"添加失败: {e}"
@@ -79,6 +85,12 @@ async def remove_mcp_server(device_mac: str, server_name: str, tool_manager=None
             return f"服务器 {server_name} 不存在"
         del servers[server_name]
         await repo.update(device_id, {"mcp_servers": servers})
+        # 从 enabled_plugins 中移除对应的 MCP 虚拟插件
+        mcp_plugin_id = f"mcp:{server_name}"
+        current_plugins = list(config.get("enabled_plugins", []) or [])
+        if current_plugins and mcp_plugin_id in current_plugins:
+            current_plugins = [p for p in current_plugins if p != mcp_plugin_id]
+            await repo.update_device_partial(device_id, {"enabled_plugins": current_plugins})
         return f"MCP 服务器「{server_name}」已移除"
     except Exception as e:
         return f"移除失败: {e}"
@@ -99,12 +111,12 @@ async def toggle_mcp_server(device_mac: str, server_name: str, disabled: bool = 
         device_id, config = await _resolve_device(device_mac)
         if not device_id:
             return f"设备 {device_mac} 未找到"
-        disabled_servers = set(config.get("disabled_servers", []))
+        disabled_servers = set(config.get("disabled_mcp_servers", []))
         if disabled:
             disabled_servers.add(server_name)
         else:
             disabled_servers.discard(server_name)
-        await repo.update(device_id, {"disabled_servers": list(disabled_servers)})
+        await repo.update(device_id, {"disabled_mcp_servers": list(disabled_servers)})
         status = "已禁用" if disabled else "已启用"
         return f"MCP 服务器「{server_name}」{status}"
     except Exception as e:

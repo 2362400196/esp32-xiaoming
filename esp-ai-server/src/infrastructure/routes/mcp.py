@@ -117,6 +117,14 @@ async def update_device_mcp(mac: str, server_name: str, body: MCPServerConfig, u
 
         repo = _get_repo()
         await repo.set_mcp_server(device_id, server_name, server_cfg)
+
+        # 将 MCP 服务器加入 enabled_plugins，确保其工具对 AI 可见
+        mcp_plugin_id = f"mcp:{server_name}"
+        current_plugins = list((_config or {}).get("enabled_plugins", []) or [])
+        if current_plugins and mcp_plugin_id not in current_plugins:
+            current_plugins.append(mcp_plugin_id)
+            await repo.update_device_partial(device_id, {"enabled_plugins": current_plugins})
+
         _hot_reload_device_config(mac)
         return {"code": 0, "message": "ok", "data": server_cfg}
     except Exception as e:
@@ -140,6 +148,14 @@ async def delete_device_mcp(mac: str, server_name: str, user: UserModel = Depend
 
         repo = _get_repo()
         await repo.delete_mcp_server(device_id, server_name)
+
+        # 从 enabled_plugins 中移除对应的 MCP 虚拟插件
+        mcp_plugin_id = f"mcp:{server_name}"
+        current_plugins = list((config or {}).get("enabled_plugins", []) or [])
+        if current_plugins and mcp_plugin_id in current_plugins:
+            current_plugins = [p for p in current_plugins if p != mcp_plugin_id]
+            await repo.update_device_partial(device_id, {"enabled_plugins": current_plugins})
+
         _hot_reload_device_config(mac)
         return {"code": 0, "message": "ok", "data": {"deleted": server_name}}
     except Exception as e:
