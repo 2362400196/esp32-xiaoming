@@ -1,5 +1,7 @@
 """SDK HTTP 请求 - 网络请求工具"""
 
+import asyncio
+
 import httpx
 
 from src.infrastructure.plugin_security import require_permission
@@ -28,9 +30,15 @@ async def http_request(method: str, url: str, *, params: dict | None = None, hea
                 ))
                 req_headers.setdefault("Host", host)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.request(method, url, params=params, headers=req_headers, content=content)
+            # 用 asyncio.wait_for 兜底，防止 httpx 在某些网络环境下超时不生效
+            resp = await asyncio.wait_for(
+                client.request(method, url, params=params, headers=req_headers, content=content),
+                timeout=timeout + 2,
+            )
             resp.raise_for_status()
             return resp, None
+    except asyncio.TimeoutError:
+        return None, TimeoutError(f"请求超时 ({timeout}s)")
     except Exception as e:
         return None, e
 

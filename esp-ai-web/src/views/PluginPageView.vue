@@ -70,6 +70,9 @@ function handleMessage(e) {
 
 async function handleApiCall(msg) {
   const { id, path, method, body } = msg
+  // 用 AbortController 实现 fetch 超时（10 秒），避免请求挂起导致插件前端无响应
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 10000)
   try {
     const token = localStorage.getItem('espai_token') || ''
     const headers = { 'Content-Type': 'application/json' }
@@ -78,11 +81,14 @@ async function handleApiCall(msg) {
       method: method || 'GET',
       headers,
       body: body ? JSON.stringify(body) : null,
+      signal: controller.signal,
     })
+    clearTimeout(timer)
     let data = null
     try { data = await res.json() } catch { data = null }
     sendToPlugin({ type: 'apiResult', id, data: data, status: res.status })
   } catch (e) {
+    clearTimeout(timer)
     sendToPlugin({ type: 'apiResult', id, error: String(e), status: 0 })
   }
 }

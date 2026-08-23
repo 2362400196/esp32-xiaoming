@@ -187,250 +187,256 @@ input:focus { border-color: var(--mint); box-shadow: 0 0 0 3px var(--mint-soft);
 </div>
 
 <script>
-let currentDevice = null;
-let currentTab = 'search';
+	let currentDevice = null;
+	let currentTab = 'search';
 
-function getToken() { return localStorage.getItem('espai_token') || ''; }
+	// === postMessage SDK ===
+	function sdkApi(path, method = 'GET', body = null) {
+	  return new Promise((resolve, reject) => {
+	    const id = Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+	    const handler = function(e) {
+	      try {
+	        const msg = typeof e.data === 'object' ? e.data : JSON.parse(e.data);
+	        if (msg.type === 'apiResult' && msg.id === id) {
+	          window.removeEventListener('message', handler);
+	          if (msg.error) reject(new Error(msg.error));
+	          else resolve(msg.data);
+	        }
+	      } catch {}
+	    };
+	    window.addEventListener('message', handler);
+	    window.parent.postMessage({ type: 'api', id, path, method, body }, '*');
+	    setTimeout(() => { window.removeEventListener('message', handler); reject(new Error('请求超时')); }, 15000);
+	  });
+	}
 
-function showToast(msg) {
-  const old = document.querySelector('.toast');
-  if (old) old.remove();
-  const el = document.createElement('div');
-  el.className = 'toast';
-  el.textContent = msg;
-  document.body.appendChild(el);
-  setTimeout(() => el.remove(), 2200);
-}
+	function api(path, method = 'GET', body = null) {
+	  return sdkApi(path, method, body).then(data => data || {}).catch(e => ({ code: 1, message: e.message }));
+	}
 
-async function api(path, method = 'GET', body = null) {
-  const token = getToken();
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = 'Bearer ' + token;
-  try {
-    const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : null });
-    return await res.json();
-  } catch (e) {
-    return { code: 1, message: String(e) };
-  }
-}
+	function callTool(plugin, tool, args = {}) {
+	  return api('/api/v1/plugins/' + plugin + '/tool/' + tool, 'POST', { args, device_id: deviceId() });
+	}
 
-function deviceId() {
-  return currentDevice?.device_id || currentDevice?.id || '';
-}
+	function callMediaTool(tool, args = {}) {
+	  return callTool('media_player', 'media_' + tool, args);
+	}
 
-// === tab switching ===
-function switchTab(tab) {
-  currentTab = tab;
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelector(`.tab[data-tab="${tab}"]`).classList.add('active');
-  document.querySelectorAll('.tab-content').forEach(tc => tc.style.display = 'none');
-  document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).style.display = 'block';
-  if (tab === 'config') loadConfig();
-  if (tab === 'now') loadNowPlaying();
-}
+	function showToast(msg) {
+	  const old = document.querySelector('.toast');
+	  if (old) old.remove();
+	  const el = document.createElement('div');
+	  el.className = 'toast';
+	  el.textContent = msg;
+	  document.body.appendChild(el);
+	  setTimeout(() => el.remove(), 2200);
+	}
 
-// === search ===
-async function search() {
-  const q = document.getElementById('searchInput').value.trim();
-  if (!q) { showToast('请输入歌名'); return; }
-  const mac = deviceId();
-  if (!mac) { showToast('请先选择设备'); return; }
-  document.getElementById('searchLoading').style.display = 'flex';
-  document.getElementById('searchEmpty').style.display = 'none';
-  document.getElementById('searchResults').innerHTML = '';
-  try {
-    const apiUrl = document.getElementById('cfgApiUrl').value.trim() || '';
-    const url = apiUrl ? apiUrl.replace(/\/+$/, '') + '/stream_pcm?song=' + encodeURIComponent(q) : null;
-    if (!url) {
-      // 通过后端间接搜索
-      const res = await api('/api/v1/plugins/media_player/search?song=' + encodeURIComponent(q) + '&device_id=' + encodeURIComponent(mac));
-      if (res.code === 0) {
-        renderResults(res.data || []);
-      } else {
-        showToast(res.message || '搜索失败');
-      }
-    } else {
-      // 直接搜索
-      const resp = await fetch(url, { headers: { 'Authorization': 'Bearer ' + getToken() } });
-      const data = await resp.json();
-      if (data.success) {
-        renderResults([data]);
-      } else {
-        document.getElementById('searchEmpty').style.display = 'block';
-        document.getElementById('searchEmpty').innerHTML = '<p>未找到歌曲</p>';
-      }
-    }
-  } catch (e) {
-    showToast('搜索失败: ' + e.message);
-  }
-  document.getElementById('searchLoading').style.display = 'none';
-}
+	function deviceId() {
+	  return currentDevice?.device_id || currentDevice?.id || '';
+	}
 
-function renderResults(songs) {
-  const el = document.getElementById('searchResults');
-  if (!songs || songs.length === 0) {
-    document.getElementById('searchEmpty').style.display = 'block';
-    el.innerHTML = '';
-    return;
-  }
-  document.getElementById('searchEmpty').style.display = 'none';
-  el.innerHTML = '<div class="card"><ul class="song-list">' + songs.map(s => `
-    <li class="song-item">
-      <div class="song-info">
-        <div class="song-title">${escHtml(s.title || '未知')}</div>
-        <div class="song-artist">${escHtml(s.artist || '未知')}</div>
-      </div>
-      <div class="song-action">
-        <button class="btn btn-primary btn-sm" onclick="playSong('${escHtml(s.audio_url || '')}')">播放</button>
-      </div>
-    </li>
-  `).join('') + '</ul></div>';
-}
+	// === tab switching ===
+	function switchTab(tab) {
+	  currentTab = tab;
+	  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+	  document.querySelector(`.tab[data-tab="${tab}"]`).classList.add('active');
+	  document.querySelectorAll('.tab-content').forEach(tc => tc.style.display = 'none');
+	  document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).style.display = 'block';
+	  if (tab === 'config') loadConfig();
+	  if (tab === 'now') loadNowPlaying();
+	}
 
-async function playSong(audioUrl) {
-  if (!audioUrl) { showToast('无播放链接'); return; }
-  const mac = deviceId();
-  if (!mac) { showToast('请先选择设备'); return; }
-  const res = await api('/api/v1/plugins/media_player/play', 'POST', {
-    device_id: mac, audio_url: audioUrl
-  });
-  if (res.code === 0) {
-    showToast('已发送播放指令');
-  } else {
-    showToast(res.message || '播放失败');
-  }
-}
+	// === search ===
+	async function search() {
+	  const q = document.getElementById('searchInput').value.trim();
+	  if (!q) { showToast('请输入歌名'); return; }
+	  const mac = deviceId();
+	  if (!mac) { showToast('请先选择设备'); return; }
+	  document.getElementById('searchLoading').style.display = 'flex';
+	  document.getElementById('searchEmpty').style.display = 'none';
+	  document.getElementById('searchResults').innerHTML = '';
+	  try {
+	    const res = await callMediaTool('search_music', { song: q, artist: '' });
+		    if (res && res.code === 0) {
+		      const data = res.data;
+		      if (data && data.success) {
+		        renderResults([data]);
+		      } else {
+		        document.getElementById('searchEmpty').style.display = 'block';
+		        document.getElementById('searchEmpty').querySelector('p').textContent = (data && data.error) || '未找到歌曲';
+	      }
+	    } else {
+	      showToast((res && res.message) || '搜索失败');
+	    }
+	  } catch (e) {
+	    showToast('搜索失败: ' + e.message);
+	  }
+	  document.getElementById('searchLoading').style.display = 'none';
+	}
 
-// === now playing ===
-async function loadNowPlaying() {
-  const el = document.getElementById('nowPlaying');
-  try {
-    const res = await api('/api/v1/plugins/media_player/now');
-    if (res.code === 0 && res.data) {
-      const d = res.data;
-      el.innerHTML = `
-        <div class="now-playing">
-          <div class="title">${escHtml(d.title || '—')}</div>
-          <div class="artist">${escHtml(d.artist || '—')}</div>
-          <div class="status">${d.playing ? '正在播放' : '已停止'}</div>
-        </div>
-      `;
-    } else {
-      el.innerHTML = '<div class="now-playing"><div class="empty">暂无播放信息</div></div>';
-    }
-  } catch {
-    el.innerHTML = '<div class="now-playing"><div class="empty">暂无播放信息</div></div>';
-  }
-}
+	function renderResults(songs) {
+	  const el = document.getElementById('searchResults');
+	  if (!songs || songs.length === 0) {
+	    document.getElementById('searchEmpty').style.display = 'block';
+	    el.innerHTML = '';
+	    return;
+	  }
+	  document.getElementById('searchEmpty').style.display = 'none';
+	  el.innerHTML = '<div class="card"><ul class="song-list">' + songs.map(s => `
+	    <li class="song-item">
+	      <div class="song-info">
+	        <div class="song-title">${escHtml(s.title || '未知')}</div>
+	        <div class="song-artist">${escHtml(s.artist || '未知')}</div>
+	      </div>
+	      <div class="song-action">
+	        <button class="btn btn-primary btn-sm" onclick="playSong('${escHtml(s.audio_url || '')}','${escHtml(s.title || '')}','${escHtml(s.artist || '')}')">播放</button>
+	      </div>
+	    </li>
+	  `).join('') + '</ul></div>';
+	}
+	
+	async function playSong(audioUrl, title, artist) {
+	  if (!audioUrl) { showToast('无播放链接'); return; }
+	  const mac = deviceId();
+	  if (!mac) { showToast('请先选择设备'); return; }
+	  const res = await callMediaTool('play_url', { audio_url: audioUrl, title: title || '', artist: artist || '' });
+	  if (res && res.code === 0) {
+	    showToast('已发送播放指令');
+	  } else {
+	    showToast((res && res.message) || '播放失败');
+	  }
+	}
 
-// === config ===
-async function loadConfig() {
-  const mac = deviceId();
-  if (!mac) return;
-  const res = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/plugins/media_player/config');
-  if (res.code === 0 && res.data) {
-    const cfg = res.data;
-    document.getElementById('cfgApiUrl').value = cfg.api_url || '';
-    document.getElementById('cfgLyricsOffset').value = cfg.lyrics_offset || '';
-  }
-  checkStatus();
-}
+	// === now playing ===
+	async function loadNowPlaying() {
+		  const el = document.getElementById('nowPlaying');
+		  try {
+		    const res = await callMediaTool('get_now_playing', {});
+		    if (res && res.code === 0 && res.data) {
+		      const d = res.data;
+		      el.innerHTML = `
+		        <div class="now-playing">
+		          <div class="title">${escHtml(d.title || '—')}</div>
+		          <div class="artist">${escHtml(d.artist || '—')}</div>
+		          <div class="status">${d.playing ? '正在播放' : '已停止'}</div>
+		        </div>
+		      `;
+		    } else {
+		      el.innerHTML = '<div class="now-playing"><div class="empty">暂无播放信息</div></div>';
+		    }
+		  } catch {
+		    el.innerHTML = '<div class="now-playing"><div class="empty">暂无播放信息</div></div>';
+		  }
+		}
 
-async function saveConfig() {
-  const mac = deviceId();
-  if (!mac) { showToast('请先选择设备'); return; }
-  const apiUrl = document.getElementById('cfgApiUrl').value.trim();
-  const lyricsOffset = document.getElementById('cfgLyricsOffset').value.trim();
-  const res = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/plugins/media_player/config', 'PUT', {
-    api_url: apiUrl, lyrics_offset: lyricsOffset
-  });
-  if (res.code === 0) {
-    showToast('配置已保存');
-    checkStatus();
-  } else {
-    showToast(res.message || '保存失败');
-  }
-}
+	// === config ===
+	async function loadConfig() {
+		  const mac = deviceId();
+		  if (!mac) return;
+		  try {
+		    const res = await callMediaTool('save_config', {});
+			    if (res && res.code === 0) {
+			      const cfg = res.data || {};
+			      document.getElementById('cfgApiUrl').value = cfg.api_url || '';
+		      document.getElementById('cfgLyricsOffset').value = cfg.lyrics_offset || '';
+		    }
+		  } catch (e) {
+		    showToast('加载配置失败: ' + (e.message || e));
+		  }
+		  checkStatus();
+		}
+	
+		async function saveConfig() {
+		  const mac = deviceId();
+		  if (!mac) { showToast('请先选择设备'); return; }
+		  const apiUrl = document.getElementById('cfgApiUrl').value.trim();
+		  const lyricsOffset = document.getElementById('cfgLyricsOffset').value.trim();
+		  try {
+		    const res = await callMediaTool('save_config', { api_url: apiUrl, lyrics_offset: lyricsOffset });
+		    if (res && res.code === 0) {
+		      showToast('配置已保存');
+		      await loadConfig();
+		      checkStatus();
+		    } else {
+		      showToast((res && res.message) || '保存失败');
+		    }
+		  } catch (e) {
+		    showToast('保存失败: ' + (e.message || e));
+		  }
+		}
+	
+		async function checkStatus() {
+		  const dot = document.getElementById('statusDot');
+		  const text = document.getElementById('statusText');
+		  try {
+		    const res = await callMediaTool('test_connection', {});
+		    if (res && res.code === 0) {
+		      if (res.data === 'ok') {
+		        dot.className = 'status-dot on';
+		        text.textContent = '已连接';
+		      } else if (res.data && res.data.startsWith('连接失败')) {
+		        dot.className = 'status-dot off';
+		        text.textContent = '无法连接';
+		      } else {
+		        dot.className = 'status-dot off';
+		        text.textContent = res.data || '未配置音乐服务地址';
+		      }
+		    } else {
+		      dot.className = 'status-dot off';
+		      text.textContent = '未配置音乐服务地址';
+		    }
+		  } catch (e) {
+		    dot.className = 'status-dot off';
+		    text.textContent = '检测失败';
+		  }
+		}
+	
+		async function testConnection() {
+		  showToast('测试中…');
+		  try {
+		    const res = await callMediaTool('test_connection', {});
+		    if (res && res.code === 0) {
+		      if (res.data === 'ok') showToast('连接成功！');
+		      else showToast(res.data || '连接失败');
+		    } else {
+		      showToast((res && res.message) || '连接失败');
+		    }
+		  } catch (e) {
+		    showToast('测试失败: ' + (e.message || e));
+		  }
+		  checkStatus();
+		}
 
-async function checkStatus() {
-  const dot = document.getElementById('statusDot');
-  const text = document.getElementById('statusText');
-  const apiUrl = document.getElementById('cfgApiUrl').value.trim();
-  if (!apiUrl) {
-    // 尝试通过后端检测
-    const res = await api('/api/v1/plugins/media_player/status');
-    if (res.code === 0 && res.data?.connected) {
-      dot.className = 'status-dot on';
-      text.textContent = '已连接（全局配置）';
-    } else {
-      dot.className = 'status-dot off';
-      text.textContent = '未配置音乐服务地址';
-    }
-    return;
-  }
-  try {
-    const resp = await fetch(apiUrl.replace(/\/+$/, '') + '/random', { signal: AbortSignal.timeout(5000) });
-    const data = await resp.json();
-    if (data.success !== undefined) {
-      dot.className = 'status-dot on';
-      text.textContent = '已连接';
-    } else {
-      dot.className = 'status-dot off';
-      text.textContent = '服务异常';
-    }
-  } catch {
-    dot.className = 'status-dot off';
-    text.textContent = '无法连接';
-  }
-}
+	function escHtml(s) {
+	  if (!s) return '';
+	  const d = document.createElement('div');
+	  d.textContent = s;
+	  return d.innerHTML;
+	}
 
-async function testConnection() {
-  const apiUrl = document.getElementById('cfgApiUrl').value.trim();
-  if (!apiUrl) { showToast('请先填写服务地址'); return; }
-  showToast('测试中…');
-  try {
-    const resp = await fetch(apiUrl.replace(/\/+$/, '') + '/random', { signal: AbortSignal.timeout(5000) });
-    const data = await resp.json();
-    if (data.success !== undefined) {
-      showToast('连接成功！');
-    } else {
-      showToast('服务返回异常数据');
-    }
-  } catch {
-    showToast('无法连接到服务');
-  }
-  checkStatus();
-}
+	// === postMessage ===
+	window.addEventListener('message', function(e) {
+	  try {
+	    const msg = typeof e.data === 'object' ? e.data : JSON.parse(e.data);
+	    if (msg.type === 'deviceChanged' && msg.device) {
+	      currentDevice = msg.device;
+	      const mac = deviceId();
+	      document.getElementById('deviceName').textContent = currentDevice?.name || mac || '未选择';
+	      document.getElementById('noDevice').style.display = mac ? 'none' : 'inline';
+	      if (mac && currentTab === 'config') loadConfig();
+	    }
+	  } catch {}
+	});
 
-function escHtml(s) {
-  if (!s) return '';
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
-}
+	try { window.parent.postMessage({ type: 'ready' }, '*'); } catch(e) {}
 
-// === postMessage ===
-window.addEventListener('message', function(e) {
-  try {
-    const msg = typeof e.data === 'object' ? e.data : JSON.parse(e.data);
-    if (msg.type === 'deviceChanged' && msg.device) {
-      currentDevice = msg.device;
-      const mac = deviceId();
-      document.getElementById('deviceName').textContent = currentDevice?.name || mac || '未选择';
-      document.getElementById('noDevice').style.display = mac ? 'none' : 'inline';
-      if (mac && currentTab === 'config') loadConfig();
-    }
-  } catch {}
-});
-
-try { window.parent.postMessage({ type: 'ready' }, '*'); } catch(e) {}
-
-const did = new URLSearchParams(window.location.search).get('device_id');
-if (did) {
-  currentDevice = { device_id: did };
-  document.getElementById('deviceName').textContent = did;
-  document.getElementById('noDevice').style.display = 'none';
-}
-</script>
+	const did = new URLSearchParams(window.location.search).get('device_id');
+	if (did) {
+	  currentDevice = { device_id: did };
+	  document.getElementById('deviceName').textContent = did;
+	  document.getElementById('noDevice').style.display = 'none';
+	}
+	</script>
 </body>
 </html>

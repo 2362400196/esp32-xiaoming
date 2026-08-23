@@ -1,25 +1,42 @@
+import json
 import urllib.parse
 
 from src.infrastructure.logging import get_logger
 from src.infrastructure.config import get_settings
 from src.use_cases.tools_system import StopPipeline, tool
 from src.use_cases._plugin_helpers import (
-    get_plugin_config_or_env,
     get_device_key,
     http_request,
     play_music_url,
+    kv_get,
+    kv_set,
 )
 
 logger = get_logger(__name__)
 
+# 当前播放状态（供前端正在播放页使用）
+_current_playing: dict = {"title": "", "artist": "", "playing": False}
+
+
+def set_now_playing(title: str = "", artist: str = "", playing: bool = True) -> None:
+    """设置当前播放状态。"""
+    _current_playing["title"] = title
+    _current_playing["artist"] = artist
+    _current_playing["playing"] = playing
+
+
+def get_now_playing() -> dict:
+    """获取当前播放状态（返回副本，防止外部修改）。"""
+    return dict(_current_playing)
+
 
 def _resolve_music_api(tool_manager) -> tuple[str, int]:
-    """解析音乐服务地址与歌词偏移，优先级：商店插件配置 > 全局配置（.env MUSIC_API_URL）。"""
-    url = get_plugin_config_or_env(tool_manager, "media_player", "api_url")
+    """解析音乐服务地址与歌词偏移，优先级：KV 存储 > 全局配置（.env MUSIC_API_URL）。"""
+    url = kv_get("api_url", tool_manager=tool_manager)
     if url:
         offset = 0
         try:
-            offset = int(tool_manager.get_plugin_config("media_player", "lyrics_offset", "0") or 0)
+            offset = int(kv_get("lyrics_offset", "0", tool_manager=tool_manager) or 0)
         except ValueError:
             offset = 0
         return url, offset
@@ -140,5 +157,88 @@ async def play_music(song: str = "", artist: str = "", tool_manager=None) -> str
         lyrics_offset=info["lyrics_offset"],
     )
 
+    set_now_playing(title=info["title"], artist=info["artist"], playing=True)
     logger.info(f"[音乐] 已发送: {info['title']} - {info['artist']}, 结果: {result}")
     raise StopPipeline()
+
+
+@tool()
+async def media_save_config(api_url: str = "", lyrics_offset: str = "", tool_manager=None) -> str:
+    """保存音乐服务配置。不传参时返回当前配置。"""
+    if not api_url and not lyrics_offset:
+        cfg = {
+            "api_url": kv_get("api_url", tool_manager=tool_manager) or "",
+            "lyrics_offset": kv_get("lyrics_offset", "0", tool_manager=tool_manager) or "",
+        }
+        return json.dumps(cfg, ensure_ascii=False)
+    if api_url:
+        kv_set("api_url", api_url, tool_manager=tool_manager)
+    if lyrics_offset:
+        kv_set("lyrics_offset", lyrics_offset, tool_manager=tool_manager)
+    return "ok"
+
+
+@tool()
+async def media_search_music(song: str = "", artist: str = "", tool_manager=None) -> str:
+    """搜索音乐。根据歌名搜索，返回歌曲列表 JSON。song 为空时返回随机推荐。"""
+    try:
+        info = await _search_music_api(song, artist, tool_manager)
+        return json.dumps({
+            "success": True,
+            "title": info["title"],
+            "artist": info["artist"],
+            "audio_url": info["audio_url"],
+            "lyric_url": info.get("lyric_url", ""),
+            "duration": info.get("duration", 0),
+        }, ensure_ascii=False)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+    except ConnectionError as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+    except LookupError as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+@tool()
+async def media_play_url(audio_url: str = "", title: str = "", artist: str = "", tool_manager=None) -> str:
+    """播放指定 URL 的音乐。将音频链接发送到设备播放。"""
+    if not audio_url:
+        return "无播放链接"
+    device_key = get_device_key(tool_manager)
+    result = await play_music_url(
+        url=audio_url,
+        title=title or "未知",
+        artist=artist or "未知",
+        device_key=device_key,
+    )
+    if result == "ok":
+        set_now_playing(title=title, artist=artist, playing=True)
+        logger.info(f"[音乐] 前端播放: {title} - {artist}")
+        return "ok"
+    return f"发送失败: {result}"
+
+
+@tool()
+async def media_test_connection(api_url: str = "", tool_manager=None) -> str:
+    """测试音乐服务连接状态。api_url 为空时使用已保存的配置。"""
+    if not api_url:
+        api_url = kv_get("api_url", tool_manager=tool_manager) or ""
+    if not api_url:
+        return "未配置音乐服务地址"
+    try:
+        url = api_url.rstrip("/") + "/random"
+        resp, err = await http_request("GET", url, timeout=5)
+        if err:
+            return f"连接失败: {err}"
+        data = resp.json()
+        if data.get("success") is not None:
+            return "ok"
+        return "服务返回异常数据"
+    except Exception as e:
+        return f"无法连接: {e}"
+
+
+@tool()
+async def media_get_now_playing(tool_manager=None) -> str:
+    """获取当前正在播放的歌曲信息（供前端「正在播放」页使用）。"""
+    return json.dumps(_current_playing, ensure_ascii=False)
