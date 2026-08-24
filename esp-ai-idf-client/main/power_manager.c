@@ -31,9 +31,10 @@ static const char *TAG = "power_mgr";
 #define POWER_CHECK_INTERVAL_MS   1000
 // PA 启用延时：DAC 恢复后等待稳定再开 PA，避免爆音
 #define PA_ENABLE_DELAY_MS        10
-// 屏保延迟：进入待机（等待唤醒）后延迟这么久才显示屏保时钟
-// （对话结束/开机完成先保持正常表情显示，避免屏幕突然变黑）
-#define SCREENSAVER_DELAY_MS      30000
+
+// 屏保配置（默认关闭，30 秒超时）
+static bool s_screensaver_enabled = false;
+static int s_screensaver_timeout_sec = 30;
 
 static esp_timer_handle_t s_timer = NULL;
 static SemaphoreHandle_t s_mutex = NULL;
@@ -121,17 +122,38 @@ static void power_check_callback(void *arg)
         }
     }
 
-    // 屏保延迟触发：进入待机（等待唤醒）后延迟 SCREENSAVER_DELAY_MS 才显示，
-    // 避免对话一结束屏幕立刻变时钟；期间唤醒会重置计时（set_active(true)）
+    // 屏保退出兜底：屏保被禁用时，每次 timer 回调都尝试退出屏保。
+    // 不依赖 s_screensaver_shown 标志（该标志可能在会话结束时被误置为 false，
+    // 导致屏保 UI 仍在显示但软件无法退出），eeui_port_screensaver_set(false)
+    // 内部是幂等的——屏保已退出时立即返回 true。
+    if (!s_screensaver_enabled) {
+        if (eeui_port_screensaver_set(false)) {
+            if (s_screensaver_shown) {
+                s_screensaver_shown = false;
+                ESP_LOGI(TAG, "屏保已禁用，在定时器中成功退出");
+            }
+        } else {
+            ESP_LOGW(TAG, "屏保已禁用但退出失败（LVGL 锁竞争），下次重试");
+        }
+    }
+
+    // 屏保延迟触发：进入待机（等待唤醒）后延迟指定秒数才显示，
+    // （对话结束/开机完成先保持正常表情显示，避免屏幕突然变黑）
     // 注意：音乐播放时不进入屏保（用户听歌时需要看到歌词/进度等信息）
-    if (!s_active && !s_screensaver_shown) {
+    // 可通过 screensaver_enabled 配置完全禁用屏保
+    // 注意：此条件中的 s_screensaver_shown 仅在上述兜底退出成功后才可能为 false
+    if (!s_active && !s_screensaver_shown && s_screensaver_enabled) {
         TickType_t now = xTaskGetTickCount();
         uint32_t idle_ms = (now - s_idle_since_tick) * portTICK_PERIOD_MS;
+        uint32_t timeout_ms = (uint32_t)s_screensaver_timeout_sec * 1000;
         // 如果正在播放音乐，跳过屏保触发
-        if (idle_ms > SCREENSAVER_DELAY_MS && !network_audio_is_playing()) {
-            eeui_port_screensaver_set(true);
-            s_screensaver_shown = true;
-            ESP_LOGI(TAG, "待机 %ums 无交互，进入屏保", idle_ms);
+        if (idle_ms > timeout_ms && !network_audio_is_playing()) {
+            if (eeui_port_screensaver_set(true)) {
+                s_screensaver_shown = true;
+                ESP_LOGI(TAG, "待机 %ums 无交互，进入屏保", idle_ms);
+            } else {
+                ESP_LOGW(TAG, "进入屏保失败（LVGL 锁竞争），下次重试");
+            }
         }
     }
 
@@ -266,15 +288,42 @@ void power_manager_set_active(bool active)
     eeui_port_clear_cards();
     if (active) {
         // 活跃：立即退出屏保，恢复表情显示；重置屏保延迟计时
-        if (s_screensaver_shown) {
-            eeui_port_screensaver_set(false);
+        // 不依赖 s_screensaver_shown 标志（该标志可能因之前退出失败而不准确），
+        // eeui_port_screensaver_set(false) 内部幂等，屏保已退出时立即返回 true。
+        if (eeui_port_screensaver_set(false)) {
             s_screensaver_shown = false;
+        } else {
+            ESP_LOGW(TAG, "活跃时退出屏保失败（LVGL 锁竞争），下次重试");
         }
         s_idle_since_tick = xTaskGetTickCount();
     } else {
         // 待机：不立即进屏保，记录待机起始时间（延迟 SCREENSAVER_DELAY_MS 由定时器触发）
         s_idle_since_tick = xTaskGetTickCount();
-        s_screensaver_shown = false;
+        // 注意：不要将 s_screensaver_shown 置为 false！
+        // 如果屏保 UI 实际仍在显示（之前退出失败），s_screensaver_shown = true 是正确的，
+        // 将其置为 false 会导致后续关闭屏保时无法触发退出逻辑。
     }
     ESP_LOGI(TAG, "会话状态: %s", active ? "活跃" : "待机");
+}
+
+void power_manager_set_screensaver_config(bool enabled, int timeout_sec)
+{
+    s_screensaver_enabled = enabled;
+    if (timeout_sec > 0) {
+        s_screensaver_timeout_sec = timeout_sec;
+    }
+    // 如果用户关闭了屏保，立即尝试退出。
+    // 不依赖 s_screensaver_shown 标志（该标志可能在会话结束时被误置为 false，
+    // 导致屏保 UI 仍在显示但软件无法退出）。
+    // eeui_port_screensaver_set(false) 内部幂等，屏保已退出时立即返回 true。
+    if (!enabled) {
+        if (eeui_port_screensaver_set(false)) {
+            s_screensaver_shown = false;
+            ESP_LOGI(TAG, "屏保已退出（用户关闭屏保）");
+        } else {
+            ESP_LOGW(TAG, "立即退出屏保失败（LVGL 锁竞争），将在定时器中重试");
+        }
+    }
+    ESP_LOGI(TAG, "屏保配置已更新: %s, 超时=%ds",
+             enabled ? "开启" : "关闭", s_screensaver_timeout_sec);
 }

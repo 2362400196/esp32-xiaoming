@@ -52,10 +52,23 @@ ANALYSIS_PROMPT = """你是一个对话分析器。只输出JSON，不要输出�
 ```
 
 规则：
-- 只提取有价值的信息，不要提取闲聊
-- 情绪要准确，不要过度解读
-- skill_candidate只在有明确可复用知识时才填写（如教程、方法、技巧）
-- 如果只是普通聊天，skill_candidate留空
+	- 用户信息（user_info）必须尽量提取，即使只是随口一提的偏好也要记录
+	- 用户说"喜欢/不喜欢/想吃/想学/想做什么"都是重要的偏好，一定要提取到preferences
+	- 用户提到的个人信息（名字、职业、家人、住址等）一定要提取到new_facts
+	- 用户关心的话题、反复提及的事情一定要提取到concerns
+	- 情绪要准确，不要过度解读
+	- skill_candidate在以下情况必须填写：
+	  1. 有明确可复用知识（教程、方法、技巧、步骤）→ 提取
+	  2. AI对自身性格的认知、AI说话风格的偏好、AI对用户的了解总结 → 提取为skill
+	  3. AI对人生、对话、交流的感悟和思考 → 提取为skill
+	  4. AI总结的与用户交流的经验教训 → 提取为skill
+	- 只有完全无内容的闲聊才让skill_candidate留空
+	- 提取AI自我认知时：
+	  - title 填写分类（如"ai性格设定"、"对话风格要求"、"交流原则"）
+	  - content 详细描述AI应该是什么样的，说话方式是什么
+	  - category 填写 "self_growth"
+	  - tags 添加 ["ai_self", "成长"]
+	- new_facts、preferences、concerns 不能为空，至少各留一个空数组
 """
 
 SKILL_EVALUATION_PROMPT = """
@@ -68,15 +81,16 @@ SKILL_EVALUATION_PROMPT = """
 {existing_skills}
 
 请判断：
-1. 这个知识是否值得保存为skill？
-   - 是否可复用？（用户以后还会用到）
-   - 是否有明确的操作步骤？（不是闲聊）
-   - 是否足够通用？（不是一次性的任务）
-
-2. 应该如何处理？
-   - "create_new": 创建新skill（如果和已有skill不相关）
-   - "merge_existing": 合并到现有skill（如果相关）
-   - "skip": 不保存（如果不够有价值）
+	1. 这个知识是否值得保存为skill？
+	   - 如果 category 是 "self_growth"（AI自我认知、性格设定、感悟类），直接保存，不要跳过
+	   - 普通知识：是否可复用？（用户以后还会用到）
+	   - 普通知识：是否有明确的操作步骤？（不是闲聊）
+	   - 普通知识：是否足够通用？（不是一次性的任务）
+	
+	2. 应该如何处理？
+	   - "create_new": 创建新skill（如果和已有skill不相关）
+	   - "merge_existing": 合并到现有skill（如果相关），self_growth类合并到已有 self_growth 的skill
+	   - "skip": 不保存（普通知识不够有价值时跳过，但self_growth不跳过）
 
 返回JSON：
 {{
@@ -230,6 +244,14 @@ class SelfLearningService:
         # 同步到 DB，让设备可以使用新skill
         await self._add_skill_to_device(device_id, skill_name)
 
+        # 注册到 skill_system，让前端 API 和 LLM 能立即看到新skill
+        try:
+            from src.use_cases import skill_system as _skill_system
+            _skill_system.reload()
+            logger.info(f"[Learning] skill '{skill_name}' 已注册到技能系统")
+        except Exception as e:
+            logger.warning(f"[Learning] 注册skill到技能系统失败: {e}")
+
         await self._log_learning(device_id, "create", skill_name, candidate)
         logger.info(f"[Learning] 已创建新skill: {skill_name}")
 
@@ -282,7 +304,26 @@ class SelfLearningService:
         if not self._llm_call:
             return candidate.get("content", "")
 
-        prompt = f"""
+        category = candidate.get("category", "")
+        if category == "self_growth":
+            prompt = f"""
+请根据以下AI自我认知的素材，生成一份完整的AI人格设定文档。
+
+知识标题：{candidate.get('title', '')}
+知识内容：{candidate.get('content', '')}
+
+要求：
+1. 用第一人称"我"来书写
+2. 描述AI的性格特征、说话风格、行为准则
+3. 包含AI对自己与用户关系的理解
+4. 格式为markdown
+5. 语气自然、真诚，像在写自述
+
+返回完整的skill文档内容（不要包含frontmatter）。
+"""
+            system_msg = "你是一个AI人格设定专家，请帮助AI书写自我认知文档。"
+        else:
+            prompt = f"""
 请根据以下知识创建一个skill文档。
 
 知识标题：{candidate.get('title', '')}
@@ -297,12 +338,10 @@ class SelfLearningService:
 
 返回完整的skill文档内容（不要包含frontmatter）。
 """
+            system_msg = "你是一个技能文档编写专家，请创建清晰、实用的技能文档。"
 
         try:
-            return await self._llm_call(
-                "你是一个技能文档编写专家，请创建清晰、实用的技能文档。",
-                prompt,
-            )
+            return await self._llm_call(system_msg, prompt)
         except Exception as e:
             logger.error(f"[Learning] 生成skill内容失败: {e}")
             return candidate.get("content", "")

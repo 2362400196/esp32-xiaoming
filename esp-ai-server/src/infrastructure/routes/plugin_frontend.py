@@ -15,9 +15,12 @@
   }
 """
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+import re
+
+from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import FileResponse, HTMLResponse
 from pathlib import Path
+from pydantic import BaseModel
 
 from src.infrastructure.logging import get_logger
 from src.infrastructure.plugin_loader import (
@@ -129,4 +132,67 @@ async def serve_plugin_frontend(name: str, path: str):
     }
     media_type = media_types.get(ext, "application/octet-stream")
 
+    # 为 HTML 文件注入全局滚动条样式、统一 viewport 和 box-sizing
+    if ext == ".html":
+        try:
+            content = requested.read_text("utf-8")
+            inject = (
+                '<style>'
+                '*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}'
+                'html{scrollbar-width:thin;scrollbar-color:rgba(16,185,129,0.2)transparent}'
+                'body{overflow-x:hidden}'
+                '::-webkit-scrollbar{width:4px}'
+                '::-webkit-scrollbar-track{background:transparent}'
+                '::-webkit-scrollbar-thumb{background:rgba(16,185,129,0.2);border-radius:2px}'
+                '::-webkit-scrollbar-thumb:hover{background:rgba(16,185,129,0.4)}'
+                '</style>'
+            )
+            # 注入到 </head> 之前，若无 head 则注入到 <title> 之后
+            if "</head>" in content:
+                content = content.replace("</head>", inject + "</head>")
+            else:
+                content = content.replace("<title>", inject + "<title>", 1)
+            return HTMLResponse(
+                content=content,
+                media_type=media_type,
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+            )
+        except Exception as e:
+            logger.warning(f"[插件前端] 注入样式失败: {e}")
+
     return FileResponse(str(requested), media_type=media_type)
+
+
+class ExecRequest(BaseModel):
+    """插件 exec 请求体"""
+    method: str
+    args: dict = {}
+
+
+@router.post("/api/v1/plugins/{name}/exec", tags=["plugin-frontend"])
+async def plugin_exec(name: str, body: ExecRequest):
+    """通用插件 exec 桥梁 — 前端调用插件后端能力。
+
+    插件通过在 plugin.py 中定义 ``frontend_api`` 字典来暴露方法给前端。
+    前端通过此接口调用插件后端方法，无需为每个插件注册独立 HTTP 路由。
+    """
+    import importlib
+    try:
+        from src.infrastructure.plugin_loader import _loaded_tools
+        if name not in _loaded_tools:
+            return {"code": 1, "message": f"插件不存在: {name}", "data": None}
+
+        plugin_module = importlib.import_module(f"src.plugins.{name}.plugin")
+        if not hasattr(plugin_module, 'frontend_api'):
+            return {"code": 1, "message": "该插件没有暴露前端 API", "data": None}
+
+        frontend_api = plugin_module.frontend_api
+        if body.method not in frontend_api:
+            return {"code": 1, "message": f"方法 '{body.method}' 不存在", "data": None}
+
+        fn = frontend_api[body.method]
+        result = await fn(**body.args)
+        return {"code": 0, "message": "ok", "data": result}
+    except Exception as e:
+        logger.error(f"[PluginExec] {name}.{body.method} 失败: {e}")
+        return {"code": 1, "message": str(e), "data": None}

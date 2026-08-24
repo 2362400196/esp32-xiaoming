@@ -792,7 +792,11 @@ class WeChatBot:
             if not chunk:
                 break
 
-            await self._send_text_chunk(chat_id, chunk)
+            try:
+                await self._send_text_chunk(chat_id, chunk)
+            except WeChatAPIError as e:
+                logger.warning(f"[WeChat] 发送文本分片失败: {e}")
+                break
             offset += len(chunk)
 
     async def _send_text_chunk(self, chat_id: str, chunk: str) -> None:

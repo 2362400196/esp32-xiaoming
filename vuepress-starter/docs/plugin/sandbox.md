@@ -72,8 +72,10 @@ python -m src.infrastructure.plugin_host.runner <plugin_dir> <plugin_id> <allow_
 子进程启动后立即执行 `scrub_environment()`，只保留白名单中的系统必需变量：
 
 ```
-PATH、SYSTEMROOT、WINDIR、TEMP、TMP、USERPROFILE、HOME、APPDATA、
-LOCALAPPDATA、PYTHONPATH、PYTHONIOENCODING ...（共 27 个）
+PATH、SYSTEMROOT、WINDIR、TEMP、TMP、USERPROFILE、HOMEDRIVE、HOMEPATH、
+	PATHEXT、PROCESSOR_ARCHITECTURE、NUMBER_OF_PROCESSORS、PYTHONPATH、
+	PYTHONIOENCODING、COMSPEC、LC_ALL、LANG、TZ、HOME、APPDATA、LOCALAPPDATA、
+	COMPUTERNAME、USERNAME、SESSIONNAME（共 23 个）
 ```
 
 服务器业务密钥（LLM API Key、JWT 密钥、数据库密码等）全部从 `os.environ` 中删除。插件读到的 `os.environ` 是"洗过"的空壳。
@@ -89,9 +91,14 @@ LOCALAPPDATA、PYTHONPATH、PYTHONIOENCODING ...（共 27 个）
 以下模块一律拒绝：
 
 ```
-importlib / ctypes / marshal / pickle / subprocess / multiprocessing
-socket / ssl / http.client / urllib.request / httpx / requests / aiohttp
-sqlite3 / shutil / tempfile / zipfile / tarfile / gzip / os.system 相关
+importlib / ctypes / marshal / pickle / shelve / subprocess / multiprocessing
+socket / ssl / http.client / http.server / urllib.request / urllib.response
+httpx / requests / aiohttp / urllib3 / websockets / websocket
+sqlite3 / sqlalchemy / pymysql / psycopg / aiomysql
+shutil / tempfile / zipfile / tarfile / gzip / bz2 / lzma / zlib
+pty / pwd / grp / spwd / resource / pdb / distutils / setuptools / pip
+smtplib / ftplib / telnetlib / imaplib / poplib
+msvcrt / curses / tkinter / winreg / configparser / email / platform / gc / signal
 以及服务器内部模块 src.* 的全部真实实现
 ```
 
@@ -135,13 +142,20 @@ sqlite3 / shutil / tempfile / zipfile / tarfile / gzip / os.system 相关
 
 | SDK 操作 | 需要的权限 | 说明 |
 |----------|-----------|------|
-| `device_send_instruct` / `device_send_command` / 设备回执 | `device` | 给设备下发指令 |
+| `device_send_instruct` / `device_send_command` / `device_send_command_ack` / `device_request_result` | `device` | 给设备下发指令 |
+| `device_is_online` / `device_get_info` | `device` | 设备在线状态查询 |
 | `http_request` / `http_get_json` | `network` | 外部 HTTP 请求（含 SSRF 防护） |
 | `ltm_store` / `ltm_recall` / `ltm_list_all` / `ltm_update` / `ltm_forget` | `ltm` | 长期记忆读写 |
 | `diary_get_recent` / `diary_upsert_entry` / `diary_search` | `db` | 日记数据 |
 | `device_config_get` / `device_config_update_partial` | `db` | 设备配置 |
+| `get_user_profile_summary` | `db` | 用户画像查询 |
 | `env_read` | `env_read` | 读环境变量（仅白名单变量） |
-| `device_key` / `resolve_device_key` / `plugin_config` / `skill_catalog` | 无需权限 | 只读基础信息 |
+| `llm_chat` / `llm_generate` | `llm` | LLM 对话/文本生成 |
+| `tts_synthesize` | `tts` | 文本转语音合成 |
+| `plugin_data_read` / `plugin_data_list` | `file_read` | 读取插件数据目录 |
+| `plugin_data_write` / `plugin_data_delete` | `file_write` | 写入插件数据目录 |
+| `kv_get` / `kv_set` / `kv_delete` / `kv_list` | `kv` | 键值存储读写 |
+| `device_key` / `resolve_device_key` / `plugin_config` / `skill_catalog` / `plugin_log` | 无需权限 | 只读基础信息 |
 
 #### 权限白名单语义
 
@@ -149,13 +163,14 @@ sqlite3 / shutil / tempfile / zipfile / tarfile / gzip / os.system 相关
 
 | permissions | 插件能做什么 |
 |-------------|-------------|
-| `[]`（默认） | 只能读设备 key、插件配置、技能目录，其余全部被拒 |
+| `[]`（默认） | 只能读设备 key、插件配置、技能目录、写日志，其余全部被拒 |
 | `["network"]` | 可发外部 HTTP 请求 |
 | `["device"]` | 可给设备下发指令、查询设备在线状态与信息 |
 | `["ltm"]` | 可读写长期记忆 |
 | `["db"]` | 可读写数据库（日记、设备配置、用户画像） |
 | `["env_read"]` | 可读白名单内的环境变量 |
-| `["file_read", "file_write"]` | 可读写插件数据目录与状态目录 |
+| `["file_read"]` | 可读插件数据目录与状态目录 |
+| `["file_write"]` | 可写插件数据目录与状态目录 |
 | `["llm"]` | 可调用 LLM 对话（`llm_chat` / `llm_generate`） |
 | `["tts"]` | 可调用 TTS 语音合成 |
 | `["kv"]` | 可使用插件键值存储（`kv_get` / `kv_set` / `kv_delete` / `kv_list`） |

@@ -362,6 +362,48 @@
           </div>
         </section>
 
+        <!-- ============ 显示 ============ -->
+        <section v-else-if="activeTab === 'display'" key="display" class="tab-pane">
+          <div class="block">
+            <div class="toggle-row">
+              <div class="toggle-label">
+                <p class="toggle-title">机器人模式</p>
+                <p class="toggle-sub">只显示表情 GIF，隐藏所有文字、WiFi、电量、音量图标及横条</p>
+              </div>
+              <button class="ios-toggle" :class="{ on: robotMode }" @click="toggleRobotMode">
+                <span class="knob"></span>
+              </button>
+            </div>
+            <p class="form-tip" style="margin-top: 10px;">开启后设备屏幕仅显示表情，适合纯机器人展示场景</p>
+          </div>
+
+          <div class="block-divider"></div>
+
+          <div class="block">
+            <div class="toggle-row">
+              <div class="toggle-label">
+                <p class="toggle-title">屏保</p>
+                <p class="toggle-sub">待机后自动显示时钟屏保，点击 toggle 刷新</p>
+              </div>
+              <button class="ios-toggle" :class="{ on: screensaverEnabled }" @click="toggleScreensaver">
+                <span class="knob"></span>
+              </button>
+            </div>
+          </div>
+
+          <div class="block" v-if="screensaverEnabled">
+            <p class="block-label">屏保超时（秒）</p>
+            <div class="input-wrap" style="display:flex;align-items:center;gap:10px;">
+              <input class="input" type="number" min="5" max="600"
+                v-model.number="screensaverTimeout" placeholder="30" style="flex:1;" />
+              <span class="form-tip" style="margin:0;white-space:nowrap;">{{ screensaverTimeout || 30 }} 秒无操作后进入屏保</span>
+            </div>
+            <div style="margin-top:10px;">
+              <button class="btn-ghost" @click="saveScreensaver">应用屏保设置</button>
+            </div>
+          </div>
+        </section>
+
         </transition>
       </div>
 
@@ -397,6 +439,9 @@ const showKey = ref({ bytedance: false, tencent: false, deepseek: false, tts: fa
 const asrEngine = ref('bytedance')
 const ttsModel = ref('seed-tts-2.0')
 const cloneVoices = ref([])
+const robotMode = ref(false)
+const screensaverEnabled = ref(true)
+const screensaverTimeout = ref(30)
 const form = ref({})
 
 const tabs = [
@@ -404,6 +449,7 @@ const tabs = [
   { id: 'llm', label: '大模型' },
   { id: 'tts', label: '语音合成' },
   { id: 'wakeup', label: '唤醒' },
+  { id: 'display', label: '显示' },
 ]
 const asrEngines = [
   { id: 'bytedance', name: '字节跳动' },
@@ -479,6 +525,9 @@ async function load() {
     ttsModel.value = cfg.tts_config?.resource_id || 'seed-tts-2.0'
     customPrompt.value = !!form.value.llm_system_prompt
     memoryOn.value = cfg.llm?.memory_enabled === true || cfg.llm?.memory_enabled === undefined
+    robotMode.value = cfg.robot_mode === 'true' || cfg.robot_mode === true
+    screensaverEnabled.value = cfg.screensaver_enabled === undefined || cfg.screensaver_enabled === 'true' || cfg.screensaver_enabled === true
+    screensaverTimeout.value = cfg.screensaver_timeout ? parseInt(cfg.screensaver_timeout) : 30
     loadCloneVoices()
   }
   loading.value = false
@@ -498,6 +547,50 @@ async function loadCloneVoices() {
 function selectTtsModel(type) {
   ttsModel.value = type
   if (type === 'seed-icl-2.0') loadCloneVoices()
+}
+
+async function toggleRobotMode() {
+  const mac = props.device?.mac
+  if (!mac) return
+  const enabled = !robotMode.value
+  robotMode.value = enabled
+  const res = await api.setDisplayConfig(mac, { robot_mode: enabled })
+  if (res.status !== 200 || res.data?.code !== 0) {
+    robotMode.value = !enabled
+    emit('toast', '设置失败: ' + (res.data?.message || res.data?.detail || ''))
+  } else {
+    emit('toast', enabled ? '机器人模式已开启' : '机器人模式已关闭')
+  }
+}
+
+async function toggleScreensaver() {
+  const mac = props.device?.mac
+  if (!mac) return
+  const enabled = !screensaverEnabled.value
+  screensaverEnabled.value = enabled
+  const res = await api.setDisplayConfig(mac, { screensaver_enabled: enabled })
+  if (res.status !== 200 || res.data?.code !== 0) {
+    screensaverEnabled.value = !enabled
+    emit('toast', '设置失败: ' + (res.data?.message || res.data?.detail || ''))
+  } else {
+    emit('toast', enabled ? '屏保已开启' : '屏保已关闭')
+  }
+}
+
+async function saveScreensaver() {
+  const mac = props.device?.mac
+  if (!mac) return
+  const timeout = Math.max(5, Math.min(600, screensaverTimeout.value || 30))
+  screensaverTimeout.value = timeout
+  const res = await api.setDisplayConfig(mac, {
+    screensaver_enabled: true,
+    screensaver_timeout: timeout,
+  })
+  if (res.status !== 200 || res.data?.code !== 0) {
+    emit('toast', '设置失败: ' + (res.data?.message || res.data?.detail || ''))
+  } else {
+    emit('toast', '屏保超时已设为 ' + timeout + ' 秒')
+  }
 }
 
 async function save() {
@@ -703,6 +796,8 @@ async function save() {
 .collapse-body { margin-top: 8px; display: flex; flex-direction: column; gap: 14px; }
 
 .settings-textarea { min-height: 80px; resize: vertical; }
+
+.block-divider { height: 1px; background: var(--glass-border-soft); margin: 4px 0; }
 
 /* 底部按钮区 */
 .settings-foot {

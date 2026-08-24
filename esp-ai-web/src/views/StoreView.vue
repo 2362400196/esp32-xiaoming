@@ -600,10 +600,10 @@ onMounted(() => {
 .page-info { font-size: 13px; color: var(--text-sub); }
 
 /* ===== 弹窗样式 ===== */
-.detail-mask { 
-  position: fixed; inset: 0; z-index: 220; 
-  display: flex; align-items: center; justify-content: center; 
-  background: rgba(15, 23, 42, 0.4); backdrop-filter: blur(12px) saturate(140%); 
+.detail-mask {
+  position: fixed; inset: 0; z-index: 220;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(15, 23, 42, 0.45); backdrop-filter: blur(12px) saturate(140%);
   -webkit-backdrop-filter: blur(12px) saturate(140%);
 }
 .detail-panel { 
@@ -702,6 +702,11 @@ onMounted(() => {
   position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
   width: 360px; max-width: 88vw; padding: 32px 28px 24px; border-radius: 16px;
   z-index: 2000; text-align: center;
+  background: var(--grad-panel);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--shadow-hover), var(--glass-hi);
 }
 .confirm-icon { margin-bottom: 16px; }
 .confirm-title { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
@@ -711,8 +716,8 @@ onMounted(() => {
   min-width: 100px; padding: 8px 20px; border-radius: 8px; border: none;
   font-size: 14px; cursor: pointer; transition: all .2s;
 }
-.btn-cancel { background: var(--bg-secondary); color: var(--text); }
-.btn-cancel:hover { background: var(--bg-tertiary); }
+.btn-cancel { background: rgba(255,255,255,0.6); color: var(--text-sub); border: 1px solid var(--glass-border); }
+.btn-cancel:hover { border-color: var(--mint-border); background: var(--mint-softer); color: var(--mint-deep); }
 .btn-danger { background: var(--danger); color: #fff; }
 .btn-danger:hover { opacity: .85; }
 

@@ -122,7 +122,12 @@ class DiaryService:
         is_continuation: bool = False,
     ) -> Optional[str]:
         """写今天的日记（追加模式）"""
-        recent_diaries = await self._get_recent_diaries(device_id, limit=3)
+        today = datetime.now().strftime("%Y-%m-%d")
+        # 续写模式下排除今日日记，避免 recent_diaries 和续写 prompt 出现两遍相同内容
+        recent_diaries = await self._get_recent_diaries(
+            device_id, limit=3,
+            exclude_date=today if is_continuation else None,
+        )
 
         if not user_name:
             user_name = self._extract_name_from_profile(user_profile)
@@ -148,13 +153,18 @@ class DiaryService:
         if is_continuation and today_entry:
             prompt += f"""
 
-## 今天的日记（已有内容）
+## 今天的日记（已有内容——请勿重复）
 {today_entry}
 
 ---
-请在已有日记的基础上，追加新的内容。
-不要重复已有内容，只写新发生的事和新感受。
-用自然的方式衔接，比如"对了，刚才..."、"还有..."、"补充一下..."等。
+这是你今天已经写过的内容。**只看不写**——了解今天已经写过什么，然后只写**下面新对话中发生的新事情**。
+
+### 续写要求
+- 严格禁止重复已有内容中的任何段落、感受和描述
+- 只写"新对话记录"部分出现的新对话、新互动
+- 用自然的方式衔接，比如"对了，刚才..."、"还有..."、"补充一下..."等
+- 如果新对话内容很少（比如只有几句闲聊），可以简短带过，不用强行写长
+- 如果新对话和已有内容重复（比如同一个话题继续聊），只写新进展，不要重新描述背景
 """
 
         if not self._llm_call:
@@ -187,18 +197,26 @@ class DiaryService:
         logger.info(f"[Diary] 已{'追加' if is_continuation else '写入'}日记: {device_id}/{today}")
         return diary_content
 
-    async def _get_recent_diaries(self, device_id: str, limit: int = 3) -> str:
-        """获取最近的日记（用于保持连贯性）"""
+    async def _get_recent_diaries(self, device_id: str, limit: int = 3, exclude_date: str = None) -> str:
+        """获取最近的日记（用于保持连贯性）
+
+        Args:
+            device_id: 设备ID
+            limit: 返回条目数
+            exclude_date: 排除指定日期的日记（续写模式下排除今日，避免重复）
+        """
         entries = await self._repo.get_recent(device_id, limit=limit)
         if not entries:
             return "还没有日记"
 
         parts = []
         for e in entries:
+            if exclude_date and e["date"] == exclude_date:
+                continue
             summary = e["content"][:300] + "..." if len(e["content"]) > 300 else e["content"]
             parts.append(f"### {e['date']}\n{summary}")
 
-        return "\n\n".join(parts)
+        return "\n\n".join(parts) if parts else "还没有日记"
 
     async def get_diary_content(self, device_id: str, date: str) -> Optional[str]:
         """获取指定日期的日记"""

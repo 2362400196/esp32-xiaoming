@@ -196,6 +196,7 @@ class ConversationPipeline:
             "- 你拥有可用的工具函数（tool functions）。当用户请求**操作类任务**（如调整音量/开关灯/播放音乐/查询信息/执行代码等）时，**必须通过调用对应的工具函数来完成**，不能只口头回复。\n"
             "- 如果用户的问题只需要知识和对话就能回答（如闲聊/问意见/讲故事），则正常用文字回复，不需要调用工具。\n"
             "- 调用工具后，根据工具返回的结果组织回答，输出给用户。\n"
+            "- 当用户要求记住客观事实、偏好、身份信息等长期信息时（如'帮我记住/记录一下我爱吃西瓜'），使用 memory_store 存为长期记忆，不要用 write_diary。write_diary 只用于记录心情、想法、经历等日记内容。\n"
             "[/工具调用规则]"
         )
 
@@ -488,6 +489,10 @@ class ConversationPipeline:
 
         if stop_pipeline:
             logger.info("[Pipeline] StopPipeline: 工具已接管音频通道，跳过 end_frame/tts_real_end")
+        elif self.cancel_event.is_set():
+            # cancel_event 在 send_session_end 时被设置，表示会话已结束或新唤醒已打断
+            # 此时再发送 end_frame 会占用 channel，导致新唤醒的"叮"无法及时发送而超时
+            logger.info("[Pipeline] cancel_event 已设置，跳过 end_frame/tts_real_end")
         elif self._play_audio_sent:
             # status="02"：继续对话语义，设备 drain 后不会恢复唤醒/闪"等待唤醒"，直接进入下一轮聆听
             await self.channel.send_bytes(self.voice_generator.make_end_frame(self.config.tts_session_id, status="02"))

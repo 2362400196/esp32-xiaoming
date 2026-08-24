@@ -193,6 +193,11 @@ async function api(path, method = 'GET', body = null) {
   }
 }
 
+// 插件 exec 桥梁 — 前端调用插件后端 SDK
+async function execApi(method, args = {}) {
+  return await api('/api/v1/plugins/wechat_bot/exec', 'POST', { method, args });
+}
+
 async function startQr() {
   document.getElementById('qrPlaceholder').style.display = 'flex';
   document.getElementById('qrPlaceholder').innerHTML = '<div class="spinner"></div><p>正在生成二维码…</p>';
@@ -200,7 +205,7 @@ async function startQr() {
   document.getElementById('qrActions').style.display = 'none';
   document.getElementById('qrRegenBtn').style.display = 'none';
 
-  const res = await api('/api/v1/wechat/qr-start', 'POST');
+  const res = await execApi('qr_start');
   if (res.code === 0 && res.data) {
     document.getElementById('qrPlaceholder').style.display = 'none';
     document.getElementById('qrImageWrap').style.display = 'flex';
@@ -215,7 +220,7 @@ async function startQr() {
 
 async function pollStatus() {
   try {
-    const res = await api('/api/v1/wechat/qr-status');
+    const res = await execApi('qr_status');
     if (res.code === 0 && res.data) {
       if (res.data.configured) {
         document.getElementById('qrActions').style.display = 'none';
@@ -251,8 +256,8 @@ function stopPolling() {
 }
 
 async function applyToken() {
-  const res = await api('/api/v1/wechat/apply-token', 'POST');
-  if (res.code === 0) {
+  const res = await execApi('apply_token');
+  if (res.code === 0 && res.data?.ok) {
     botToken = '';
     showToast('微信已登录，轮询已启动');
     showLoginState(true);
@@ -263,7 +268,7 @@ async function applyToken() {
 }
 
 async function cancelQr() {
-  try { await api('/api/v1/wechat/qr-cancel', 'POST'); } catch {}
+  try { await execApi('qr_cancel'); } catch {}
   stopPolling();
   document.getElementById('qrImageWrap').style.display = 'none';
   document.getElementById('qrActions').style.display = 'none';
@@ -273,7 +278,7 @@ async function cancelQr() {
 }
 
 async function loadBindings() {
-  const res = await api('/api/v1/wechat/bindings');
+  const res = await execApi('bindings');
   if (res.code === 0 && res.data) {
     bindings = res.data;
     renderBindings();
@@ -308,7 +313,7 @@ function renderBindings() {
 }
 
 async function unbind(deviceKey) {
-  const res = await api('/api/v1/wechat/unbind', 'POST', { device_key: deviceKey });
+  const res = await execApi('unbind', { device_key: deviceKey });
   if (res.code === 0) {
     showToast('解绑成功');
     await loadBindings();
@@ -337,7 +342,7 @@ function escapeHtml(s) {
 
 // 初始加载检查
 async function init() {
-  const res = await api('/api/v1/wechat/qr-status');
+  const res = await execApi('qr_status');
   if (res.code === 0 && res.data?.configured) {
     showLoginState(true);
     loadBindings();

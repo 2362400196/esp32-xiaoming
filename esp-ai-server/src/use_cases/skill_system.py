@@ -68,6 +68,7 @@ _skills_by_id: dict[str, SkillEntry] = {}
 _skills_by_device: dict[str, list[SkillEntry]] = {}  # device_id → [skills]
 _global_skills: list[SkillEntry] = []
 _skills_dir: str = ""
+_data_dir: str = ""  # 设备自学习技能的数据目录
 
 
 def init(skills_root_dir: str, data_dir: str = "") -> None:
@@ -77,8 +78,9 @@ def init(skills_root_dir: str, data_dir: str = "") -> None:
     同时扫描 data_dir/devices/*/skills 目录，加载设备自学习的技能。
     不再区分 global/devices，设备的技能归属完全由 DB 的 skills 列表控制。
     """
-    global _skills_dir
+    global _skills_dir, _data_dir
     _skills_dir = skills_root_dir
+    _data_dir = data_dir
     _skills_by_id.clear()
     _skills_by_device.clear()
     _global_skills.clear()
@@ -97,7 +99,7 @@ def init(skills_root_dir: str, data_dir: str = "") -> None:
 def reload() -> None:
     """重新加载所有技能（热更新用）"""
     if _skills_dir:
-        init(_skills_dir)
+        init(_skills_dir, _data_dir)
 
 
 def _scan_directory(directory: str, device_id: str = "") -> None:
@@ -147,8 +149,8 @@ def _scan_device_skills(data_dir: str) -> None:
         for skill_entry in os.scandir(skills_dir):
             if not skill_entry.is_dir():
                 continue
-            # 用 MAC 作为 device_id，这样 API 查询时能匹配
-            skill = _load_skill(skill_entry.path, device_id=device_mac)
+            # 用 device_key 作为 device_id，与 pipeline/API 传入的 device_id 保持一致
+            skill = _load_skill(skill_entry.path, device_id=device_key)
             if skill:
                 count += 1
 
@@ -488,7 +490,9 @@ def render_skills_catalog(device_id: str = "", skills: list[str] | None = None, 
 
     for entry in catalog:
         doc = get_skill_document(entry.id) or ""
-        if len(doc) <= 500:
+        # self_growth 类技能（AI人格/自我认知）始终内联，不受长度限制
+        is_self_growth = entry.category and "self_growth" in entry.category
+        if is_self_growth or len(doc) <= 500:
             lines.append(f"### 技能: {entry.id}")
             lines.append(f"触发条件: {entry.description}")
             lines.append(f"执行规则:\n{doc}")

@@ -25,7 +25,7 @@ async def read_diary(days: int = 7, tool_manager=None) -> str:
 
 @tool()
 async def write_diary(content: str, tool_manager=None) -> str:
-    """手动写一篇日记。当你想要记录今天的心情、想法或重要的事情时使用。
+    """手动写一篇日记。用于记录今天的心情、想法、经历或反思感悟，不要用来存储用户要求记住的客观事实（长期事实请使用 memory_store）。
     参数:
         content: 日记内容（Markdown 格式）
     """

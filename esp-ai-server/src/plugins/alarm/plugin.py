@@ -148,7 +148,8 @@ def _update_stats(action: str) -> None:
 
 @tool()
 async def set_reminder(text: str, time: str, repeat: str = "once", tool_manager=None) -> str:
-    """设置一个提醒，到时间后设备会语音播报提醒内容，同时发送微信消息通知。
+    """设置一个提醒，到时间后设备会语音播报提醒内容。
+    当用户说"提醒我xxx"、"记得xxx"、"待会儿提醒我"时调用。
     参数:
         text: 提醒内容
         time: 触发时间，支持"30秒"/"5分钟"/"14:30"/"2026-07-28 14:30"等格式（最小精度1秒）
@@ -175,6 +176,7 @@ async def set_reminder(text: str, time: str, repeat: str = "once", tool_manager=
 @tool()
 async def set_alarm(time: str, repeat: str = "once", song: str = "", tool_manager=None) -> str:
     """设置闹钟，到时间后设备会播放音乐。
+    当用户说"设个闹钟"、"几点叫我"、"早上叫我"时调用。设置提醒用 set_reminder 工具，不要用此工具。
     参数:
         time: 闹钟时间，支持"30秒"/"5分钟"/"14:30"/"2026-07-28 14:30"等格式（最小精度1秒）
         repeat: 重复模式 once/daily/weekly/monthly
@@ -227,7 +229,8 @@ async def set_sleep_timer(time: str, tool_manager=None) -> str:
 
 @tool()
 async def list_alarms(tool_manager=None) -> str:
-    """列出当前设备所有闹钟、提醒和睡眠定时器。
+    """查询已设置的闹钟、提醒和睡眠定时器列表。
+    当用户问"查一下我的闹钟"、"我设了哪些提醒"、"有什么闹钟"、"还有多久"、"查看闹钟"时调用。
     返回结果中每条记录的 ID 字段即为 alarm_id，可用于 cancel_alarm 工具删除对应条目。"""
     device_key = get_device_key(tool_manager)
     alarms = get_alarm_manager().list_alarms(device_key)
@@ -260,8 +263,9 @@ async def cancel_alarm(alarm_id: str, tool_manager=None) -> str:
 
 @tool()
 async def smart_alarm(description: str, tool_manager=None) -> str:
-    """智能闹钟：用自然语言描述闹钟需求，AI 自动解析并设置。
-    示例：用户说"明天早上8点叫我去跑步"、"半小时后提醒我关火"、"每周一早上9点开晨会提醒"。
+    """智能闹钟/提醒：用自然语言描述，AI 自动解析并设置闹钟或提醒。
+    当用户说"明天早上8点叫我去跑步"、"半小时后提醒我关火"、"每周一早上9点开晨会提醒"时调用。
+    此工具会自动判断是设闹钟还是提醒，无需用户区分。
     参数:
         description: 自然语言描述，如"明天早上7点叫我起床"
     """
@@ -326,7 +330,8 @@ async def smart_alarm(description: str, tool_manager=None) -> str:
 
 @tool()
 async def alarm_stats(tool_manager=None) -> str:
-    """查看闹钟使用统计，包括设置次数、常用时间、最近一周的闹钟数量等。"""
+    """查看闹钟和提醒的使用统计，包括设置次数、最近一周的闹钟数量等。
+    当用户问"我用了多少次闹钟"、"闹钟统计"、"使用情况"时调用。"""
     device_key = get_device_key(tool_manager)
     stats = _read_data("stats.json")
     history_data = _read_data("history.json")

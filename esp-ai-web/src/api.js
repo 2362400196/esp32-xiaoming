@@ -176,6 +176,8 @@ getActiveEmoPack: (deviceId) => request('/api/v1/emos/active/' + encodeURICompon
   // 快捷指令：真实执行功能（weather/music/alarm/diary/chat）
   deviceAction: (id, action, text = '') =>
     request('/api/v1/devices/' + encodeURIComponent(id) + '/action', 'POST', { action, text }),
+  setRobotMode: (mac, enabled) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/robot_mode', 'POST', { enabled }),
+  setDisplayConfig: (mac, config) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/display_config', 'POST', config),
     // 管理员后台
     adminStats: () => request('/api/v1/admin/stats'),
     adminUsers: () => request('/api/v1/admin/users'),

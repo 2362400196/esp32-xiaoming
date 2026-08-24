@@ -400,6 +400,178 @@ const data = await api('/api/v1/plugins/weather/tool/test_weather_query', {
 
 **原理：** 后端通过 `get_tool(tool_name)` 获取工具定义，注入 `tool_manager` 上下文（含设备插件配置），然后调用插件工具函数。所有插件共用此接口，无需为每个插件单独建路由。
 
+## 插件后端 SDK 调用（exec 桥梁）
+
+::: tip 设计原则
+插件前端如果需要调用后端能力（读/写数据库、操作设备配置等），**不需要为每个插件创建独立 HTTP 路由**。只需在 `plugin.py` 中声明 `frontend_api` 字典，前端通过通用 exec 桥梁调用即可。
+:::
+
+### 架构
+
+```
+插件前端 (index.html)                   插件后端 (plugin.py)
+       │                                       │
+       │  POST /api/v1/plugins/{name}/exec      │
+       │  { method: "get_data", args: {...} }   │
+       └──────────────→  exec 桥梁 ──→  frontend_api 字典
+                       ←───────────────
+                       返回 { code: 0, data: ... }
+```
+
+### 后端：声明 frontend_api
+
+在 `plugin.py` 中定义一个 `frontend_api` 字典，键为方法名，值为异步函数：
+
+```python
+"""插件后端"""
+
+from src.infrastructure.db.repositories.device_repository import DeviceRepository
+
+
+async def _api_get_data(mac: str) -> list:
+    """获取设备数据"""
+    repo = DeviceRepository()
+    config = await repo.get_device_config(mac)
+    if not config:
+        raise ValueError("设备不存在")
+    return config.get("my_data", [])
+
+
+async def _api_save_data(mac: str, name: str, value: str) -> dict:
+    """保存数据"""
+    repo = DeviceRepository()
+    config = await repo.get_device_config(mac)
+    if not config:
+        raise ValueError("设备不存在")
+    # 数据修改逻辑...
+    return {"saved": True}
+
+
+frontend_api = {
+    "get_data": _api_get_data,
+    "save_data": _api_save_data,
+}
+```
+
+**规则：**
+- `frontend_api` 必须是模块级变量，在 `plugin.py` 顶层定义
+- 每个方法接受 `mac`（设备标识）作为第一个参数，自动由 `execApi` 注入
+- 方法返回任意可 JSON 序列化的数据，桥梁自动包装为 `{code: 0, data: 返回值}`
+- 抛出异常时，桥梁自动捕获并返回 `{code: 1, message: 错误信息}`
+- 方法内部可以调用任何 SDK 方法（`DeviceRepository`、`speaker`、`http_get_json` 等）
+
+### 前端：调用 execApi
+
+前端使用 `execApi` 封装函数，无需手动拼接 URL 或管理 JWT Token：
+
+```javascript
+// execApi 封装 — 自动注入设备 MAC
+async function execApi(method, args = {}) {
+  const mac = deviceMac();
+  if (!mac) return { code: 1, message: '设备未选择' };
+  args.mac = mac;
+  return await api('/api/v1/plugins/my_plugin/exec', {
+    method: 'POST',
+    body: { method, args }
+  });
+}
+```
+
+调用示例：
+
+```javascript
+// 获取数据
+const res = await execApi('get_data');
+if (res.code === 0) {
+  console.log(res.data);  // 数据列表
+}
+
+// 保存数据
+const res = await execApi('save_data', { name: '音量', value: '80' });
+if (res.code === 0) {
+  showToast('保存成功');
+}
+```
+
+### 完整示例：MCP 服务器管理
+
+以下是 MCP 管理器插件使用 exec 桥梁的简化示例：
+
+**后端（plugin.py）：**
+```python
+from src.infrastructure.db.repositories.device_repository import DeviceRepository
+
+repo = DeviceRepository()
+
+async def get_servers(mac: str) -> dict:
+    return await repo.get_mcp_servers(mac)
+
+async def toggle_server(mac: str, server_name: str, disabled: bool) -> dict:
+    device_id, _ = await repo.resolve_device(mac)
+    await repo.toggle_mcp_server(device_id, server_name, disabled)
+    return {"disabled": disabled}
+
+async def get_tools(mac: str, server_name: str) -> list:
+    from src.use_cases.tools_system import MCPClient
+    mcp_servers = await repo.get_mcp_servers(mac)
+    cfg = mcp_servers.get(server_name)
+    client = MCPClient(cfg["url"])
+    await client.connect()
+    schemas = client.get_tools_schema()
+    await client.disconnect()
+    return [{"name": s["function"]["name"]} for s in schemas]
+
+frontend_api = {
+    "get_servers": get_servers,
+    "toggle_server": toggle_server,
+    "get_tools": get_tools,
+}
+```
+
+**前端（index.html）：**
+```javascript
+async function execApi(method, args = {}) {
+  const mac = deviceMac();
+  if (!mac) return { code: 1, message: '设备未选择' };
+  args.mac = mac;
+  return await api('/api/v1/plugins/mcp_manager/exec', {
+    method: 'POST',
+    body: { method, args }
+  });
+}
+
+// 加载服务器列表
+async function loadServers() {
+  const res = await execApi('get_servers');
+  if (res.code === 0) renderServers(res.data);
+}
+
+// 切换服务器启用/禁用
+async function toggleServer(name, disabled) {
+  const res = await execApi('toggle_server', { server_name: name, disabled });
+  if (res.code === 0) showToast(`已${disabled ? '禁用' : '启用'}`);
+}
+```
+
+### 与传统方式对比
+
+| 对比项 | 传统方式（自定义路由） | exec 桥梁 |
+|--------|----------------------|-----------|
+| 需要新增路由文件 | 是（routes/xxx.py） | 否 |
+| 需要注册到 web.py | 是（include_router） | 否 |
+| 插件必须侵入框架 | 是 | 否 |
+| 新插件复用 | 需要重复写路由 | 继承桥梁即可 |
+| 前端调用方式 | `fetch('/api/v1/devices/...')` | `execApi('method', {...})` |
+| 后端暴露机制 | FastAPI 路由 | `frontend_api` 字典 |
+
+### 注意事项
+
+1. **设备 MAC 自动注入**：`execApi` 自动取当前设备 MAC 传给 `args.mac`，后端方法无需手动传
+2. **错误处理**：后端方法抛异常时，桥梁统一返回 `{code: 1, message: str(e)}`，前端无需额外 try/catch
+3. **权限校验**：后端方法自行调用 `repo.resolve_device(mac)` 检查设备是否存在，实际操作由 `DeviceRepository` 的 SDK 方法完成
+4. **不要暴露敏感信息**：数据库凭证、API Key 等敏感信息留在后端，前端只传业务参数
+5. **方法命名**：使用小写字母和下划线，如 `get_data`、`save_config`
+
 ## 本地 Toast 提示
 
 如果不想通过 postMessage 调用主应用 Toast，也可以在插件页面内自行实现：

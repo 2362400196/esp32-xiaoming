@@ -767,18 +767,23 @@ watch(() => props.devices, () => { nextTick(updateBoardHeight) }, { deep: true }
   transform: translate(-50%, -50%) scale(0.85);
 }
 
-/* ===== 解绑弹窗 ===== */
+/* ===== 弹窗 ===== */
 .modal-mask {
   position: fixed; inset: 0;
-  background: rgba(0,0,0,0.4);
-  backdrop-filter: blur(4px);
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
   display: flex; align-items: center; justify-content: center;
   z-index: 1000;
 }
 .modal-card {
   width: 380px; max-width: 90vw;
-  background: #fff; border-radius: var(--radius-lg);
-  box-shadow: 0 12px 40px rgba(0,0,0,0.2);
+  background: var(--grad-panel);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-hover), var(--glass-hi);
   overflow: hidden;
   animation: modalPop 0.3s var(--ease);
 }
@@ -788,7 +793,7 @@ watch(() => props.devices, () => { nextTick(updateBoardHeight) }, { deep: true }
 }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 18px 20px 12px; border-bottom: 1px solid var(--border);
+  padding: 18px 20px 12px; border-bottom: 1px solid var(--glass-border-soft);
 }
 .danger-head { border-bottom-color: rgba(239,68,68,0.15); }
 .modal-title { font-size: 15px; font-weight: 600; color: var(--danger); }

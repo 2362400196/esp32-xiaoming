@@ -88,6 +88,11 @@ class DeviceModel(Base, TimestampMixin):
     # 表情包
     active_emo_pack: Mapped[str] = mapped_column(String(128), default="default")
 
+    # 屏幕显示配置
+    robot_mode: Mapped[str] = mapped_column(String(8), default="false")
+    screensaver_enabled: Mapped[str] = mapped_column(String(8), default="true")
+    screensaver_timeout: Mapped[str] = mapped_column(String(8), default="30")
+
     # 运行时状态
     is_online: Mapped[bool] = mapped_column(Boolean, default=False)
     last_seen: Mapped[float] = mapped_column(Float, default=0.0)

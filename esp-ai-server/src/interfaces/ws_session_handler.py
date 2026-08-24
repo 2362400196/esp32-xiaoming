@@ -697,11 +697,8 @@ class WebSocketSessionHandler:
                     session._wake_audio_played.set()
 
             if not wake_ok:
-                logger.warning(f"[Session:{session.session_id}] Wake audio failed, ending session")
-                # 只设 FSM 为 IDLE，不发 session_end 给客户端
-                # 因为可能有新的 _do_wake_start task 正在发送唤醒音频
-                # 发 session_end 会导致客户端 audio_spk_stop()，丢弃新唤醒音频
-                await fsm.set(SessionState.IDLE)
+                logger.warning(f"[Session:{session.session_id}] Wake audio failed, sending session_end")
+                await session.send_session_end()
                 return
 
             if session._closed:
@@ -830,7 +827,7 @@ class WebSocketSessionHandler:
             response = await client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": "你是一个数据分析器。只输出JSON格式数据，不要输出任何其他文字、解释或markdown代码块标记。"},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.3,

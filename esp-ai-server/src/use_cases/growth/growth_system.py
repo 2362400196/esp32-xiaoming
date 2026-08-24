@@ -124,15 +124,19 @@ class GrowthSystem:
         if not user_name:
             user_name = await self._find_user_name_from_memory(device_id)
 
-        conversations = self._format_conversations(messages)
+        # 检查今天是否已有日记（决定是首次写入还是续写）
+        today_entry = await self.diary.get_today_entry(device_id)
+        is_continuation = today_entry is not None
+
+        # 续写模式下只传最新的对话（最多5条），避免LLM重复写之前已写过的内容
+        conversations = self._format_conversations(
+            messages,
+            max_messages=5 if is_continuation else 15,
+        )
 
         emotion_timeline = await self.emotion.get_emotion_timeline(device_id)
 
         understanding = await self._get_user_understanding(device_id)
-
-        # 检查今天是否已有日记
-        today_entry = await self.diary.get_today_entry(device_id)
-        is_continuation = today_entry is not None
 
         diary_content = await self.diary.write_daily_entry(
             device_id=device_id,
@@ -198,8 +202,13 @@ class GrowthSystem:
 
         return ""
 
-    def _format_conversations(self, messages: list[dict]) -> str:
-        """格式化对话内容（只取今天的对话）"""
+    def _format_conversations(self, messages: list[dict], max_messages: int = 15) -> str:
+        """格式化对话内容（只取今天的对话）
+
+        Args:
+            messages: 对话消息列表
+            max_messages: 最多取最近多少条消息（续写模式下减少数量，避免重复写已写过的内容）
+        """
         if not messages:
             return "今天还没有对话"
 
@@ -207,7 +216,7 @@ class GrowthSystem:
         today = datetime.now().strftime("%Y-%m-%d")
 
         lines = []
-        for msg in messages[-15:]:
+        for msg in messages[-max_messages:]:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             datetime_str = msg.get("datetime", "")

@@ -757,6 +757,8 @@ class Session:
 
     async def send_session_end(self):
         self.runtime.asr_processed = True
+        # 通知 pipeline 停止发送数据，避免 session_end 后仍有 TTS 指令到达设备
+        self.cancel_event.set()
         await self.channel.send_json({"type": "session_status", "status": "iat_end"})
         await asyncio.sleep(0.03)
         await self.drain_asr()

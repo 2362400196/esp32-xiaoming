@@ -175,7 +175,7 @@ void eeui_port_lvgl_unlock(void);
  * @param active true=进入屏保（纯黑 + 居中时间 + 背光调暗），false=退出恢复
  * 由 power_manager 待机/活跃状态切换时调用；无屏板型（C3 headless）自动忽略
  */
-void eeui_port_screensaver_set(bool active);
+bool eeui_port_screensaver_set(bool active);
 
 /**
  * 通用卡片渲染（show_card 指令）
@@ -190,6 +190,18 @@ void eeui_port_show_card(const char *json_str);
  * 会话内（TTS 播报等表情变化）卡片保持显示，不会被清除
  */
 void eeui_port_clear_cards(void);
+
+/**
+ * 设置机器人模式（只显示表情，隐藏所有文字/图标/横条）
+ * @param enabled true=机器人模式（纯表情），false=正常模式
+ */
+void eeui_port_set_robot_mode(bool enabled);
+
+/**
+ * 查询当前是否处于机器人模式
+ * @return true=机器人模式
+ */
+bool eeui_port_is_robot_mode(void);
 
 #ifdef __cplusplus
 }

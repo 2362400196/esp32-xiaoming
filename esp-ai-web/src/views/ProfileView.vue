@@ -57,71 +57,16 @@
         </div>
       </div>
 
-        <!-- 微信绑定 -->
-        <div class="wechat-card glass card-in" style="animation-delay:0.12s">
-          <div class="wechat-head" @click="wechatCollapsed = !wechatCollapsed">
-            <span class="wechat-title"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg> 微信绑定</span>
-            <span class="wechat-arrow" :class="{ open: !wechatCollapsed }">▾</span>
-          </div>
-          <div v-if="!wechatCollapsed" class="wechat-body">
-            <div v-if="!devices.length" class="wechat-empty">请先在「设备」页添加并选择设备</div>
-            <template v-else>
-              <div class="wechat-row">
-                <span class="wechat-label">绑定设备</span>
-                <select v-model="selectedDeviceId" class="input input-sm wechat-select">
-                  <option v-for="d in devices" :key="d.device_id || d.id || d.mac" :value="d.device_id || d.id || d.mac">
-                    {{ d.name || d.device_id || d.mac }}
-                  </option>
-                  </select>
-                
-              </div>
-              <template v-if="wechatBoundDeviceKey">
-                <div class="wechat-bound"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg> 微信已绑定：{{ wechatBoundDeviceKey.slice(0, 16) }}...</div>
-                
-                <button class="btn-sm btn-danger wechat-danger" @click="unbindWechat">解绑微信</button>
-              </template>
-              <template v-else>
-                <div v-if="wechatQrDataUrl" class="wechat-qr">
-                  <img :src="wechatQrDataUrl" alt="微信二维码" />
-                  <p class="wechat-qr-msg">{{ wechatQrMessage }}</p>
-                  <div class="wechat-actions">
-                    <button class="btn-sm btn-ghost" @click="stopPollQr">取消</button>
-                    <button class="btn-sm btn-mint" @click="startWechatQr">刷新二维码</button>
-                    </div>
-                  </div>
-                  
-                <div v-else class="wechat-start">
-                  <p class="wechat-tip">{{ wechatQrMessage || '绑定微信后，可通过微信聊天控制设备' }}</p>
-                  <button class="btn-mint btn-sm" @click="startWechatQr">开始微信扫码绑定</button>
-                </div>
-                </template>
-              
-                
-                
-                  
-                    
-                    
-                  
-                  
-                  
-                  
-            </template>
-          </div>
-        </div>
-
-      <!-- 退出按钮 -->
+        <!-- 退出按钮 -->
       <button class="btn-sm btn-ghost logout-btn" @click="logout">退出登录</button>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { api, getToken, getUser, isLoggedIn, setAuth } from '../api'
 
-const props = defineProps({
-  devices: { type: Array, default: () => [] },
-})
 const emit = defineEmits(['login', 'toast'])
 
 const mode = ref('login')
@@ -131,158 +76,12 @@ const nickname = ref('')
 const loading = ref(false)
 const error = ref('')
 
-
-// ===== 微信绑定 =====
-const wechatCollapsed = ref(true)
-const wechatQrDataUrl = ref('')
-const wechatQrStatus = ref('idle')
-const wechatQrMessage = ref('')
-const wechatQrPolling = ref(false)
-const wechatBoundDeviceKey = ref('')
-const wechatBoundWechatId = ref('')
-const selectedDeviceId = ref('')
-let wechatQrTimer = null
-
-const selectedDevice = computed(() => {
-  const id = selectedDeviceId.value
-  return props.devices.find(d => (d.device_id || d.id || d.mac) === id) || props.devices[0] || null
-})
-
-watch(() => props.devices, (list) => {
-  if (!selectedDeviceId.value && list && list.length) {
-    selectedDeviceId.value = list[0].device_id || list[0].id || list[0].mac || ''
-  }
-}, { immediate: true })
 const user = ref(getUser())
 const loggedIn = computed(() => isLoggedIn())
 const serverHost = window.location.hostname || 'localhost'
 function refreshUser() {
   user.value = getUser()
 }
-
-function loadWechatBindInfo() {
-  try {
-    const saved = localStorage.getItem('espai_wechat_bind')
-    if (saved) {
-      const info = JSON.parse(saved)
-      wechatBoundDeviceKey.value = info.device_key || ''
-      wechatBoundWechatId.value = info.wechat_chat_id || ''
-      
-    }
-  } catch { /* ignore */ }
-}
-
-async function startWechatQr() {
-  try {
-    const res = await api.wechatQrStart()
-    if (res.status === 200 && res.data?.code === 0 && res.data?.data) {
-      const d = res.data.data
-      wechatQrDataUrl.value = d.qr_data_url || ''
-      wechatQrStatus.value = d.status || 'waiting_scan'
-      wechatQrMessage.value = d.message || '请用微信扫描二维码'
-      wechatCollapsed.value = false
-      startPollQrStatus()
-    } else {
-      emit('toast', res.data?.message || res.data?.detail || '获取二维码失败')
-    }
-  } catch {
-    emit('toast', '获取二维码失败')
-  }
-}
-
-function startPollQrStatus() {
-  wechatQrPolling.value = true
-  if (wechatQrTimer) clearInterval(wechatQrTimer)
-  wechatQrTimer = setInterval(async () => {
-    try {
-      const res = await api.wechatQrStatus()
-      if (res.status === 200 && res.data?.code === 0 && res.data?.data) {
-        const d = res.data.data
-        wechatQrStatus.value = d.status
-        wechatQrMessage.value = d.message
-
-        if (d.completed) {
-          clearInterval(wechatQrTimer)
-          wechatQrTimer = null
-          wechatQrPolling.value = false
-          emit('toast', '微信登录成功！')
-          try {
-            await api.wechatApplyToken()
-          } catch { /* 忽略 apply-token 失败 */ }
-          if (selectedDevice.value) {
-            await bindCurrentDeviceToWechat(d.ilink_user_id)
-          } else {
-            emit('toast', '请先添加并选择设备')
-          }
-        } else if (d.status === 'expired' || d.status === 'error' || d.status === 'cancelled') {
-          clearInterval(wechatQrTimer)
-          wechatQrTimer = null
-          wechatQrPolling.value = false
-        }
-      }
-    } catch (e) {
-      console.error('轮询二维码状态失败:', e)
-    }
-  }, 1500)
-}
-
-function stopPollQr() {
-  if (wechatQrTimer) {
-    clearInterval(wechatQrTimer)
-    wechatQrTimer = null
-  }
-  wechatQrPolling.value = false
-  api.wechatQrCancel().catch(() => {})
-}
-
-async function bindCurrentDeviceToWechat(wechatUserId) {
-  const device = selectedDevice.value
-  if (!device || !wechatUserId) return
-  const deviceKey = device.device_key || device.authKey || device.device_id || device.mac || ''
-  if (!deviceKey) {
-    emit('toast', '设备缺少 device_key，无法绑定微信')
-    return
-  }
-  try {
-    const res = await api.wechatBind({
-      wechat_chat_id: wechatUserId,
-      wechat_user_id: wechatUserId,
-      device_key: deviceKey,
-      device_mac: device.mac || '',
-      alias: device.name || '',
-    })
-    if (res.status === 200 && res.data?.code === 0) {
-      wechatBoundDeviceKey.value = deviceKey
-      wechatBoundWechatId.value = wechatUserId
-      localStorage.setItem('espai_wechat_bind', JSON.stringify({
-        device_key: deviceKey,
-        wechat_chat_id: wechatUserId,
-        
-      }))
-      emit('toast', '微信已绑定到当前设备')
-    } else {
-      emit('toast', res.data?.message || res.data?.detail || '绑定失败')
-    }
-  } catch {
-    emit('toast', '绑定失败')
-  }
-}
-
-async function unbindWechat() {
-  if (!wechatBoundDeviceKey.value) return
-  try {
-    const res = await api.wechatUnbind(wechatBoundDeviceKey.value)
-    if (res.status === 200 && res.data?.code === 0) {
-      emit('toast', '微信已解绑')
-    }
-  } catch { /* 忽略 */ }
-  wechatBoundDeviceKey.value = ''
-  wechatBoundWechatId.value = ''
-  
-  localStorage.removeItem('espai_wechat_bind')
-}
-
-
 
 async function submit() {
   if (!email.value || !password.value) { error.value = '请填写邮箱和密码'; return }
@@ -347,10 +146,6 @@ async function syncProfile() {
 
 onMounted(() => {
   syncProfile()
-  loadWechatBindInfo()
-})
-onBeforeUnmount(() => {
-  if (wechatQrTimer) clearInterval(wechatQrTimer)
 })
 
 function logout() {
@@ -511,57 +306,6 @@ function logout() {
   padding: 9px 32px;
 }
 .logout-btn:hover { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
-
-/* ===== 微信绑定 ===== */
-.wechat-card { padding: 0; overflow: hidden; }
-.wechat-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 16px 24px; cursor: pointer;
-  transition: background .2s var(--ease);
-}
-.wechat-head:hover { background: var(--mint-softer); }
-.wechat-title { font-size: 14px; font-weight: 700; display: inline-flex; align-items: center; gap: 7px; color: var(--mint-deep); }
-.wechat-arrow { font-size: 14px; color: var(--text-dim); transition: transform .2s var(--ease); }
-.wechat-arrow.open { transform: rotate(180deg); }
-.wechat-body {
-  padding: 0 24px 20px;
-  border-top: 1px solid var(--glass-border-soft);
-  display: flex; flex-direction: column; gap: 12px;
-}
-.wechat-empty {
-  padding: 18px 0; text-align: center;
-  font-size: 13px; color: var(--text-dim);
-}
-.wechat-row { display: flex; align-items: center; gap: 10px; }
-.wechat-label { font-size: 13px; color: var(--text-sub); flex-shrink: 0; }
-.wechat-select { flex: 1; min-width: 0; }
-.wechat-bound {
-  font-size: 13px; color: var(--mint-deep);
-  background: var(--mint-soft);
-  border: 1px solid var(--mint-border);
-  padding: 8px 12px; border-radius: 10px;
-  word-break: break-all;
-  display: flex; align-items: center; gap: 6px;
-}
-.wechat-danger { align-self: flex-start; }
-.wechat-qr { display: flex; flex-direction: column; align-items: center; gap: 10px; }
-.wechat-qr img {
-  width: 220px; height: 220px; object-fit: contain;
-  border: 1px solid var(--glass-border); border-radius: 14px;
-  background: rgba(255, 255, 255, 0.7);
-  box-shadow: var(--shadow);
-}
-.wechat-qr-msg { font-size: 13px; color: var(--text-sub); text-align: center; }
-.wechat-actions { display: flex; gap: 8px; }
-.wechat-start { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 12px 0; }
-.wechat-tip { font-size: 13px; color: var(--text-dim); text-align: center; }
-.wechat-group {
-  border-top: 1px dashed var(--glass-border-soft);
-  padding-top: 14px;
-  display: flex; flex-direction: column; gap: 8px;
-}
-.wechat-group-title { font-size: 12px; color: var(--text-sub); }
-.wechat-group-controls { display: flex; flex-wrap: wrap; gap: 8px; }
 
 .btn-danger {
   display: inline-flex; align-items: center; justify-content: center;

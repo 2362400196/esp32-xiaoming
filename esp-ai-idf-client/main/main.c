@@ -9,6 +9,7 @@ extern void websocket_force_reconnect(void);
 #include "commands/command_registry.h"
 #include "boards/board_interface.h"
 #include "gif_downloader.h"
+#include "eeui_port.h"
 #if defined(AUDIO_SCHEME_ES8311)
 #include "audio_codec/es8311.h"
 #endif
@@ -162,11 +163,25 @@ static void handle_wakeup(void)
 // 会话看门狗刷新：收到任意服务端数据（websocket.c 的 WEBSOCKET_EVENT_DATA）时调用。
 // 把"死计时"改为"活动刷新"——只要对话有动静（ASR/LLM/TTS/音频块），看门狗就重置，
 // 不会把一次正常的多轮长对话误判为超时。
+// 当 WakeNet 已恢复（会话正常结束），重置看门狗计时，避免上一轮唤醒的 tick 残留
+// 导致下一轮 iat_start 暂停 WakeNet 时误判超时。
 void session_watchdog_refresh(void)
 {
-    if (s_wakeup_trigger_tick != 0 && wakeup_is_paused()) {
-        s_wakeup_trigger_tick = xTaskGetTickCount();
+    if (s_wakeup_trigger_tick != 0) {
+        if (wakeup_is_paused()) {
+            s_wakeup_trigger_tick = xTaskGetTickCount();
+        } else {
+            // WakeNet 已恢复（会话正常结束），清除看门狗计时
+            s_wakeup_trigger_tick = 0;
+        }
     }
+}
+
+// 启动会话看门狗计时：在 iat_start 暂停 WakeNet 后调用，确保服务端
+// 若未及时发送唤醒音频能在 10 秒内触发超时重连，避免设备卡死。
+void session_watchdog_start(void)
+{
+    s_wakeup_trigger_tick = xTaskGetTickCount();
 }
 
 void app_main(void)
@@ -394,6 +409,42 @@ void app_main(void)
     // 初始化功耗管理（在音频初始化之后，PA 引脚已配置）
     power_manager_init();
 
+    // 从 NVS 恢复屏保配置（重启后保持之前设置的屏保开关和超时）
+    {
+        nvs_handle_t h;
+        if (nvs_open("esp-ai-kv", NVS_READONLY, &h) == ESP_OK) {
+            char buf[16] = {0};
+            size_t sz = sizeof(buf);
+
+            // 屏保开关（先在当前作用域声明，下面恢复超时需复用）
+            bool ss_enabled = false;
+            bool ss_enabled_found = false;
+
+            // 恢复屏保开关（ss_enabled = screensaver_enabled 短键名）
+            if (nvs_get_str(h, "ss_enabled", buf, &sz) == ESP_OK) {
+                ss_enabled = (strcmp(buf, "true") == 0 || strcmp(buf, "1") == 0);
+                ss_enabled_found = true;
+                power_manager_set_screensaver_config(ss_enabled, -1);
+                ESP_LOGI(TAG, "从 NVS 恢复屏保开关: %s", ss_enabled ? "开启" : "关闭");
+            }
+
+            // 恢复屏保超时（ss_timeout = screensaver_timeout 短键名）
+            sz = sizeof(buf);
+            memset(buf, 0, sizeof(buf));
+            if (nvs_get_str(h, "ss_timeout", buf, &sz) == ESP_OK) {
+                int sec = atoi(buf);
+                if (sec >= 5 && sec <= 600) {
+                    // 使用已恢复的开关值，不硬编码为 true！
+                    // 若 ss_enabled 未找到（NVS 无记录），则默认启用屏保
+                    power_manager_set_screensaver_config(ss_enabled_found ? ss_enabled : true, sec);
+                    ESP_LOGI(TAG, "从 NVS 恢复屏保超时: %d秒（开关=%s）", sec, ss_enabled ? "开" : "关");
+                }
+            }
+
+            nvs_close(h);
+        }
+    }
+
     // 从 NVS 恢复音量（与 Arduino ext2 键一致，移植自 Arduino volume 持久化）
     {
         nvs_handle_t h;
@@ -412,6 +463,24 @@ void app_main(void)
         // 无 NVS 存储值时，显式渲染默认音量图标
         if (!vol_restored) {
             audio_set_volume(1.0f);
+        }
+    }
+
+    // 从 NVS 恢复机器人模式（重启后保持之前设置的机器人模式状态）
+    {
+        nvs_handle_t h;
+        bool robot_mode = false;
+        if (nvs_open("esp-ai-kv", NVS_READONLY, &h) == ESP_OK) {
+            char buf[8] = {0};
+            size_t sz = sizeof(buf);
+            if (nvs_get_str(h, "robot_mode", buf, &sz) == ESP_OK) {
+                robot_mode = (strcmp(buf, "true") == 0 || strcmp(buf, "1") == 0);
+            }
+            nvs_close(h);
+        }
+        if (robot_mode) {
+            eeui_port_set_robot_mode(true);
+            ESP_LOGI(TAG, "从 NVS 恢复机器人模式: 开启");
         }
     }
 
@@ -479,20 +548,41 @@ void app_main(void)
             handle_wakeup();
         }
 
-        // 会话看门狗：如果 wakenet 已暂停超过 30 秒（服务端无响应/崩溃/网络断开），
-        // 自动恢复唤醒检测，避免唤醒词永久失效
+        // 会话看门狗：如果 wakenet 已暂停（唤醒已发送但服务端无响应），
+        // 分两级处理：
+        //   1. 唤醒超时（10秒）：唤醒消息发出后未收到任何服务端数据，
+        //      判定连接异常（半开/断线），主动重连后恢复唤醒。
+        //      与 websocket_check_keepalive() 中的 s_wakeup_pending 检测互补：
+        //      此处不依赖 volatile 标志位，直接检查 WakeNet 暂停状态 + 唤醒时间，
+        //      即使 s_wakeup_pending 因意外事件被清除也能兜底恢复。
+        //   2. 会话超时（60秒）：服务端应答后整个对话无任何进展，
+        //      自动恢复唤醒检测，避免唤醒词永久失效。
         if (s_wakeup_trigger_tick != 0 && wakeup_is_paused()) {
             TickType_t elapsed_ms = (xTaskGetTickCount() - s_wakeup_trigger_tick) * portTICK_PERIOD_MS;
-            if (elapsed_ms > SESSION_WATCHDOG_TIMEOUT_MS) {
+            if (elapsed_ms > 10000 && elapsed_ms < SESSION_WATCHDOG_TIMEOUT_MS) {
+                // 唤醒超时：10秒内无任何服务端数据 → 半开连接/断线
+                ESP_LOGW(TAG, "唤醒超时: %dms 无服务端响应，强制重连恢复", (int)elapsed_ms);
+                wakeup_resume();
+                s_session_state = SESSION_IDLE;
+                s_wakeup_trigger_tick = 0;
+                audio_spk_stop();
+                audio_mic_stop();
+                websocket_reset_conversation_state();
+                // 强制重连 WebSocket，修复半开连接
+                websocket_force_reconnect();
+                power_manager_set_active(false);
+                display_show_status("连接异常，重连中...");
+                display_show_emotion("休息中");
+            } else if (elapsed_ms > SESSION_WATCHDOG_TIMEOUT_MS) {
+                // 会话超时：60秒无任何数据 → 服务端已无响应，兜底恢复
                 ESP_LOGW(TAG, "会话看门狗: %dms 无 session_end，自动恢复唤醒", (int)elapsed_ms);
                 wakeup_resume();
                 s_session_state = SESSION_IDLE;
                 s_wakeup_trigger_tick = 0;
-                // 清理可能残留的音频状态
                 audio_spk_stop();
                 audio_mic_stop();
                 websocket_reset_conversation_state();
-                power_manager_set_active(false);  // 回待机省电
+                power_manager_set_active(false);
                 display_show_status("等待唤醒...");
                 display_show_emotion("休息中");
             }

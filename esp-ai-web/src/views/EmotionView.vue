@@ -47,6 +47,17 @@
           </div>
         </div>
         <div class="upload-area">
+          <!-- 上传尺寸选择 -->
+          <div class="size-bar">
+            <span class="size-label">尺寸</span>
+            <div class="size-options">
+              <button v-for="opt in sizeOptions" :key="opt.value"
+                class="size-opt" :class="{ active: uploadSize === opt.value }"
+                @click="uploadSize = opt.value">
+                {{ opt.label }}
+              </button>
+            </div>
+          </div>
           <div class="gif-list">
             <div v-for="s in gifSlots" :key="s.file" class="gif-item uploadable"
               @click="triggerUpload(s)">
@@ -210,6 +221,14 @@ const pendingSlot = ref(null)
 const uploadingSlot = ref('')
 const makerVisible = ref(false)
 const packEmosVersion = ref(0)
+const uploadSize = ref(180)
+const sizeOptions = [
+  { value: 0, label: '原图' },
+  { value: 120, label: '120' },
+  { value: 160, label: '160' },
+  { value: 180, label: '180' },
+  { value: 240, label: '240' },
+]
 
 function openMaker() {
   makerVisible.value = true
@@ -241,14 +260,19 @@ async function onFileChange(e) {
     return
   }
   const slot = pendingSlot.value
+  const size = uploadSize.value
   uploadingSlot.value = slot.file
-  const res = await api.uploadEmo(selectedPackName.value, file, slot.file + '.gif', 0)
+  const res = await api.uploadEmo(selectedPackName.value, file, slot.file + '.gif', size)
   uploadingSlot.value = ''
   pendingSlot.value = null
   e.target.value = ''
   if (res?.code === 0) {
     emit('toast', `${slot.name} 上传成功`)
     loadPackEmos()
+    // 如果当前上传的是设备激活中的表情包，通知设备刷新
+    if (selectedPackName.value === activePack.value && deviceId.value) {
+      await api.setActiveEmoPack(deviceId.value, selectedPackName.value).catch(() => null)
+    }
   } else {
     emit('toast', res?.message || '上传失败')
   }
@@ -576,6 +600,32 @@ watch(() => props.currentDevice, async (d) => {
 
 /* ===== GIF 上传区 ===== */
 .upload-area { margin-top: 8px; }
+
+/* 尺寸选择器 */
+.size-bar {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 14px;
+}
+.size-label {
+  font-size: 12px; font-weight: 600; color: var(--text-sub);
+  white-space: nowrap;
+}
+.size-options {
+  display: flex; gap: 6px; flex-wrap: wrap;
+}
+.size-opt {
+  padding: 4px 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  background: var(--glass-bg-soft);
+  font-size: 11px; font-weight: 600; color: var(--text-sub);
+  cursor: pointer; transition: all 0.2s var(--ease);
+}
+.size-opt:hover { border-color: var(--mint-border); background: var(--mint-softer); }
+.size-opt.active {
+  background: var(--grad-mint); color: #fff; border: none;
+  box-shadow: 0 3px 8px rgba(16,185,129,0.25);
+}
 .gif-list {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
@@ -623,9 +673,9 @@ watch(() => props.currentDevice, async (d) => {
 /* ===== 创建表情包弹窗 ===== */
 .modal-mask {
   position: fixed; inset: 0;
-  background: rgba(15, 23, 42, 0.4);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
   display: flex; align-items: center; justify-content: center;
   z-index: 1000;
 }

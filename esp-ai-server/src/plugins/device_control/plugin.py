@@ -1,14 +1,12 @@
 from src.use_cases.tools_system import StopPipeline, tool
-from src.use_cases._plugin_helpers import send_device_command, request_device_result
+from src.use_cases._plugin_helpers import send_device_command, request_device_result, speak_direct
 
 @tool()
 async def test_device(channel=None, ctx=None, fsm=None) -> str:
     """设备测试工具，当用户说测试的时候你执行"""
     if channel:
-        from src.infrastructure.web import get_app
-        app = get_app()
-        if app and hasattr(app.state, 'speaker') and app.state.speaker:
-            await app.state.speaker.speak_direct(channel, ctx, fsm, "测试成功")
+        ok = await speak_direct(channel, ctx, fsm, "测试成功")
+        if ok:
             raise StopPipeline()
 
     return "测试指令已生成（未连接设备）"

@@ -6,8 +6,10 @@
 <title>成长系统</title>
 <style>
 :root{--mint:#10b981;--mint-deep:#059669;--mint-soft:rgba(16,185,129,0.1);--mint-border:rgba(16,185,129,0.25);--mint-light:rgba(16,185,129,0.06);--text-main:#1e293b;--text-sub:#64748b;--text-light:#94a3b8;--bg:#f0f5f0;--radius:16px;--radius-sm:10px;--radius-xs:8px;--shadow:0 4px 20px rgba(0,0,0,0.06);--shadow-lg:0 12px 40px rgba(0,0,0,0.12);--glass:linear-gradient(155deg,rgba(255,255,255,0.85),rgba(255,255,255,0.55));--glass-border:rgba(255,255,255,0.6);--transition:0.3s cubic-bezier(0.4,0,0.2,1)}
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text-main);min-height:100vh;padding:0;overflow-x:hidden}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scrollbar-width:thin;scrollbar-color:rgba(16,185,129,0.2) transparent}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text-main);min-height:100vh;overflow-x:hidden}
+::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(16,185,129,0.2);border-radius:2px}::-webkit-scrollbar-thumb:hover{background:rgba(16,185,129,0.4)}
 .container{max-width:640px;margin:0 auto;padding:20px 16px 40px}
 
 /* Hero */
@@ -277,12 +279,22 @@ async function loadData(){
   }
 
   // 画像
-  if(profileRes.code===0&&profileRes.data){
-    const p=profileRes.data.profile||{};
-    const es=profileRes.data.emotion_summary||{};
-    document.getElementById('emotionCount').textContent=es.total_records||0;
-    document.getElementById('skillCount').textContent=p.learned_skills_count||p.learned_skills?.length||0;
-    document.getElementById('activeDays').textContent=p.active_days||p.days_active||0;
+	  if(profileRes.code===0&&profileRes.data){
+	    const p=profileRes.data.profile||{};
+	    const es=profileRes.data.emotion_summary||{};
+	    document.getElementById('emotionCount').textContent=es.count||0;
+	    document.getElementById('skillCount').textContent=p.learned_skills_count||0;
+	    // 活跃天数优先从后端返回的 active_days 取，其次从日记列表计算
+	    const ad=p.active_days||0;
+	    if(ad>0){
+	      document.getElementById('activeDays').textContent=ad;
+	    }else if(diaryRes.code===0&&diaryRes.data&&diaryRes.data.diaries){
+	      // 从日记列表计算活跃天数
+	      const uniqueDates=new Set(diaryRes.data.diaries.map(d=>d.date));
+	      document.getElementById('activeDays').textContent=uniqueDates.size||0;
+	    }else{
+	      document.getElementById('activeDays').textContent='0';
+	    }
 
     const traits=p.personality_traits||p.traits||[];
     const interests=p.interests||[];

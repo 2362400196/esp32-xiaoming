@@ -631,6 +631,103 @@ async def api_stop(body: StopRequest, user: UserModel = Depends(get_current_user
 
 
 # ============================================================
+#  设备配置 API（机器人模式等）
+# ============================================================
+@router.post("/devices/{mac}/robot_mode")
+async def api_set_robot_mode(mac: str, body: dict = Body(...), user: UserModel = Depends(get_current_user)):
+    """设置设备机器人模式（只显示表情，隐藏所有文字/图标/横条）"""
+    if not await _check_device_owner(mac, user):
+        raise HTTPException(403, "Device not bound to you")
+
+    enabled = bool(body.get("enabled", False))
+    from src.infrastructure.db.repositories.device_repository import DeviceRepository
+    repo = DeviceRepository()
+    result = await repo.update_device_partial(mac, {"robot_mode": "true" if enabled else "false"})
+    if result is None:
+        logger.warning(f"[API] robot_mode 设置失败，设备 {mac} 未找到")
+        return {"code": 1, "message": "Device not found", "data": None}
+
+    # 通过 WebSocket 下发 update_config 指令，设备立即生效
+    try:
+        registry = get_device_registry()
+        if registry:
+            d = registry.resolve(mac)
+            if not d:
+                d = registry.get_by_mac(mac)
+            if d:
+                tool_mgr = d.get("tool_manager")
+                if tool_mgr:
+                    from src.use_cases._plugin_helpers import send_device_command
+                    await send_device_command(tool_mgr, "update_config", {"robot_mode": "true" if enabled else "false"})
+    except Exception as e:
+        logger.warning(f"[API] 下发 robot_mode 指令失败: {e}")
+
+    return {"code": 0, "message": "ok", "data": {"robot_mode": enabled}}
+
+
+# ============================================================
+#  设备显示配置 API（机器人模式 + 屏保）
+# ============================================================
+@router.post("/devices/{mac}/display_config")
+async def api_set_display_config(mac: str, body: dict = Body(...), user: UserModel = Depends(get_current_user)):
+    """设置设备显示配置（机器人模式、屏保开关、屏保超时）"""
+    if not await _check_device_owner(mac, user):
+        raise HTTPException(403, "Device not bound to you")
+
+    from src.infrastructure.db.repositories.device_repository import DeviceRepository
+    repo = DeviceRepository()
+
+    # 构建要更新的字段
+    updates = {}
+    commands = {}
+
+    if "robot_mode" in body:
+        val = "true" if body["robot_mode"] else "false"
+        updates["robot_mode"] = val
+        commands["robot_mode"] = val
+
+    if "screensaver_enabled" in body:
+        val = "true" if body["screensaver_enabled"] else "false"
+        updates["screensaver_enabled"] = val
+        commands["screensaver_enabled"] = val
+
+    if "screensaver_timeout" in body:
+        timeout = int(body["screensaver_timeout"])
+        if timeout < 5:
+            timeout = 5
+        elif timeout > 600:
+            timeout = 600
+        updates["screensaver_timeout"] = str(timeout)
+        commands["screensaver_timeout"] = str(timeout)
+
+    if not updates:
+        return {"code": 1, "message": "No config to update", "data": None}
+
+    result = await repo.update_device_partial(mac, updates)
+    if result is None:
+        logger.warning(f"[API] display_config 更新失败，设备 {mac} 未找到")
+        return {"code": 1, "message": "Device not found", "data": None}
+
+    # 通过 WebSocket 下发 update_config 指令，设备立即生效
+    if commands:
+        try:
+            registry = get_device_registry()
+            if registry:
+                d = registry.resolve(mac)
+                if not d:
+                    d = registry.get_by_mac(mac)
+                if d:
+                    tool_mgr = d.get("tool_manager")
+                    if tool_mgr:
+                        from src.use_cases._plugin_helpers import send_device_command
+                        await send_device_command(tool_mgr, "update_config", commands)
+        except Exception as e:
+            logger.warning(f"[API] 下发 display_config 指令失败: {e}")
+
+    return {"code": 0, "message": "ok", "data": updates}
+
+
+# ============================================================
 #  工具查询 API
 # ============================================================
 @router.get("/tools")

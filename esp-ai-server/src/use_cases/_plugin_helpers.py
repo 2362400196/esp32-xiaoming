@@ -103,3 +103,16 @@ from src.use_cases.sdk.services import (  # noqa: F401
 # 安全工具（来自 infrastructure）
 # ════════════════════════════════════════════════════════════
 from src.infrastructure.plugin_security import mask_secret, require_permission  # noqa: F401
+
+# ════════════════════════════════════════════════════════════
+# 框架基础设施封装（插件不直接 import infrastructure）
+# ════════════════════════════════════════════════════════════
+from src.use_cases.sdk.infrastructure import (  # noqa: F401
+    get_logger,
+    get_settings,
+    get_device_registry,
+    speak_direct,
+    get_wechat_bot,
+    get_wechat_binding_mgr,
+    get_remote_config_provider,
+)

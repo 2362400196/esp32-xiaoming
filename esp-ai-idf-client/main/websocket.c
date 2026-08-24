@@ -23,8 +23,9 @@ extern int s_tts_duration_ms;
 /* TTS 状态互斥锁（定义在 callback_commands.c，保护上述三个变量） */
 extern SemaphoreHandle_t s_tts_state_mutex;
 
-/* 会话看门狗刷新（定义在 main.c）：收到服务端数据时重置会话超时计时 */
-extern void session_watchdog_refresh(void);
+/* 会话看门狗（定义在 main.c） */
+extern void session_watchdog_refresh(void);  // 收到服务端数据时重置会话超时计时
+extern void session_watchdog_start(void);    // 启动看门狗计时（iat_start 暂停 WakeNet 后使用）
 
 /* WiFi 断线自愈接口（定义在 wifi.c） */
 extern bool wifi_is_connected(void);
@@ -772,6 +773,9 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                                     ESP_LOGW(TAG, "收到 iat_start 但 WakeNet 未暂停，先暂停 WakeNet");
                                     wakeup_pause();
                                 }
+                                // 启动会话看门狗：记录 iat_start 时间，若服务端后续未及时
+                                // 发送唤醒音频/数据，10 秒内触发超时重连，避免设备卡死
+                                session_watchdog_start();
                                 display_show_status("聆听中");
                                 display_show_emotion("聆听中");
                                 display_show_text("");  // 新对话开始，清除上轮字幕

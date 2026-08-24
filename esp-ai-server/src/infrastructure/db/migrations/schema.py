@@ -111,6 +111,31 @@ async def init_db() -> None:
         except Exception:
             logger.debug("[DB] 迁移: plugin_configs 列已存在，跳过")
 
+        # === Schema 迁移：屏幕显示配置（robot_mode，screensaver） ===
+        try:
+            await conn.execute(text(
+                "ALTER TABLE devices ADD COLUMN robot_mode VARCHAR(8) NOT NULL DEFAULT 'false'"
+            ))
+            logger.info("[DB] 迁移: devices 表增加 robot_mode 列（机器人模式）")
+        except Exception:
+            logger.debug("[DB] 迁移: robot_mode 列已存在，跳过")
+
+        try:
+            await conn.execute(text(
+                "ALTER TABLE devices ADD COLUMN screensaver_enabled VARCHAR(8) NOT NULL DEFAULT 'true'"
+            ))
+            logger.info("[DB] 迁移: devices 表增加 screensaver_enabled 列（屏保开关）")
+        except Exception:
+            logger.debug("[DB] 迁移: screensaver_enabled 列已存在，跳过")
+
+        try:
+            await conn.execute(text(
+                "ALTER TABLE devices ADD COLUMN screensaver_timeout VARCHAR(8) NOT NULL DEFAULT '30'"
+            ))
+            logger.info("[DB] 迁移: devices 表增加 screensaver_timeout 列（屏保超时）")
+        except Exception:
+            logger.debug("[DB] 迁移: screensaver_timeout 列已存在，跳过")
+
         # === 权限引导：系统中没有管理员时，最早注册的用户自动提升为管理员 ===
         # （兼容已部署系统：首个用户注册时已是 admin 的逻辑只对新系统生效）
         try:

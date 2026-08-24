@@ -25,6 +25,28 @@
 
 语音交互闭环：用户说话 → ASR 转文字 → LLM 判断调用哪个工具 → 插件执行逻辑 → 返回文本由 TTS 播报，同时可通过指令通道控制设备屏幕/硬件。
 
+## 推荐导入方式
+
+::: tip 新旧导入路径
+插件 SDK 已按功能拆分到 `src/use_cases/sdk/` 子模块中。推荐使用新路径，代码更清晰：
+
+```python
+# 推荐（新路径）
+from src.use_cases.sdk.http import http_request, http_get_json
+from src.use_cases.sdk.device import send_device_command, request_device_result
+from src.use_cases.sdk.storage import kv_get, kv_set, plugin_data_read
+from src.use_cases.sdk.services import llm_chat, tts_synthesize
+from src.use_cases.sdk.music import play_music_url
+from src.use_cases.sdk.io import gpio_write, gpio_read
+from src.use_cases.sdk.utils import json_dumps, get_device_key
+
+# 兼容（旧路径，仍可用）
+from src.use_cases._plugin_helpers import send_device_command, http_get_json
+```
+
+旧路径 `from src.use_cases._plugin_helpers import xxx` 仍然兼容，新插件建议使用新路径。
+:::
+
 ## 快速开始
 
 从零开发一个完整插件，覆盖：编写 → 打包 → 上传全流程。
@@ -61,7 +83,7 @@ async def say_hello(name: str = "朋友", tool_manager=None) -> str:
     if tool_manager and tool_manager.channel:
         await tool_manager.channel.send_json({
             "type": "instruct", "command_id": "execute_lua",
-            "data": 'local lv=require("lvgl")\nlocal t=lv.label(lv.scr_act())\nlv.label_set_text(t,"你好 '..name..'")\nlv.set_style_text_font(t,"puhui")',
+            "data": 'local lv=require("lvgl")\nlocal t=lv.label(lv.scr_act())\nlv.label_set_text(t,"你好 '..name..'")',
         })
     return f"你好，{name}！"
 ```
@@ -361,13 +383,19 @@ await tool_manager.channel.send_json({
 
 ### 读取配置
 
-在工具函数中通过 `tool_manager.get_plugin_config()` 读取：
+::: tip 推荐使用 KV 存储
+新版本插件已改用**插件专属 KV 存储**来管理配置，不再经过 `config_fields` 系统。KV 存储路径自动按设备隔离，插件之间互不可见，且支持前端通过 `save_config` 工具读写。详见 [插件公共工具库（Plugin SDK）→ KV 存储](./plugin-sdk.md#十三、键值存储（权限-kv）)。
+:::
+
+在工具函数中通过 `kv_get` / `kv_set` 读写：
 
 ```python
+from src.use_cases.sdk.storage import kv_get, kv_set
+
 @tool(cache=False)
 async def get_weather(city: str = "", tool_manager=None) -> str:
     """查询天气"""
-    amap_key = tool_manager.get_plugin_config("weather", "amap_key", "")
+    amap_key = kv_get("amap_key", default="", tool_manager=tool_manager)
     if not amap_key:
         return "天气服务未配置，请在插件设置中填写高德 API Key"
     # ... 使用 amap_key 查询天气
@@ -375,10 +403,9 @@ async def get_weather(city: str = "", tool_manager=None) -> str:
 
 配置特性：
 
-- **按设备存储**：每台设备独立配置，互不影响
-- **白名单校验**：只接受声明过的字段，未知字段被拒绝
+- **按设备隔离**：KV 文件按设备 MAC 地址隔离，每台设备独立配置
 - **即时生效**：保存后热重载在线设备，无需重启
-- **保存 API**：`PUT /api/v1/devices/{device_id}/plugins/{plugin_name}/config`
+- **前端保存**：通过 `save_config` 工具，前端调用通用工具接口写入
 
 ## 发布与市场
 

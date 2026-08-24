@@ -484,12 +484,12 @@
     </section>
 
     <!-- 用户设备弹窗 -->
-    <div v-if="deviceModalVisible" class="modal-mask" @click.self="deviceModalVisible = false">
-      <div class="modal-card glass">
-        <div class="modal-head">
-          <span class="modal-title">{{ deviceModalTitle }}</span>
-          <button class="modal-close" @click="deviceModalVisible = false">×</button>
-        </div>
+ <div v-if="deviceModalVisible" class="modal-mask" @click.self="deviceModalVisible = false">
+ <div class="modal-card">
+ <div class="modal-head">
+ <span class="modal-title">{{ deviceModalTitle }}</span>
+ <button class="modal-close" @click="deviceModalVisible = false">×</button>
+ </div>
         <div class="modal-body">
           <div v-if="!deviceModalList.length" class="modal-empty">该用户暂无绑定设备</div>
           <div v-else class="device-modal-list">
@@ -509,24 +509,42 @@
     </div>
 
     <!-- 重置密码弹窗 -->
-    <div v-if="passwordModalVisible" class="modal-mask" @click.self="passwordModalVisible = false">
-      <div class="modal-card glass">
-        <div class="modal-head">
-          <span class="modal-title">重置密码</span>
-          <button class="modal-close" @click="passwordModalVisible = false">×</button>
-        </div>
-        <div class="modal-body">
-          <p class="modal-tip">为用户「{{ passwordModalUser?.nickname || passwordModalUser?.email }}」设置新密码（至少 6 位）</p>
-          <input v-model="passwordInput" type="password" class="input" placeholder="请输入新密码" @keyup.enter="submitResetPassword" />
-        </div>
-        <div class="modal-foot">
-          <button class="btn-sm btn-ghost" :disabled="passwordSaving" @click="passwordModalVisible = false">取消</button>
-          <button class="btn-sm btn-mint" :disabled="passwordSaving" @click="submitResetPassword">{{ passwordSaving ? '提交中…' : '确认重置' }}</button>
-        </div>
-      </div>
-    </div>
+ <div v-if="passwordModalVisible" class="modal-mask" @click.self="passwordModalVisible = false">
+ <div class="modal-card">
+ <div class="modal-head">
+ <span class="modal-title">重置密码</span>
+ <button class="modal-close" @click="passwordModalVisible = false">×</button>
+ </div>
+ <div class="modal-body">
+ <p class="modal-tip">为用户「{{ passwordModalUser?.nickname || passwordModalUser?.email }}」设置新密码（至少 6 位）</p>
+ <input v-model="passwordInput" type="password" class="input" placeholder="请输入新密码" @keyup.enter="submitResetPassword" />
+ </div>
+ <div class="modal-foot">
+ <button class="btn-sm btn-ghost" :disabled="passwordSaving" @click="passwordModalVisible = false">取消</button>
+ <button class="btn-sm btn-mint" :disabled="passwordSaving" @click="submitResetPassword">{{ passwordSaving ? '提交中…' : '确认重置' }}</button>
+ </div>
+ </div>
+ </div>
 
-  </div>
+ <!-- 确认弹窗 -->
+ <transition name="modal-fade">
+ <div v-if="confirmData.show" class="modal-mask" @click.self="confirmCancel">
+ <div class="modal-card confirm-modal">
+ <div class="confirm-icon" :class="{ danger: confirmData.danger }">
+ {{ confirmData.danger ? '!' : '?' }}
+ </div>
+ <h3 class="confirm-title">{{ confirmData.title }}</h3>
+ <p class="confirm-message">{{ confirmData.message }}</p>
+ <div class="confirm-actions">
+ <button class="btn-sm btn-ghost" @click="confirmCancel">{{ confirmData.cancelText || '取消' }}</button>
+ <button class="confirm-ok" :class="{ danger: confirmData.danger }" @click="confirmOk">
+ {{ confirmData.confirmText || '确定' }}
+ </button>
+ </div>
+ </div>
+ </div>
+ </transition>
+ </div>
 </template>
 
 <script setup>
@@ -562,6 +580,35 @@ const passwordModalVisible = ref(false)
 const passwordModalUser = ref(null)
 const passwordInput = ref('')
 const passwordSaving = ref(false)
+
+// 确认弹窗
+const confirmData = ref({ show: false, title: '', message: '', confirmText: '确定', cancelText: '取消', danger: false, resolve: null })
+
+function showConfirm(options) {
+  return new Promise(resolve => {
+    confirmData.value = {
+      show: true,
+      title: options.title || '请确认',
+      message: options.message || '',
+      confirmText: options.confirmText || '确定',
+      cancelText: options.cancelText || '取消',
+      danger: options.danger !== false,
+      resolve,
+    }
+  })
+}
+
+function confirmOk() {
+  const r = confirmData.value.resolve
+  confirmData.value = { show: false, title: '', message: '', confirmText: '确定', cancelText: '取消', danger: false, resolve: null }
+  r?.(true)
+}
+
+function confirmCancel() {
+  const r = confirmData.value.resolve
+  confirmData.value = { show: false, title: '', message: '', confirmText: '确定', cancelText: '取消', danger: false, resolve: null }
+  r?.(false)
+}
 
 // 插件管理
 const installedPlugins = ref([])
@@ -685,7 +732,8 @@ async function saveUser(u) {
 }
 
 async function deleteUser(u) {
-  if (!window.confirm(`确定删除用户「${u.nickname || u.email}」吗？该用户的设备将被解绑。`)) return
+  const ok = await showConfirm({ title: '删除用户', message: `确定删除用户「${u.nickname || u.email}」吗？该用户的设备将被解绑。`, confirmText: '确认删除', danger: true })
+  if (!ok) return
   savingUser.value = true
   try {
     const res = await api.adminDeleteUser(u.user_id)
@@ -795,7 +843,8 @@ async function saveDevice(d) {
 }
 
 async function unbindDevice(d) {
-  if (!window.confirm(`确定解绑设备「${d.name || d.device_id}」吗？`)) return
+  const ok = await showConfirm({ title: '解绑设备', message: `确定解绑设备「${d.name || d.device_id}」吗？`, confirmText: '确认解绑', danger: true })
+  if (!ok) return
   savingDevice.value = true
   try {
     const res = await api.adminUnbindDevice(d.device_id)
@@ -862,7 +911,8 @@ async function updatePlugin(p) {
 }
 
 async function uninstallPlugin(p) {
-  if (!window.confirm(`确定卸载插件「${p.display_name || p.name}」吗？`)) return
+  const ok = await showConfirm({ title: '卸载插件', message: `确定卸载插件「${p.display_name || p.name}」吗？`, confirmText: '确认卸载', danger: true })
+  if (!ok) return
   uninstallingPlugin.value = p.name
   try {
     const res = await api.uninstallPlugin(p.name)
@@ -924,7 +974,8 @@ async function loadMarketplaceReviews() {
 }
 
 async function deleteReview(r) {
-  if (!window.confirm(`确定删除「${r.username}」的这条评论吗？`)) return
+  const ok = await showConfirm({ title: '删除评论', message: `确定删除「${r.username}」的这条评论吗？`, confirmText: '确认删除', danger: true })
+  if (!ok) return
   try {
     const res = await api.adminDeleteMarketplaceReview(r.id)
     if (res.status === 200 && res.data?.code === 0) {
@@ -1245,16 +1296,25 @@ tbody tr:hover { background: var(--mint-softer); }
 .modal-mask {
   position: fixed; inset: 0; z-index: 1000;
   background: rgba(15, 23, 42, 0.45);
-  backdrop-filter: blur(4px);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
   display: flex; align-items: center; justify-content: center;
   padding: 20px;
 }
 .modal-card {
   width: 100%; max-width: 460px;
   background: var(--grad-panel);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-hover), var(--glass-hi);
   overflow: hidden;
+  animation: modalPop 0.3s var(--ease);
+}
+@keyframes modalPop {
+  from { opacity: 0; transform: scale(0.92) translateY(8px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
 }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;
@@ -1286,6 +1346,34 @@ tbody tr:hover { background: var(--mint-softer); }
 }
 .device-modal-name { font-weight: 600; font-size: 13px; }
 .device-modal-id { flex: 1; min-width: 0; font-size: 12px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ===== 确认弹窗 ===== */
+.confirm-modal { width: 380px; max-width: 90vw; padding: 36px 30px 28px; text-align: center; }
+.confirm-icon {
+  width: 56px; height: 56px; border-radius: 50%; margin: 0 auto 20px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 28px; font-weight: 800; color: var(--mint);
+  background: var(--mint-soft);
+  border: 2px solid var(--mint-border);
+}
+.confirm-icon.danger { color: #e53e3e; background: var(--danger-soft); border-color: rgba(239, 68, 68, 0.35); }
+.confirm-modal .confirm-title { font-size: 18px; font-weight: 700; margin-bottom: 10px; }
+.confirm-modal .confirm-message { font-size: 14px; line-height: 1.6; color: var(--text-sub); margin-bottom: 26px; }
+.confirm-actions { display: flex; gap: 12px; justify-content: center; }
+.confirm-ok {
+  padding: 7px 20px; font-size: 13px; font-weight: 600; border: none;
+  border-radius: var(--radius-md); cursor: pointer;
+  background: var(--grad-mint); color: #fff;
+  box-shadow: var(--shadow-mint); transition: all 0.2s var(--ease);
+}
+.confirm-ok:hover { filter: brightness(1.08); }
+.confirm-ok.danger { background: linear-gradient(135deg, #fc8181, #e53e3e); box-shadow: 0 4px 12px rgba(229, 62, 62, 0.3); }
+
+/* 弹窗过渡动画 */
+.modal-fade-enter-active, .modal-fade-leave-active { transition: opacity 0.25s var(--ease); }
+.modal-fade-enter-from, .modal-fade-leave-to { opacity: 0; }
+.modal-fade-enter-active .modal-card, .modal-fade-leave-active .modal-card { transition: transform 0.25s var(--ease); }
+.modal-fade-enter-from .modal-card, .modal-fade-leave-to .modal-card { transform: scale(0.92) translateY(8px); }
 
 @media (max-width: 600px) {
   .hero-bar { padding: 22px 20px 18px; }

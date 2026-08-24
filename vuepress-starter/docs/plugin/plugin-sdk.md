@@ -19,7 +19,7 @@
 | 指令下发 | `send_instruct()` / `send_device_command()` | 向设备发一条 `instruct` 指令 |
 | **音乐播放** | `play_music_url()` | 给一个链接即可播放音乐，支持歌词和元数据 |
 | 指令回执 | `request_device_result()` / `send_device_command_ack()` | 下发指令并**等待设备回复结果**（Lua 返回、状态查询、指令 ack） |
-| 配置读取 | `get_plugin_config_or_env()` | 插件配置 → 环境变量 → 默认值，三级回退 |
+| KV 配置存储 | `kv_get()` / `kv_set()` / `kv_delete()` / `kv_list()` | 插件专属的持久化键值存储（推荐替代 config_fields） |
 | HTTP 请求 | `http_request()` / `http_get_json()` | 统一超时与错误处理的外部 API 调用 |
 | LTM 记忆 | `get_ltm_service()` / `get_default_ltm_service()` | 访问长期记忆服务（注入优先） |
 | 仓储工厂 | `get_diary_repository()` / `get_device_repository()` | 延迟加载数据库仓储，避免插件启动即依赖 DB |
@@ -29,7 +29,6 @@
 | **设备状态** | `device_is_online()` / `device_get_info()` | 查询设备在线状态与基本信息 |
 | **设备 IO 控制** | `gpio_mode()` / `gpio_write()` / `gpio_read()` / `pwm_write()` / `adc_read()` / `servo_write()` | 控制设备 GPIO、PWM、ADC、舵机 |
 | **文件持久化** | `plugin_data_read()` / `plugin_data_write()` / `plugin_data_list()` / `plugin_data_delete()` | 读写插件专属数据目录 |
-| **键值存储** | `kv_get()` / `kv_set()` / `kv_delete()` / `kv_list()` | 插件专属的持久化键值存储 |
 | **用户画像** | `get_user_profile_summary()` | 获取当前设备用户的画像摘要 |
 | **工具函数** | `generate_uuid()` / `current_timestamp()` / `json_dumps()` / `json_loads()` | 通用零依赖工具函数 |
 
@@ -172,6 +171,20 @@ await play_music_url("http://...", device_key="bound_xxx")
 
 ## 四、指令回执：等待设备回复
 
+::: tip 推荐导入方式
+插件 SDK 已按功能拆分到 `src/use_cases/sdk/` 子模块中。推荐使用新路径：
+
+```python
+from src.use_cases.sdk.device import send_device_command, request_device_result, send_device_command_ack
+from src.use_cases.sdk.http import http_request, http_get_json
+from src.use_cases.sdk.storage import kv_get, kv_set, plugin_data_read
+from src.use_cases.sdk.services import llm_chat, tts_synthesize
+from src.use_cases.sdk.utils import json_dumps, get_device_key
+```
+
+旧路径 `from src.use_cases._plugin_helpers import xxx` 仍然兼容，新插件建议使用新路径。
+:::
+
 普通指令"发出即成功"，但有些指令需要设备**执行后回传结果**：
 
 - `execute_lua`：设备执行 Lua 后把返回值发回来（如 GPIO 读取、传感器数值）
@@ -233,12 +246,12 @@ if status == "busy":
 
 ---
 
-## 四、插件配置存储：KV 存储优先
+## 五、插件配置存储：KV 存储优先
 
 插件需要保存用户配置（如 API Key）时，**不要写入主数据库**，应使用插件专属的 KV 存储。
 
 ::: tip 设计原则
-插件配置走 KV 存储，不经过主数据库 `device_config` 表。KV 存储是 JSON 文件，路径自动隔离（`data/plugins/kv/<插件id>.json`），插件之间互不可见。
+插件配置走 KV 存储，不经过主数据库 `device_config` 表。KV 存储是 JSON 文件，路径自动按设备 MAC 隔离（`data/plugins/kv/{sanitized_mac}/<插件id>.json`），每台设备独立配置，插件之间互不可见。
 :::
 
 ### 保存配置
@@ -306,7 +319,7 @@ if not amap_key:
 
 ---
 
-## 五、HTTP 请求：统一超时与错误处理
+## 六、HTTP 请求：统一超时与错误处理
 
 插件调用外部 API 最常见的两个坑：**忘记设超时**导致会话卡死；**异常处理不统一**导致错误文案混乱。SDK 统一返回 `(result, error)` 元组：
 
@@ -349,7 +362,7 @@ if data.get("status") != "1":
 
 ---
 
-## 六、LTM 长期记忆服务
+## 七、LTM 长期记忆服务
 
 需要读写长期记忆（记忆系统）的插件，通过 SDK 获取服务实例，不必自行实例化仓储：
 
@@ -369,7 +382,7 @@ service = get_default_ltm_service()
 
 ---
 
-## 七、仓储工厂：延迟加载数据库依赖
+## 八、仓储工厂：延迟加载数据库依赖
 
 插件若在模块顶层 import 数据库仓储，插件加载时就会触发 DB 初始化——即使该插件根本不用 DB。SDK 提供工厂函数，**调用时才延迟导入**：
 
@@ -388,7 +401,7 @@ entries = repo.get_recent(device_key, limit=5)
 
 ---
 
-## 八、技能目录渲染
+## 九、技能目录渲染
 
 `list_skills` 类工具（如 `skill_tools.py`）需要把设备可用的技能列给 LLM 看。手写渲染逻辑容易漏掉**禁用技能过滤**和**设备专属标记**，SDK 已统一处理：
 
@@ -410,7 +423,7 @@ def list_skills(tool_manager=None) -> str:
 
 ---
 
-## 九、LLM 对话（权限 `llm`）
+## 十、LLM 对话（权限 `llm`）
 
 插件可以调用大模型进行文本生成、智能分析、主动对话等操作。SDK 提供两种调用方式：
 
@@ -458,7 +471,7 @@ async def summarize(text: str, tool_manager=None) -> str:
 
 ---
 
-## 十、TTS 语音合成（权限 `tts`）
+## 十一、TTS 语音合成（权限 `tts`）
 
 将文本转换为 MP3 格式的音频数据，插件可以获取音频后通过设备指令发送给设备播放。
 
@@ -484,7 +497,7 @@ async def speak_text(text: str, tool_manager=None) -> str:
 
 ---
 
-## 十一、设备状态查询（权限 `device`）
+## 十二、设备状态查询（权限 `device`）
 
 查询设备的在线状态和基本信息，无需下发指令即可获取设备信息。
 
@@ -535,7 +548,7 @@ async def get_device_status(tool_manager=None) -> str:
 
 ---
 
-## 十二、插件数据持久化（权限 `file_read` / `file_write`）
+## 十三、插件数据持久化（权限 `file_read` / `file_write`）
 
 每个插件拥有**独立的文件系统目录**，可以读写自己的数据文件。路径自动隔离，插件之间互不可见，且带有**路径穿越防护**。
 
@@ -591,7 +604,7 @@ if plugin_data_delete("old_cache.json", tool_manager=tool_manager):
 
 ---
 
-## 十三、键值存储（权限 `kv`）
+## 十四、键值存储（权限 `kv`）
 
 插件专属的**持久化键值存储**，适合保存配置、状态、缓存等简单数据。无需处理文件路径，开箱即用。
 
@@ -636,11 +649,11 @@ all_data = kv_list(tool_manager=tool_manager)
 cache_data = kv_list(prefix="cache_", tool_manager=tool_manager)
 ```
 
-数据存储在 `data/plugins/kv/<插件id>.json` 文件中，重启服务后保留。
+数据存储在 `data/plugins/kv/{sanitized_mac}/<插件id>.json` 文件中（按设备 MAC 地址隔离），重启服务后保留。
 
 ---
 
-## 十四、用户画像（权限 `db`）
+## 十五、用户画像（权限 `db`）
 
 获取当前设备用户的画像摘要，用于了解用户偏好、姓名、兴趣等信息，实现个性化服务。
 
@@ -662,7 +675,7 @@ async def greet_user(tool_manager=None) -> str:
 
 ---
 
-## 十五、通用工具函数（无需权限）
+## 十六、通用工具函数（无需权限）
 
 纯本地执行的工具函数，不涉及 RPC 通信，零开销。
 
@@ -708,7 +721,7 @@ data = json_loads('{"name": "小明"}')
 
 ---
 
-## 十一、设备 IO 控制：控制 GPIO、PWM、舵机
+## 十七、设备 IO 控制：控制 GPIO、PWM、舵机
 
 插件可以直接通过 SDK 控制 ESP32 设备的硬件引脚，无需编写 Lua 代码。
 

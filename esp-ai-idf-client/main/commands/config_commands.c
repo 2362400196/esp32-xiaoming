@@ -11,6 +11,8 @@
  */
 #include "command_registry.h"
 #include "config.h"
+#include "power_manager.h"
+#include "eeui_port.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
@@ -34,7 +36,28 @@ static void apply_config_immediate(const char *key, const char *value)
             ESP_LOGW(TAG, "音量值 %.2f 超出范围 [0.0, 1.0]，跳过即时生效", vol);
         }
     }
-    // 可在此添加其他支持即时生效的配置项
+    // 机器人模式：立即生效，只显示表情，隐藏所有文字/图标/横条
+    if (strcmp(key, "robot_mode") == 0) {
+        bool enabled = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
+        eeui_port_set_robot_mode(enabled);
+        ESP_LOGI(TAG, "机器人模式已即时调整: %s", enabled ? "开启" : "关闭");
+    }
+    // 屏保开关：立即生效
+    if (strcmp(key, "screensaver_enabled") == 0) {
+        bool enabled = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
+        power_manager_set_screensaver_config(enabled, -1);
+        ESP_LOGI(TAG, "屏保开关已即时调整: %s", enabled ? "开启" : "关闭");
+    }
+    // 屏保超时秒数：立即生效
+    if (strcmp(key, "screensaver_timeout") == 0) {
+        int sec = atoi(value);
+        if (sec >= 5 && sec <= 600) {
+            power_manager_set_screensaver_config(true, sec);
+            ESP_LOGI(TAG, "屏保超时已即时调整为: %d秒", sec);
+        } else {
+            ESP_LOGW(TAG, "屏保超时值 %s 超出范围 [5, 600]，跳过", value);
+        }
+    }
 }
 
 // update_config: 解析 data 对象中的键值对，全部写入 NVS
@@ -76,48 +99,44 @@ static esp_err_t cmd_update_config(cJSON *json)
         const char *key = item->string;
         if (!key) continue;
 
-        // ESP-IDF NVS 键名最大 15 字符（ESP_ERR_NVS_KEY_TOO_LONG）。
-        // 服务端下发的服务端专用配置键（如 llm_system_prompt，17 字符）固件本地
-        // 不消费，超长键直接跳过；这是正常情况，用 DEBUG 级别避免刷日志。
-        if (strlen(key) > 15) {
-            ESP_LOGD(TAG, "NVS 键名超长(>15)跳过: %s", key);
+        // 提取值字符串（统一处理 string / number / bool 三种 JSON 类型）
+        const char *value_str = NULL;
+        char num_buf[32];
+        if (cJSON_IsString(item)) {
+            value_str = item->valuestring;
+        } else if (cJSON_IsNumber(item)) {
+            if (item->valuedouble == (double)item->valueint) {
+                snprintf(num_buf, sizeof(num_buf), "%d", item->valueint);
+            } else {
+                snprintf(num_buf, sizeof(num_buf), "%.2f", item->valuedouble);
+            }
+            value_str = num_buf;
+        } else if (cJSON_IsBool(item)) {
+            value_str = item->valueint ? "true" : "false";
+        }
+        if (!value_str) continue;
+
+        // 1. 先应用即时生效（在 NVS 键长检查之前）
+        //    确保 screensaver_enabled 等超长键名（>15 字符）也能立即生效
+        apply_config_immediate(key, value_str);
+
+        // 2. NVS 持久化：ESP-IDF 键名最大 15 字符
+        //    服务端配置键名可能超长（如 screensaver_enabled 18 字符），
+        //    映射为短键名后再写入 NVS。
+        const char *nvs_key = key;
+        if (strcmp(key, "screensaver_enabled") == 0) nvs_key = "ss_enabled";
+        else if (strcmp(key, "screensaver_timeout") == 0) nvs_key = "ss_timeout";
+        else if (strlen(key) > 15) {
+            ESP_LOGD(TAG, "NVS 键名超长(>15)且无映射，跳过持久化: %s", key);
             continue;
         }
 
-        if (cJSON_IsString(item)) {
-            esp_err_t nret = nvs_set_str(h, key, item->valuestring);
-            if (nret != ESP_OK) {
-                ESP_LOGE(TAG, "NVS 写入失败 (key=%s): %s", key, esp_err_to_name(nret));
-            } else {
-                apply_config_immediate(key, item->valuestring);
-                ESP_LOGI(TAG, "配置更新: %s = %s", key, item->valuestring);
-                count++;
-            }
-        } else if (cJSON_IsNumber(item)) {
-            // 数字也存为字符串，与 Arduino 端一致
-            char buf[32];
-            if (item->valuedouble == (double)item->valueint) {
-                snprintf(buf, sizeof(buf), "%d", item->valueint);
-            } else {
-                snprintf(buf, sizeof(buf), "%.2f", item->valuedouble);
-            }
-            esp_err_t nret = nvs_set_str(h, key, buf);
-            if (nret != ESP_OK) {
-                ESP_LOGE(TAG, "NVS 写入失败 (key=%s): %s", key, esp_err_to_name(nret));
-            } else {
-                apply_config_immediate(key, buf);
-                ESP_LOGI(TAG, "配置更新: %s = %s", key, buf);
-                count++;
-            }
-        } else if (cJSON_IsBool(item)) {
-            const char *bool_str = item->valueint ? "true" : "false";
-            esp_err_t nret = nvs_set_str(h, key, bool_str);
-            if (nret != ESP_OK) {
-                ESP_LOGE(TAG, "NVS 写入失败 (key=%s): %s", key, esp_err_to_name(nret));
-            } else {
-                ESP_LOGI(TAG, "配置更新: %s = %s", key, bool_str);
-                count++;
-            }
+        esp_err_t nret = nvs_set_str(h, nvs_key, value_str);
+        if (nret != ESP_OK) {
+            ESP_LOGE(TAG, "NVS 写入失败 (key=%s): %s", key, esp_err_to_name(nret));
+        } else {
+            ESP_LOGI(TAG, "配置更新: %s = %s", key, value_str);
+            count++;
         }
     }
 

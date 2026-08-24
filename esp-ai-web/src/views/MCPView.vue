@@ -97,8 +97,8 @@
 
     <!-- ===== 添加/编辑弹窗 ===== -->
     <transition name="pop">
-      <div v-if="showAddForm" class="detail-mask" @click.self="closeForm">
-        <div class="detail-panel glass form-panel">
+      <div v-if="showAddForm" class="modal-mask" @click.self="closeForm">
+        <div class="modal-card form-panel">
           <button class="detail-close" @click="closeForm">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
@@ -135,6 +135,23 @@
         </div>
       </div>
     </transition>
+
+    <!-- ===== 删除确认弹窗 ===== -->
+    <transition name="modal-fade">
+      <div v-if="confirmData.show" class="modal-mask" @click.self="confirmCancel">
+        <div class="modal-card confirm-modal">
+          <div class="confirm-icon danger">!</div>
+          <h3 class="confirm-title">{{ confirmData.title }}</h3>
+          <p class="confirm-message">{{ confirmData.message }}</p>
+          <div class="confirm-actions">
+            <button class="btn-sm btn-ghost" @click="confirmCancel">{{ confirmData.cancelText || '取消' }}</button>
+            <button class="confirm-ok danger" @click="confirmOk">
+              {{ confirmData.confirmText || '确定' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </transition>
   </div>
 </template>
 
@@ -157,6 +174,34 @@ const formUrl = ref('')
 const formType = ref('streamable_http')
 const formHeaders = ref('')
 const saving = ref(false)
+
+// 确认弹窗
+const confirmData = ref({ show: false, title: '', message: '', confirmText: '确定', cancelText: '取消', resolve: null })
+
+function showConfirm(options) {
+  return new Promise(resolve => {
+    confirmData.value = {
+      show: true,
+      title: options.title || '请确认',
+      message: options.message || '',
+      confirmText: options.confirmText || '确定',
+      cancelText: options.cancelText || '取消',
+      resolve,
+    }
+  })
+}
+
+function confirmOk() {
+  const r = confirmData.value.resolve
+  confirmData.value = { show: false, title: '', message: '', confirmText: '确定', cancelText: '取消', resolve: null }
+  r?.(true)
+}
+
+function confirmCancel() {
+  const r = confirmData.value.resolve
+  confirmData.value = { show: false, title: '', message: '', confirmText: '确定', cancelText: '取消', resolve: null }
+  r?.(false)
+}
 
 function deviceMac() {
   return props.currentDevice?.device_id || props.currentDevice?.id || props.currentDevice?.mac || ''
@@ -255,6 +300,14 @@ async function saveServer() {
 }
 
 async function deleteServer(name) {
+  const ok = await showConfirm({
+    title: '删除MCP服务器',
+    message: `确定删除「${name}」服务器吗？相关工具将不可用。`,
+    confirmText: '确认删除',
+    cancelText: '取消',
+  })
+  if (!ok) return
+
   const mac = deviceMac()
   if (!mac) return
   const res = await api.mcpDelete(mac, name)
@@ -321,12 +374,76 @@ onMounted(() => {
 .btn-danger { color: var(--danger) !important; }
 .btn-danger:hover { background: var(--danger-soft) !important; }
 
-/* 弹窗 */
-.form-panel { max-width: 480px; }
+/* ===== 弹窗遮罩层 ===== */
+.modal-mask {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+.modal-card {
+  width: 100%; max-width: 480px;
+  background: var(--grad-panel);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-hover), var(--glass-hi);
+  overflow: hidden;
+  animation: modalPop 0.3s var(--ease);
+}
+@keyframes modalPop {
+  from { opacity: 0; transform: scale(0.92) translateY(8px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+.detail-close {
+  position: absolute; top: 14px; right: 14px;
+  border: none; background: transparent;
+  color: var(--text-dim); cursor: pointer; padding: 4px;
+  line-height: 1; z-index: 1;
+}
+
+/* 表单弹窗 */
+.form-panel { max-width: 480px; position: relative; padding: 28px 24px 24px; }
 .form-title { font-size: 16px; font-weight: 700; margin: 0 0 20px 0; }
 .form-group { margin-bottom: 14px; }
 .form-label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; color: var(--text-sub); }
 .form-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; }
+
+/* ===== 确认弹窗 ===== */
+.confirm-modal { width: 380px; max-width: 90vw; padding: 36px 30px 28px; text-align: center; }
+.confirm-icon {
+  width: 56px; height: 56px; border-radius: 50%; margin: 0 auto 20px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 28px; font-weight: 800; color: var(--mint);
+  background: var(--mint-soft);
+  border: 2px solid var(--mint-border);
+}
+.confirm-icon.danger { color: #e53e3e; background: var(--danger-soft); border-color: rgba(239, 68, 68, 0.35); }
+.confirm-modal .confirm-title { font-size: 18px; font-weight: 700; margin-bottom: 10px; }
+.confirm-modal .confirm-message { font-size: 14px; line-height: 1.6; color: var(--text-sub); margin-bottom: 26px; }
+.confirm-actions { display: flex; gap: 12px; justify-content: center; }
+.confirm-ok {
+  padding: 7px 20px; font-size: 13px; font-weight: 600; border: none;
+  border-radius: var(--radius-md); cursor: pointer;
+  background: var(--grad-mint); color: #fff;
+  box-shadow: var(--shadow-mint); transition: all 0.2s var(--ease);
+}
+.confirm-ok:hover { filter: brightness(1.08); }
+.confirm-ok.danger { background: linear-gradient(135deg, #fc8181, #e53e3e); box-shadow: 0 4px 12px rgba(229, 62, 62, 0.3); }
+
+/* ===== 弹窗过渡 ===== */
+.pop-enter-active, .pop-leave-active { transition: opacity 0.25s var(--ease); }
+.pop-enter-from, .pop-leave-to { opacity: 0; }
+.pop-enter-active .modal-card, .pop-leave-active .modal-card { transition: transform 0.25s var(--ease); }
+.pop-enter-from .modal-card, .pop-leave-to .modal-card { transform: scale(0.92) translateY(8px); }
+
+.modal-fade-enter-active, .modal-fade-leave-active { transition: opacity 0.25s var(--ease); }
+.modal-fade-enter-from, .modal-fade-leave-to { opacity: 0; }
+.modal-fade-enter-active .modal-card, .modal-fade-leave-active .modal-card { transition: transform 0.25s var(--ease); }
+.modal-fade-enter-from .modal-card, .modal-fade-leave-to .modal-card { transform: scale(0.92) translateY(8px); }
 
 .loading-state, .empty-state {
   padding: 60px 20px; text-align: center; border-radius: var(--radius-lg);

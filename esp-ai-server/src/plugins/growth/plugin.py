@@ -115,10 +115,15 @@ async def analyze_conversation_quality(tool_manager=None) -> str:
 @tool()
 async def get_self_learned_skills(tool_manager=None) -> str:
     """查看从对话中自学习到的新技能。"""
-    from src.use_cases.growth.self_learning import SelfLearningService
-    learner = SelfLearningService()
-    skills = await learner.get_learned_skills()
-    if not skills:
+    from src.use_cases import skill_system
+    from src.use_cases._plugin_helpers import get_device_key
+    device_key = get_device_key(tool_manager)
+    catalog = skill_system.get_catalog(device_key)
+    if not catalog:
         return "还没有自学习的技能"
-    lines = [f"· {s.get('name', '未知')}：{s.get('description', '')}" for s in skills]
+    # 只显示自学习技能（device_id 不为空）
+    self_learned = [s for s in catalog if s.device_id]
+    if not self_learned:
+        return "还没有自学习的技能"
+    lines = [f"· {s.name or s.id}：{s.description}" for s in self_learned]
     return "自学习技能列表：\n" + "\n".join(lines)

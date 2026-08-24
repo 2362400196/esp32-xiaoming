@@ -3,7 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MCP 服务器管理</title>
+	<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+	<meta http-equiv="Pragma" content="no-cache">
+	<meta http-equiv="Expires" content="0">
+	<title>MCP 服务器管理</title>
 <style>
 :root {
   --mint: #10b981; --mint-deep: #059669; --mint-soft: rgba(16,185,129,0.1);
@@ -74,9 +77,20 @@ body {
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 50px; color: var(--text-sub); }
 /* Modal */
-.modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.3); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-.modal-panel { width: 90%; max-width: 460px; max-height: 90vh; overflow-y: auto; }
-.modal-title { font-size: 16px; font-weight: 700; margin: 0 0 16px; }
+	.modal-mask { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); backdrop-filter: blur(12px) saturate(140%); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+	.modal-panel { width: 90%; max-width: 460px; max-height: 90vh; overflow-y: auto; }
+	.modal-title { font-size: 16px; font-weight: 700; margin: 0 0 16px; }
+	/* 确认弹窗 */
+	.confirm-mask { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); backdrop-filter: blur(12px) saturate(140%); display: none; align-items: center; justify-content: center; z-index: 2000; }
+	.confirm-panel { width: 380px; max-width: 90vw; padding: 36px 30px 28px; text-align: center; }
+	.confirm-icon { width: 56px; height: 56px; border-radius: 50%; margin: 0 auto 20px; display: flex; align-items: center; justify-content: center; font-size: 28px; font-weight: 800; color: #e53e3e; background: var(--danger-soft); border: 2px solid rgba(239,68,68,0.35); }
+	.confirm-title { font-size: 18px; font-weight: 700; margin: 0 0 10px; color: var(--text-main); }
+	.confirm-message { font-size: 14px; line-height: 1.6; color: var(--text-sub); margin-bottom: 26px; }
+	.confirm-actions { display: flex; gap: 12px; justify-content: center; }
+	.confirm-ok { padding: 7px 20px; font-size: 13px; font-weight: 600; border: none; border-radius: 10px; cursor: pointer; background: linear-gradient(135deg, #fc8181, #e53e3e); color: #fff; box-shadow: 0 4px 12px rgba(229,62,62,0.3); transition: filter 0.2s; }
+	.confirm-ok:hover { filter: brightness(1.08); }
+	.confirm-cancel { padding: 7px 20px; font-size: 13px; font-weight: 600; border: 1px solid var(--glass-border); border-radius: 10px; cursor: pointer; background: rgba(255,255,255,0.6); color: var(--text-main); transition: all 0.2s; }
+	.confirm-cancel:hover { border-color: var(--mint-border); color: var(--mint-deep); background: var(--mint-soft); }
 .form-group { margin-bottom: 12px; }
 .form-label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; color: var(--text-sub); }
 input, select, textarea {
@@ -205,6 +219,19 @@ textarea { resize: vertical; min-height: 60px; }
   </div>
 </div>
 
+<!-- 删除确认弹窗 -->
+<div class="confirm-mask" id="confirmMask" onclick="if(event.target===this)confirmCancel()">
+  <div class="confirm-panel card" onclick="event.stopPropagation()">
+    <div class="confirm-icon">!</div>
+    <div class="confirm-title" id="confirmTitle">请确认</div>
+    <div class="confirm-message" id="confirmMessage">确定执行此操作吗？</div>
+    <div class="confirm-actions">
+      <button class="confirm-cancel" id="confirmCancelBtn" onclick="confirmCancel()">取消</button>
+      <button class="confirm-ok" id="confirmOkBtn" onclick="confirmOk()">确定</button>
+    </div>
+  </div>
+</div>
+
 <script>
 let currentDevice = null;
 let servers = {};
@@ -212,6 +239,35 @@ let editingName = '';
 let disabledServers = [];
 let disabledTools = {}; // {server_name: [tool_name, ...]}
 let toolModalServer = ''; // 当前弹窗显示的服务器名
+
+// 确认弹窗状态
+let confirmResolve = null;
+let confirmPromise = null;
+
+function showConfirm(options) {
+  document.getElementById('confirmTitle').textContent = options.title || '请确认';
+  document.getElementById('confirmMessage').textContent = options.message || '确定执行此操作吗？';
+  document.getElementById('confirmMask').style.display = 'flex';
+  return new Promise(resolve => {
+    confirmResolve = resolve;
+  });
+}
+
+function confirmOk() {
+  if (confirmResolve) {
+    confirmResolve(true);
+    confirmResolve = null;
+  }
+  document.getElementById('confirmMask').style.display = 'none';
+}
+
+function confirmCancel() {
+  if (confirmResolve) {
+    confirmResolve(false);
+    confirmResolve = null;
+  }
+  document.getElementById('confirmMask').style.display = 'none';
+}
 
 function getToken() { return localStorage.getItem('espai_token') || ''; }
 
@@ -241,6 +297,14 @@ async function api(path, method = 'GET', body = null) {
   }
 }
 
+// 插件 exec 桥梁 — 前端调用插件后端 SDK，无需自定义 HTTP 路由
+async function execApi(method, args = {}) {
+  const mac = deviceMac();
+  if (!mac) return { code: 1, message: '设备未选择' };
+  args.mac = mac;
+  return await api('/api/v1/plugins/mcp_manager/exec', 'POST', { method, args });
+}
+
 async function loadServers() {
   const mac = deviceMac();
   if (!mac) {
@@ -253,18 +317,15 @@ async function loadServers() {
   document.getElementById('emptyState').style.display = 'none';
   document.getElementById('serverList').innerHTML = '';
 
-  const res = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp');
+  const [svrRes, disRes] = await Promise.all([
+    execApi('get_servers'),
+    execApi('get_disabled')
+  ]);
   document.getElementById('loading').style.display = 'none';
-  if (res.code === 0) {
-    servers = res.data || {};
-    // 加载禁用状态（服务器 + 工具）
-    const dRes = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/disabled');
-    disabledServers = [];
-    disabledTools = {};
-    if (dRes.code === 0 && dRes.data) {
-      disabledServers = dRes.data.disabled_servers || [];
-      disabledTools = dRes.data.disabled_tools || {};
-    }
+  if (svrRes.code === 0) {
+    servers = svrRes.data || {};
+    disabledServers = (disRes.code === 0 && disRes.data) ? (disRes.data.disabled_servers || []) : [];
+    disabledTools = (disRes.code === 0 && disRes.data) ? (disRes.data.disabled_tools || {}) : [];
     renderServers();
     // 自动加载所有服务器的工具列表
     const names = Object.keys(servers);
@@ -272,7 +333,7 @@ async function loadServers() {
       await Promise.all(names.map(name => loadTools(name)));
     }
   } else {
-    showToast(res.message || '加载失败');
+    showToast(svrRes.message || '加载失败');
   }
 }
 
@@ -315,14 +376,11 @@ function renderServers() {
 }
 
 async function loadTools(name) {
-  const mac = deviceMac();
-  if (!mac) return;
-  const res = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/' + encodeURIComponent(name) + '/tools');
+  const res = await execApi('get_tools', { server_name: name });
   if (res.code === 0) {
     if (!servers[name]) servers[name] = {};
     servers[name]._tools = res.data || [];
     renderServers();
-    // 如果弹窗打开着且是同一个服务器，同步刷新
     if (toolModalServer === name) renderToolsModal(name);
   } else {
     showToast(res.message || '加载工具失败');
@@ -330,14 +388,8 @@ async function loadTools(name) {
 }
 
 async function toggleTool(serverName, toolName, currentlyDisabled) {
-  const mac = deviceMac();
-  if (!mac) return;
   const newDisabled = !currentlyDisabled;
-  const res = await api(
-    '/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/' + encodeURIComponent(serverName) + '/tools/' + encodeURIComponent(toolName) + '/toggle',
-    'POST',
-    { disabled: newDisabled }
-  );
+  const res = await execApi('toggle_tool', { server_name: serverName, tool_name: toolName, disabled: newDisabled });
   if (res.code === 0) {
     if (!disabledTools[serverName]) disabledTools[serverName] = [];
     if (newDisabled) {
@@ -346,7 +398,6 @@ async function toggleTool(serverName, toolName, currentlyDisabled) {
       disabledTools[serverName] = disabledTools[serverName].filter(t => t !== toolName);
     }
     renderServers();
-    // 如果弹窗打开着，同步刷新弹窗内容
     if (toolModalServer === serverName) renderToolsModal(serverName);
     showToast(`工具「${toolName}」已${newDisabled ? '禁用' : '启用'}`);
   } else {
@@ -397,10 +448,8 @@ function renderToolsModal(name) {
 }
 
 async function toggleServer(name, currentlyDisabled) {
-  const mac = deviceMac();
-  if (!mac) return;
   const newDisabled = !currentlyDisabled;
-  const res = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/' + encodeURIComponent(name) + '/toggle', 'POST', { disabled: newDisabled });
+  const res = await execApi('toggle_server', { server_name: name, disabled: newDisabled });
   if (res.code === 0) {
     if (newDisabled) {
       if (!disabledServers.includes(name)) disabledServers.push(name);
@@ -450,10 +499,8 @@ async function saveServer() {
   const url = document.getElementById('formUrl').value.trim();
   const type = document.getElementById('formType').value;
   const headersRaw = document.getElementById('formHeaders').value.trim();
-  const mac = deviceMac();
   if (!name) { showToast('请输入服务器名称'); return; }
   if (!url) { showToast('请输入 URL'); return; }
-  if (!mac) { showToast('请先选择设备'); return; }
   let headers = {};
   if (headersRaw) {
     try { headers = JSON.parse(headersRaw); } catch { showToast('请求头格式错误，需为 JSON'); return; }
@@ -461,7 +508,7 @@ async function saveServer() {
   const btn = document.getElementById('saveBtn');
   btn.disabled = true;
   btn.textContent = '保存中…';
-  const res = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/' + encodeURIComponent(name), 'PUT', { type, url, headers });
+  const res = await execApi('update_server', { server_name: name, type, url, headers });
   btn.disabled = false;
   btn.textContent = '保存';
   if (res.code === 0) {
@@ -474,10 +521,12 @@ async function saveServer() {
 }
 
 async function deleteServer(name) {
-  const mac = deviceMac();
-  if (!mac) return;
-  if (!confirm(`确定要删除「${name}」吗？`)) return;
-  const res = await api('/api/v1/devices/' + encodeURIComponent(mac) + '/mcp/' + encodeURIComponent(name), 'DELETE');
+  const ok = await showConfirm({
+    title: '删除MCP服务器',
+    message: `确定删除「${name}」服务器吗？相关工具将不可用。`,
+  });
+  if (!ok) return;
+  const res = await execApi('delete_server', { server_name: name });
   if (res.code === 0) {
     delete servers[name];
     renderServers();
@@ -499,7 +548,8 @@ function q(s) { return escapeHtml(String(s)).replace(/'/g,"\\'"); }
 // ESC 关闭弹窗
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') {
-    if (document.getElementById('toolModalMask').style.display === 'flex') closeToolsModal();
+    if (document.getElementById('confirmMask').style.display === 'flex') confirmCancel();
+    else if (document.getElementById('toolModalMask').style.display === 'flex') closeToolsModal();
     else if (document.getElementById('modalMask').style.display === 'flex') closeForm();
   }
 });

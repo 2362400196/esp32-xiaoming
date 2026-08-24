@@ -5,7 +5,7 @@
 ::: tip 阅读前提
 建议先浏览 [插件开发教程](./plugin-dev.md) 了解整体架构，再回到本篇动手实践。所有示例均基于真实内置插件代码简化而来，确保可直接复制运行。
 
-示例二起会用到插件 SDK（`src/use_cases/_plugin_helpers.py`）——它统一封装了设备指令、配置读取、HTTP 请求等高频操作。完整说明见 [插件公共工具库（Plugin SDK）](./plugin-sdk.md)。
+示例二起会用到插件 SDK（`src/use_cases/sdk/` 子模块）——它按领域封装了设备指令、HTTP 请求、KV 存储、工具函数等高频操作。完整说明见 [插件公共工具库（Plugin SDK）](./plugin-sdk.md)。
 :::
 
 ---
@@ -193,7 +193,7 @@ LLM 解析后调用 `say_hello(name="张三")`，设备播报："你好，张三
 
 ```python
 from src.use_cases.tools_system import tool
-from src.use_cases._plugin_helpers import send_device_command
+from src.use_cases.sdk.device import send_device_command
 
 @tool()
 async def set_brightness(level: int, tool_manager=None) -> str:
@@ -207,7 +207,7 @@ async def set_brightness(level: int, tool_manager=None) -> str:
 
     err = await send_device_command(tool_manager, "set_brightness", str(level))
     if err:
-        return f"亮度设置指令已生成: {level}%（{err}）"
+        return f"亮度设置失败: {err}"
     return f"已将屏幕亮度设置为 {level}%"
 ```
 
@@ -305,7 +305,7 @@ LLM 偶尔会传入超范围值（如 `level=150`）。用 `max`/`min` 钳制到
 
 ```python
 from src.use_cases.tools_system import tool
-from src.use_cases._plugin_helpers import send_device_command
+from src.use_cases.sdk.device import send_device_command
 
 @tool()
 async def show_text(text: str = "Hello", tool_manager=None) -> str:
@@ -406,7 +406,8 @@ lua_code = (
 
 ```python
 from src.use_cases.tools_system import tool
-from src.use_cases._plugin_helpers import get_plugin_config_or_env, http_request
+from src.use_cases.sdk.http import http_request
+from src.use_cases.sdk.utils import get_plugin_config_or_env
 
 @tool()
 async def get_quote(tool_manager=None) -> str:
@@ -515,7 +516,7 @@ if len(text) > 3000:
 import asyncio
 
 from src.use_cases.tools_system import tool, StopPipeline
-from src.use_cases._plugin_helpers import send_device_command
+from src.use_cases.sdk.device import send_device_command
 
 @tool(cache=False)
 async def countdown(seconds: int = 10, tool_manager=None) -> str:
@@ -524,11 +525,14 @@ async def countdown(seconds: int = 10, tool_manager=None) -> str:
     seconds = max(1, min(60, seconds))
 
     # 循环下发 Lua 脚本更新屏幕上的数字
+    # ⚠️ 注意：不要调用 obj_clean(scr) 清空屏幕，会误删系统控件导致崩溃
+    # 每个 execute_lua 运行在独立 Lua 状态，无法复用 label 变量，
+    # 每次循环先清屏再创建新 label，避免数字累积
     for i in range(seconds, 0, -1):
+        await send_device_command(tool_manager, "clear_screen", "")
         lua_code = (
             'local lv = require("lvgl")\n'
             'local scr = lv.scr_act()\n'
-            f'lv.obj_clean(scr)\n'           # 注意：实际应用中不要清屏，此处仅为示例
             f'local label = lv.label(scr)\n'
             f'lv.label_set_text(label, "{i}")\n'
             'lv.set_style_text_font(label, "mont48")\n'
@@ -596,50 +600,56 @@ raise StopPipeline()                         # 无参数：静默结束
   "version": "1.0.0",
   "description": "查询天气并显示卡片",
   "requires": ["display"],
-  "config_fields": [
-    {
-      "key": "amap_key",
-      "label": "高德 API Key",
-      "type": "text",
-      "required": true,
-      "placeholder": "https://console.amap.com 获取（必填）"
-    }
-  ],
-  "permissions": ["network", "device"]
+  "frontend": true,
+  "frontend_config": {
+    "nav_label": "迷你天气",
+    "nav_icon": "cloud",
+    "width": "narrow"
+  },
+  "config_fields": [],
+  "permissions": ["network", "device", "kv"]
 }
 ```
 
 ::: tip 权限说明
-此示例同时使用了 `http_get_json`（查天气）和 `send_device_command`（显示卡片），需要同时声明 `"network"` 和 `"device"` 两个权限。
+此示例同时使用了 `http_get_json`（查天气）和 `send_device_command`（显示卡片），需要同时声明 `"network"` 和 `"device"` 两个权限。此外，前端通过 `save_config` 工具读写 KV 存储，所以还需要 `"kv"` 权限。
 :::
 
-### 2. plugin.py
+### 2. 目录结构
+
+```
+mini_weather/
+├── manifest.json
+├── plugin.py
+└── frontend/
+    └── index.html          # 配置页面：填写高德 API Key
+```
+
+### 3. plugin.py
 
 ```python
 import json
 
 from src.use_cases.tools_system import tool
-from src.use_cases._plugin_helpers import (
-    get_plugin_config_or_env,
-    http_get_json,
-    send_device_command,
-)
+from src.use_cases.sdk.http import http_get_json
+from src.use_cases.sdk.device import send_device_command
+from src.use_cases.sdk.storage import kv_get, kv_set
+from src.use_cases.sdk.utils import json_dumps
 
 AMAP_WEATHER_URL = "https://restapi.amap.com/v3/weather/weatherInfo"
 
 # 天气 → 图标 id 映射
 WEATHER_ICON = {
-    "晴": "sun", "多云": "cloud", "阴": "overcast",
-    "小雨": "rain", "中雨": "rain", "大雨": "rain",
-    "雷阵雨": "storm", "小雪": "snow", "中雪": "snow",
-    "雾": "fog", "霾": "fog",
+    "晴": "sun", "晴间多云": "sun_cloud", "多云": "cloud", "阴": "overcast",
+    "小雨": "rain", "中雨": "rain", "大雨": "rain", "雷阵雨": "storm",
+    "小雪": "snow", "中雪": "snow", "雾": "fog", "霾": "fog",
 }
 
 
 def _build_card(city: str, weather: str, temp: str) -> str:
     """生成 show_card 卡片 JSON。"""
     icon = WEATHER_ICON.get(weather, "cloud")
-    return json.dumps({
+    return json_dumps({
         "bg": "000000",
         "card": {"x": 20, "y": 40, "w": 200, "h": 160,
                  "bg": "1E1E1E", "radius": 12, "border": "444444"},
@@ -652,7 +662,7 @@ def _build_card(city: str, weather: str, temp: str) -> str:
             {"t": "label", "text": weather, "y": 92,
              "color": "AAAAAA", "font": "puhui", "align": "center"},
         ],
-    }, ensure_ascii=False)
+    })
 
 
 @tool(cache=False)
@@ -663,11 +673,8 @@ async def get_weather(city: str = "", tool_manager=None) -> str:
     if not city.strip():
         city = "北京"
 
-    # SDK 读取配置：设备配置 → 环境变量 → 默认值
-    amap_key = get_plugin_config_or_env(
-        tool_manager, "mini_weather", "amap_key",
-        env_var="MINI_WEATHER_AMAP_KEY", default="",
-    )
+    # KV 存储读取配置（前端通过 save_config 工具写入，按设备隔离）
+    amap_key = kv_get("amap_key", default="", tool_manager=tool_manager)
     if not amap_key:
         return "天气服务未配置，请在插件设置中填写高德 API Key"
 
@@ -694,27 +701,38 @@ async def get_weather(city: str = "", tool_manager=None) -> str:
     await send_device_command(tool_manager, "show_card", card_json)
 
     return speech
+
+
+@tool(cache=False)
+async def save_config(amap_key: str = "", tool_manager=None) -> str:
+    """保存插件配置到插件专属 KV 存储。
+    参数 amap_key: 高德 API Key。不传则返回当前配置。"""
+    if not amap_key:
+        current = kv_get("amap_key", default="", tool_manager=tool_manager)
+        return json_dumps({"ok": True, "amap_key": current})
+    kv_set("amap_key", amap_key, tool_manager=tool_manager)
+    return json_dumps({"ok": True, "message": "配置已保存"})
 ```
 
-### 3. 结构解析
+### 4. 结构解析
 
 这个示例展示了真实插件的典型代码结构：
 
 ```
 plugin.py 代码组织
-├── 导入区          import json, tool, _plugin_helpers
+├── 导入区          import json, tool, http_get_json, send_device_command, kv_get, kv_set, json_dumps
 ├── 常量区          AMAP_WEATHER_URL, WEATHER_ICON
 ├── 辅助函数区      _build_card()
-└── 工具定义区      @tool get_weather()
+└── 工具定义区      @tool get_weather(), @tool save_config()
 ```
 
 辅助函数用 `_` 前缀（如 `_build_card`），不会被注册为工具。只有 `@tool()` 装饰的函数才会进入 LLM 工具列表。
 
-::: tip 相比旧代码简化了什么？
-老版本需要手写 `_get_amap_key()`（配置→环境变量回退）、`httpx.AsyncClient` + `try/except`、以及 `send_json` + 连接判断。用 SDK 后这三处分别替换为 `get_plugin_config_or_env`、`http_get_json`、`send_device_command`，工具函数从 60 行瘦身到 40 行。
+::: tip 使用 KV 存储管理配置
+插件配置通过 `kv_get` / `kv_set` 读写，存储在 `data/plugins/kv/{sanitized_mac}/<插件id>.json`（按设备 MAC 隔离）。前端通过 `save_config` 工具写入配置，无需经过 `config_fields` 系统，不依赖主数据库。
 :::
 
-### 4. `requires` 字段
+### 5. `requires` 字段
 
 ```json
 "requires": ["display"]
@@ -722,17 +740,179 @@ plugin.py 代码组织
 
 声明此插件需要屏幕能力。无屏设备连接时，此插件自动隐藏，不会出现在工具列表中。
 
-### 5. `show_card` 卡片协议
+### 6. 前端 UI（配置页面）
+
+插件带有一个前端配置页面，通过 iframe 嵌入主应用。用户可以在页面上填写高德 API Key，保存后直接生效。
+
+**frontend/index.html：**
+
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>迷你天气配置</title>
+<style>
+:root {
+  --mint: #10b981; --mint-deep: #059669; --mint-soft: rgba(16,185,129,0.1);
+  --mint-border: rgba(16,185,129,0.25); --text-main: #1e293b; --text-sub: #64748b;
+  --bg: #f0f5f0; --border: rgba(0,0,0,0.06); --radius: 16px; --radius-sm: 10px;
+  --shadow: 0 4px 20px rgba(0,0,0,0.06);
+  --glass: linear-gradient(155deg, rgba(255,255,255,0.85), rgba(255,255,255,0.55));
+  --glass-border: rgba(255,255,255,0.6);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg); color: var(--text-main); min-height: 100vh;
+}
+.container { max-width: 480px; margin: 0 auto; padding: 20px 16px; }
+.card {
+  background: var(--glass); border: 1px solid var(--glass-border);
+  border-radius: var(--radius); padding: 20px; margin-bottom: 12px;
+  backdrop-filter: blur(12px); box-shadow: var(--shadow);
+}
+.card h2 { font-size: 16px; font-weight: 700; margin: 0 0 4px; }
+.card p { font-size: 13px; color: var(--text-sub); margin: 0 0 16px; }
+label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; color: var(--text-sub); }
+input {
+  width: 100%; padding: 8px 12px; font-size: 13px; border: 1px solid var(--border);
+  border-radius: 8px; background: rgba(255,255,255,0.8); color: var(--text-main);
+  outline: none; font-family: inherit; box-sizing: border-box;
+}
+input:focus { border-color: var(--mint); box-shadow: 0 0 0 3px var(--mint-soft); }
+.btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 8px 18px;
+  font-size: 13px; font-weight: 600; border: none; border-radius: var(--radius-sm);
+  cursor: pointer; transition: all 0.25s; width: 100%; justify-content: center;
+}
+.btn-primary { background: var(--mint); color: #fff; }
+.btn-primary:hover { background: var(--mint-deep); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.status { margin-top: 12px; font-size: 13px; text-align: center; }
+.status.ok { color: var(--mint-deep); }
+.status.err { color: #ef4444; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="card">
+    <h2>迷你天气</h2>
+    <p>填写高德 API Key 即可使用天气查询功能</p>
+    <label for="apiKey">高德 API Key</label>
+    <input id="apiKey" type="text" placeholder="请输入高德 API Key" />
+    <div style="margin-top:12px">
+      <button class="btn btn-primary" id="saveBtn" onclick="saveKey()">保存</button>
+    </div>
+    <div class="status" id="status"></div>
+  </div>
+</div>
+
+<script>
+/* ── postMessage SDK（自动携带 Token） ── */
+let _apiId = 0;
+const _pending = {};
+window.addEventListener('message', function(e) {
+  const msg = typeof e.data === 'object' ? e.data : {};
+  if (msg.type === 'apiResult' && _pending[msg.id]) {
+    _pending[msg.id](msg);
+    delete _pending[msg.id];
+  }
+});
+async function api(path, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const id = ++_apiId;
+    _pending[id] = (msg) => {
+      if (msg.error) reject(new Error(msg.error));
+      else resolve(msg.data);
+    };
+    window.parent.postMessage({ type: 'api', id, path, method: opts.method || 'GET', body: opts.body || null }, '*');
+  });
+}
+
+/* ── 获取设备 MAC ── */
+let currentDevice = null;
+window.addEventListener('message', function(e) {
+  try {
+    const msg = typeof e.data === 'object' ? e.data : JSON.parse(e.data);
+    if (msg.type === 'deviceChanged' && msg.device) {
+      currentDevice = msg.device;
+      loadConfig();
+    }
+  } catch {}
+});
+try { window.parent.postMessage({ type: 'ready' }, '*'); } catch(e) {}
+const did = new URLSearchParams(window.location.search).get('device_id');
+if (did) {
+  currentDevice = { device_id: did };
+  loadConfig();
+}
+
+/* ── 加载 / 保存配置 ── */
+async function loadConfig() {
+  const mac = currentDevice?.device_id || currentDevice?.id || '';
+  if (!mac) return;
+  // 调用 save_config 工具读取当前配置（amap_key 为空时返回已有值）
+  const data = await api('/api/v1/plugins/mini_weather/tool/save_config', {
+    method: 'POST',
+    body: { args: { amap_key: '' }, device_id: mac }
+  });
+  if (data && data.ok && data.amap_key) {
+    document.getElementById('apiKey').value = data.amap_key;
+  }
+}
+
+async function saveKey() {
+  const key = document.getElementById('apiKey').value.trim();
+  const mac = currentDevice?.device_id || currentDevice?.id || '';
+  if (!key) { showStatus('请输入 API Key', 'err'); return; }
+  if (!mac) { showStatus('请先选择设备', 'err'); return; }
+  const btn = document.getElementById('saveBtn');
+  btn.disabled = true; btn.textContent = '保存中…';
+  const data = await api('/api/v1/plugins/mini_weather/tool/save_config', {
+    method: 'POST',
+    body: { args: { amap_key: key }, device_id: mac }
+  });
+  btn.disabled = false; btn.textContent = '保存';
+  if (data && data.ok) {
+    showStatus('配置已保存', 'ok');
+  } else {
+    showStatus('保存失败: ' + (data?.message || '未知错误'), 'err');
+  }
+}
+
+function showStatus(msg, type) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = 'status ' + type;
+  setTimeout(() => { el.textContent = ''; el.className = 'status'; }, 3000);
+}
+</script>
+</body>
+</html>
+```
+
+**前端页面解析：**
+
+| 元素 | 说明 |
+|------|------|
+| `postMessage SDK` | 通过 `api()` 函数走父应用代理，自动携带 Token |
+| `deviceChanged` 事件 | 监听设备切换，自动加载对应设备的配置 |
+| `save_config` 工具 | 通过 `POST /api/v1/plugins/mini_weather/tool/save_config` 调用 |
+| 按设备隔离 | 每个设备的 API Key 独立存储，互不影响 |
+
+### 7. `show_card` 卡片协议
 
 比 `execute_lua` 更简洁的屏幕显示方式——下发 JSON 描述，设备端用原生 LVGL 渲染：
 
 ```python
 # SDK 方式：send_device_command 返回 None 即发送成功
-err = await send_device_command(tool_manager, "show_card", json.dumps({
+err = await send_device_command(tool_manager, "show_card", json_dumps({
     "bg": "000000",           # 背景色
     "card": { ... },          # 卡片容器
     "items": [ ... ],         # 卡片内容元素
-}, ensure_ascii=False))
+}))
 if err:
     return f"卡片显示失败: {err}"
 ```
@@ -811,7 +991,7 @@ Compress-Archive -Path manifest.json,plugin.py -DestinationPath hello-1.0.0.zip
 | 三、屏幕显示 | `send_device_command` + `execute_lua`、Lua 脚本拼接 | 自定义屏幕 UI |
 | 四、查名言 | `http_request`、`get_plugin_config_or_env` 配置 | 调用外部 API |
 | 五、倒计时 | `cache=False`、多指令组合、`StopPipeline` | 接管会话流程 |
-| 六、迷你天气 | `http_get_json`、`send_device_command` 卡片、`requires` | 完整真实插件 |
+| 六、迷你天气 | `http_get_json`、`send_device_command` 卡片、`requires`、前端 UI、`save_config` | 完整真实插件（含配置页面） |
 
 ---
 

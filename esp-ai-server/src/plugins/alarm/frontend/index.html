@@ -2,26 +2,49 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>闹钟定时</title>
 <style>
-:root{--mint:#10b981;--mint-deep:#059669;--mint-soft:rgba(16,185,129,0.1);--text-main:#1e293b;--text-sub:#64748b;--bg:#f0f5f0;--border:rgba(0,0,0,0.06);--danger:#ef4444;--radius:16px;--radius-sm:10px;--shadow:0 4px 20px rgba(0,0,0,0.06);--glass:linear-gradient(155deg,rgba(255,255,255,0.85),rgba(255,255,255,0.55));--glass-border:rgba(255,255,255,0.6)}
-*{box-sizing:border-box}
-body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text-main);min-height:100vh}
+:root{--mint:#10b981;--mint-deep:#059669;--mint-soft:rgba(16,185,129,0.1);--mint-border:rgba(16,185,129,0.25);--text-main:#1e293b;--text-sub:#64748b;--text-light:#94a3b8;--bg:#f0f5f0;--radius:16px;--radius-sm:10px;--radius-xs:8px;--shadow:0 4px 20px rgba(0,0,0,0.06);--glass:linear-gradient(155deg,rgba(255,255,255,0.85),rgba(255,255,255,0.55));--glass-border:rgba(255,255,255,0.6);--danger:#ef4444;--danger-soft:rgba(239,68,68,0.08);--transition:0.3s cubic-bezier(0.4,0,0.2,1)}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scrollbar-width:thin;scrollbar-color:rgba(16,185,129,0.2) transparent}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text-main);min-height:100vh;overflow-x:hidden}
+::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(16,185,129,0.2);border-radius:2px}::-webkit-scrollbar-thumb:hover{background:rgba(16,185,129,0.4)}
 .container{max-width:640px;margin:0 auto;padding:20px 16px 40px}
 .hero-bar{position:relative;overflow:hidden;padding:28px 30px;border-radius:var(--radius);background:var(--glass);border:1px solid var(--glass-border);backdrop-filter:blur(12px);margin-bottom:20px}
 .watermark{position:absolute;right:-8px;bottom:-18px;font-size:90px;font-weight:900;color:rgba(16,185,129,0.08);line-height:1;pointer-events:none;user-select:none}
 .hero-title{font-size:22px;font-weight:700;margin:0}.highlight{color:var(--mint-deep)}
 .hero-sub{font-size:13px;color:var(--text-sub);margin:4px 0 0}
-.card{background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius);padding:18px;margin-bottom:12px;backdrop-filter:blur(12px);box-shadow:var(--shadow)}
-.card-row{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border)}
-.card-row:last-child{border-bottom:none}
-.card-label{font-size:13px;color:var(--text-sub)}
-.card-value{font-size:14px;font-weight:600}
-.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 20px;font-size:13px;font-weight:600;border:none;border-radius:var(--radius-sm);cursor:pointer;transition:all 0.25s}
-.btn-primary{background:var(--mint);color:#fff}.btn-primary:hover{background:var(--mint-deep);transform:translateY(-1px)}
-.btn-sm{padding:6px 16px;font-size:12px;border-radius:var(--radius-sm)}
-.text-sub{color:var(--text-sub);font-size:13px}
+.spinner{width:28px;height:28px;border:3px solid var(--mint-soft);border-top-color:var(--mint-deep);border-radius:50%;animation:spin 0.8s linear infinite;margin:40px auto}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading-text{text-align:center;font-size:13px;color:var(--text-sub);margin-top:8px}
+.section{margin-bottom:16px}
+.section-title{font-size:14px;font-weight:700;color:var(--text-sub);margin:0 0 10px;padding-left:4px;display:flex;align-items:center;gap:8px}
+.section-count{font-size:11px;font-weight:400;background:var(--mint-soft);color:var(--mint-deep);padding:1px 8px;border-radius:10px}
+.alarm-card{background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius-sm);padding:14px 16px;margin-bottom:8px;backdrop-filter:blur(8px);box-shadow:var(--shadow);display:flex;align-items:center;justify-content:space-between;gap:12px;transition:transform var(--transition)}
+.alarm-card:hover{transform:translateY(-1px)}
+.alarm-card.expired{opacity:0.5}
+.alarm-info{flex:1;min-width:0}
+.alarm-time{font-size:16px;font-weight:700;color:var(--text-main);margin:0 0 2px}
+.alarm-detail{font-size:12px;color:var(--text-sub);margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.alarm-meta{display:flex;align-items:center;gap:8px;margin-top:4px}
+.alarm-badge{font-size:10px;padding:1px 8px;border-radius:8px;background:var(--mint-soft);color:var(--mint-deep);display:inline-block}
+.alarm-badge.reminder{background:rgba(99,102,241,0.1);color:#6366f1}
+.alarm-badge.sleep{background:rgba(168,85,247,0.1);color:#a855f7}
+.alarm-badge.expired{background:var(--danger-soft);color:var(--danger)}
+.alarm-remaining{font-size:11px;color:var(--mint-deep);font-weight:600}
+.alarm-remaining.expired{color:var(--danger)}
+.btn-del{width:32px;height:32px;border:none;border-radius:50%;background:var(--danger-soft);color:var(--danger);cursor:pointer;font-size:16px;line-height:1;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all 0.2s;opacity:0.6}
+.btn-del:hover{opacity:1;background:var(--danger);color:#fff}
+.empty-state{text-align:center;padding:40px 20px}
+.empty-icon{font-size:48px;color:var(--text-light);margin-bottom:12px;opacity:0.3}
+.empty-text{font-size:14px;color:var(--text-sub);margin:0}
+.empty-hint{font-size:12px;color:var(--text-light);margin-top:6px}
+.refresh-bar{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding:0 4px}
+.refresh-btn{padding:6px 16px;font-size:12px;font-weight:600;border:none;border-radius:var(--radius-xs);background:var(--mint-soft);color:var(--mint-deep);cursor:pointer;transition:all 0.2s}
+.refresh-btn:hover{background:var(--mint-border);transform:translateY(-1px)}
+.refresh-btn:disabled{opacity:0.5;cursor:not-allowed;transform:none}
+.refresh-info{font-size:11px;color:var(--text-light)}
 </style>
 </head>
 <body>
@@ -31,17 +54,127 @@ body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',
     <h2 class="hero-title">闹钟<span class="highlight">定时</span></h2>
     <p class="hero-sub">闹钟、提醒、睡眠定时器管理</p>
   </div>
-  <div class="card">
-    <p class="text-sub" style="margin:0 0 12px">闹钟管理功能通过语音指令操作：</p>
-    <div class="card-row"><span class="card-label">设置闹钟</span><span class="card-value">"设置明天早上 7 点的闹钟"</span></div>
-    <div class="card-row"><span class="card-label">查看闹钟</span><span class="card-value">"有哪些闹钟"</span></div>
-    <div class="card-row"><span class="card-label">删除闹钟</span><span class="card-value">"删除早上 7 点的闹钟"</span></div>
-    <div class="card-row"><span class="card-label">睡眠定时</span><span class="card-value">"30 分钟后关闭"</span></div>
+
+  <div class="refresh-bar">
+    <span class="refresh-info" id="refreshInfo">加载中...</span>
+    <button class="refresh-btn" id="refreshBtn" onclick="loadData()">刷新</button>
   </div>
-  <div class="card" style="text-align:center;padding:32px">
-    <p style="margin:0 0 8px;font-size:15px;font-weight:600">💡 提示</p>
-    <p class="text-sub" style="margin:0">闹钟完全通过语音交互管理，无需手动操作。直接对设备说指令即可。</p>
+
+  <div id="content">
+    <div class="spinner"></div>
+    <p class="loading-text">加载闹钟列表...</p>
   </div>
 </div>
+
+<script>
+const deviceMac = new URLSearchParams(window.location.search).get('device_id') || '';
+
+function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+function formatTimeLeft(remaining){
+  if(!remaining) return '';
+  if(remaining==='已过期') return '<span class="alarm-remaining expired">已过期</span>';
+  return '<span class="alarm-remaining">剩余 '+escHtml(remaining)+'</span>';
+}
+
+function alarmBadge(type){
+  if(type==='alarm') return '闹钟';
+  if(type==='reminder') return '提醒';
+  return '睡眠';
+}
+
+function badgeClass(type){
+  if(type==='reminder') return 'reminder';
+  if(type==='sleep_timer') return 'sleep';
+  return '';
+}
+
+function renderAlarmItem(a){
+  const expired = a.remaining === '已过期';
+  return '<div class="alarm-card'+(expired?' expired':'')+'">'+
+    '<div class="alarm-info">'+
+      '<div class="alarm-time">'+escHtml(a.trigger_time)+'</div>'+
+      '<div class="alarm-detail">'+escHtml(a.detail)+'</div>'+
+      '<div class="alarm-meta">'+
+        '<span class="alarm-badge '+badgeClass(a.type)+'">'+alarmBadge(a.type)+'</span>'+
+        '<span class="alarm-badge">'+escHtml(a.repeat)+'</span>'+
+        formatTimeLeft(a.remaining)+
+      '</div>'+
+    '</div>'+
+    '<button class="btn-del" onclick="cancelAlarm(\''+a.id+'\')" title="取消">✕</button>'+
+  '</div>';
+}
+
+function renderSection(type, label, items){
+  if(!items||!items.length) return '';
+  return '<div class="section">'+
+    '<h3 class="section-title">'+label+' <span class="section-count">'+items.length+'</span></h3>'+
+    items.map(renderAlarmItem).join('')+
+  '</div>';
+}
+
+function renderEmpty(){
+  return '<div class="empty-state">'+
+    '<div class="empty-icon">⏰</div>'+
+    '<p class="empty-text">还没有设置闹钟或提醒</p>'+
+    '<p class="empty-hint">对设备说"设置明天早上7点的闹钟"或"提醒我半小时后关火"</p>'+
+  '</div>';
+}
+
+async function loadData(){
+  const btn = document.getElementById('refreshBtn');
+  const info = document.getElementById('refreshInfo');
+  if(btn) btn.disabled = true;
+  if(info) info.textContent = '刷新中...';
+
+  try{
+    if(!deviceMac){
+      document.getElementById('content').innerHTML = '<div class="empty-state"><p class="empty-text">设备未指定</p></div>';
+      return;
+    }
+    const res = await fetch('/api/v1/alarm/list?device_id='+encodeURIComponent(deviceMac));
+    const d = await res.json();
+    if(d.code!==0||!d.data){
+      document.getElementById('content').innerHTML = '<div class="empty-state"><p class="empty-text">加载失败</p><p class="empty-hint">'+escHtml(d.message||'')+'</p></div>';
+      if(info) info.textContent = '加载失败';
+      return;
+    }
+
+    const alarms = d.data.filter(a=>a.type==='alarm');
+    const reminders = d.data.filter(a=>a.type==='reminder');
+    const sleepTimers = d.data.filter(a=>a.type==='sleep_timer');
+
+    let html = '';
+    if(!d.data.length){
+      html = renderEmpty();
+    }else{
+      html += renderSection('alarm', '闹钟', alarms);
+      html += renderSection('reminder', '提醒', reminders);
+      html += renderSection('sleep', '睡眠定时器', sleepTimers);
+    }
+    document.getElementById('content').innerHTML = html;
+    if(info) info.textContent = '共 '+d.data.length+' 条 · '+new Date().toLocaleTimeString();
+  }catch(e){
+    document.getElementById('content').innerHTML = '<div class="empty-state"><p class="empty-text">加载失败</p><p class="empty-hint">'+escHtml(e.message)+'</p></div>';
+    if(info) info.textContent = '加载失败';
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function cancelAlarm(alarmId){
+  if(!confirm('确定取消这条闹钟/提醒？')) return;
+  try{
+    const res = await fetch('/api/v1/alarm/cancel?alarm_id='+encodeURIComponent(alarmId), {method:'POST'});
+    const d = await res.json();
+    loadData();
+  }catch(e){
+    alert('取消失败: '+e.message);
+  }
+}
+
+// 自动加载
+loadData();
+</script>
 </body>
 </html>

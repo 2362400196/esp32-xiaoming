@@ -120,6 +120,9 @@ struct SignalUI {
     int last_strength;
 } s_sig_ui = { .canvas = NULL, .last_strength = -1 };
 
+// 机器人模式标志（true=只显示表情，隐藏所有文字/图标/横条）
+static bool s_robot_mode = false;
+
 // 电量 UI
 struct BatteryUI {
     lv_obj_t *body;        // 电池外框
@@ -665,6 +668,8 @@ void eeui_port_set_status_text(const char *text, bool need_ani, const char *alig
         }
         // 统一重排层级，确保图标在最前
         ui_reorder_layers();
+        // 机器人模式下隐藏文字（避免 TTS 播报时重新创建显示）
+        if (s_robot_mode) lv_obj_add_flag(s_status_label, LV_OBJ_FLAG_HIDDEN);
         lvgl_unlock();
     }
 }
@@ -692,6 +697,8 @@ void eeui_port_set_bottom_text(const char *text)
         lv_obj_set_pos(s_bottom_label, 0, s_screen_height - h - 5);
         // 统一重排层级，确保图标在最前
         ui_reorder_layers();
+        // 机器人模式下隐藏字幕（避免 TTS 播报时重新创建显示）
+        if (s_robot_mode) lv_obj_add_flag(s_bottom_label, LV_OBJ_FLAG_HIDDEN);
         lvgl_unlock();
     }
 }
@@ -720,6 +727,8 @@ void eeui_port_set_tool_status_text(const char *text)
         lv_obj_set_pos(s_tool_status_label, 0, s_screen_height - h - 5);
         // 移到最前，覆盖字幕
         lv_obj_move_foreground(s_tool_status_label);
+        // 机器人模式下隐藏工具状态文字
+        if (s_robot_mode) lv_obj_add_flag(s_tool_status_label, LV_OBJ_FLAG_HIDDEN);
         lvgl_unlock();
     }
 }
@@ -1477,12 +1486,12 @@ static int screensaver_load_brightness(void)
     return level;
 }
 
-void eeui_port_screensaver_set(bool active)
+bool eeui_port_screensaver_set(bool active)
 {
-    if (!s_lvgl_mutex || s_display == NULL) return;  // 无屏/未初始化（C3 headless）
-    if (active == (s_ss_root != NULL)) return;       // 状态未变，幂等
+    if (!s_lvgl_mutex || s_display == NULL) return false;  // 无屏/未初始化（C3 headless）
+    if (active == (s_ss_root != NULL)) return true;        // 状态未变，已到达目标状态
 
-    if (!lvgl_lock(200)) return;
+    if (!lvgl_lock(200)) return false;  // LVGL 锁竞争，调用方应稍后重试
 
     if (active) {
         // ---- 进入屏保 ----
@@ -1539,6 +1548,7 @@ void eeui_port_screensaver_set(bool active)
     }
 
     lvgl_unlock();
+    return true;
 }
 
 // ==================== 通用卡片渲染（show_card 指令）====================
@@ -1583,6 +1593,24 @@ static void card_clear_objects(void)
         s_card_objects[i] = NULL;
     }
     s_card_object_count = 0;
+}
+
+static void card_hide_all(void)
+{
+    for (int i = 0; i < s_card_object_count; i++) {
+        if (s_card_objects[i] && lv_obj_is_valid(s_card_objects[i])) {
+            lv_obj_add_flag(s_card_objects[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static void card_show_all(void)
+{
+    for (int i = 0; i < s_card_object_count; i++) {
+        if (s_card_objects[i] && lv_obj_is_valid(s_card_objects[i])) {
+            lv_obj_remove_flag(s_card_objects[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 }
 
 static lv_color_t card_color(const char *hex)
@@ -1747,4 +1775,97 @@ void eeui_port_clear_cards(void)
     if (!lvgl_lock(200)) return;
     card_clear_objects();
     lvgl_unlock();
+}
+
+// ==================== 机器人模式 ====================
+// 机器人模式：只显示表情 GIF，隐藏所有文字/图标/横条
+void eeui_port_set_robot_mode(bool enabled)
+{
+    s_robot_mode = enabled;
+    if (!s_lvgl_ready) return;
+    if (!lvgl_lock(100)) return;
+
+    if (enabled) {
+        // 隐藏电池图标
+        if (s_bat_ui.body && lv_obj_is_valid(s_bat_ui.body)) {
+            lv_obj_add_flag(s_bat_ui.body, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_bat_ui.top, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_bat_ui.label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_bat_ui.fill, LV_OBJ_FLAG_HIDDEN);
+        }
+        // 隐藏音量图标（含 bar 和 label）
+        if (s_vol_ui.icon && lv_obj_is_valid(s_vol_ui.icon)) {
+            lv_obj_add_flag(s_vol_ui.icon, LV_OBJ_FLAG_HIDDEN);
+            if (s_vol_ui.bar) lv_obj_add_flag(s_vol_ui.bar, LV_OBJ_FLAG_HIDDEN);
+            if (s_vol_ui.label) lv_obj_add_flag(s_vol_ui.label, LV_OBJ_FLAG_HIDDEN);
+        }
+        // 隐藏信号图标
+        if (s_sig_ui.canvas && lv_obj_is_valid(s_sig_ui.canvas)) {
+            lv_obj_add_flag(s_sig_ui.canvas, LV_OBJ_FLAG_HIDDEN);
+        }
+        // 隐藏状态文字（顶部横条）
+        if (s_status_label && lv_obj_is_valid(s_status_label)) {
+            lv_obj_add_flag(s_status_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        // 隐藏底部字幕
+        if (s_bottom_label && lv_obj_is_valid(s_bottom_label)) {
+            lv_obj_add_flag(s_bottom_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        // 隐藏工具状态文字
+        if (s_tool_status_label && lv_obj_is_valid(s_tool_status_label)) {
+            lv_obj_add_flag(s_tool_status_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        // 隐藏音乐播放器
+        if (s_music_overlay && lv_obj_is_valid(s_music_overlay)) {
+            lv_obj_add_flag(s_music_overlay, LV_OBJ_FLAG_HIDDEN);
+        }
+        // 隐藏 show_card 卡片
+        card_hide_all();
+        // 隐藏表情下载中提示
+        if (s_emo_dl_overlay && lv_obj_is_valid(s_emo_dl_overlay)) {
+            lv_obj_add_flag(s_emo_dl_overlay, LV_OBJ_FLAG_HIDDEN);
+        }
+    } else {
+        // 恢复显示：取消隐藏
+        if (s_bat_ui.body && lv_obj_is_valid(s_bat_ui.body)) {
+            lv_obj_remove_flag(s_bat_ui.body, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_bat_ui.top, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_bat_ui.label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_bat_ui.fill, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (s_vol_ui.icon && lv_obj_is_valid(s_vol_ui.icon)) {
+            lv_obj_remove_flag(s_vol_ui.icon, LV_OBJ_FLAG_HIDDEN);
+            if (s_vol_ui.bar) lv_obj_remove_flag(s_vol_ui.bar, LV_OBJ_FLAG_HIDDEN);
+            if (s_vol_ui.label) lv_obj_remove_flag(s_vol_ui.label, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (s_sig_ui.canvas && lv_obj_is_valid(s_sig_ui.canvas)) {
+            lv_obj_remove_flag(s_sig_ui.canvas, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (s_status_label && lv_obj_is_valid(s_status_label)) {
+            lv_obj_remove_flag(s_status_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (s_bottom_label && lv_obj_is_valid(s_bottom_label)) {
+            lv_obj_remove_flag(s_bottom_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (s_tool_status_label && lv_obj_is_valid(s_tool_status_label)) {
+            lv_obj_remove_flag(s_tool_status_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (s_music_overlay && lv_obj_is_valid(s_music_overlay)) {
+            lv_obj_remove_flag(s_music_overlay, LV_OBJ_FLAG_HIDDEN);
+        }
+        card_show_all();
+        if (s_emo_dl_overlay && lv_obj_is_valid(s_emo_dl_overlay)) {
+            lv_obj_remove_flag(s_emo_dl_overlay, LV_OBJ_FLAG_HIDDEN);
+        }
+        // 恢复后统一重排层级
+        ui_reorder_layers();
+    }
+
+    lvgl_unlock();
+    ESP_LOGI(TAG, "机器人模式: %s", enabled ? "开启" : "关闭");
+}
+
+bool eeui_port_is_robot_mode(void)
+{
+    return s_robot_mode;
 }

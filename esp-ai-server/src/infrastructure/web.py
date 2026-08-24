@@ -925,22 +925,19 @@ def _register_routes(app: FastAPI) -> None:
     from src.infrastructure.routes.skills import router as skills_router
     app.include_router(skills_router)
 
-    from src.infrastructure.routes.mcp import router as mcp_router
-    app.include_router(mcp_router)
-
     from src.infrastructure.routes.emos import router as emos_router
     app.include_router(emos_router)
 
     from src.infrastructure.routes.growth import router as growth_router
     app.include_router(growth_router)
 
+    # 闹钟插件路由
+    from src.infrastructure.routes.alarm import router as alarm_router
+    app.include_router(alarm_router)
+
     # 用户认证路由
     from src.infrastructure.routes.auth import router as auth_router
     app.include_router(auth_router)
-
-    # 微信集成路由
-    from src.infrastructure.routes.wechat import router as wechat_router
-    app.include_router(wechat_router)
 
     # 插件管理路由（热加载）
     from src.infrastructure.routes.plugins import router as plugins_router

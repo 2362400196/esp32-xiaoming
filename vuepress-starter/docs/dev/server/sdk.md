@@ -498,3 +498,88 @@ MCP_SERVERS_JSON={"amap-maps":{"type":"streamable_http","url":"https://xxx/mcp"}
 ```
 
 多用户模式下，每个设备可在数据库中配置独立的 MCP 服务器。
+
+---
+
+## 设备数据存储（DeviceRepository）
+
+`DeviceRepository` 是底层设备数据操作接口，封装了设备配置、MCP 服务器、功能开关等数据的读写。
+
+### 获取实例
+
+```python
+from src.infrastructure.db.repositories.device_repository import DeviceRepository
+
+repo = DeviceRepository()
+```
+
+### 设备查询
+
+| 方法 | 说明 |
+|------|------|
+| `resolve_device(device_id_or_mac)` | 解析设备标识，返回 `(device_id, config_dict)` 或 `(None, None)`。按 device_id → device_key → mac_address 顺序查找 |
+| `check_device_owner(device_id, user_id)` | 校验设备是否属于指定用户，返回 `bool` |
+| `find_by_mac(mac)` | 通过 MAC 查找设备，返回 `(device_id, config_dict)` |
+| `find_by_key(key)` | 通过 device_key 查找设备，返回 `(device_id, config_dict)` |
+
+**resolve_device 示例：**
+
+```python
+device_id, config = await repo.resolve_device("D8:3B:DA:6D:D9:3C")
+if not device_id:
+    raise ValueError("设备不存在")
+# config 包含设备所有配置字段
+```
+
+### MCP 服务器管理
+
+| 方法 | 说明 |
+|------|------|
+| `get_mcp_servers(device_id)` | 获取设备所有 MCP 服务器配置，返回 `dict` |
+| `set_mcp_server(device_id, server_name, config)` | 添加或更新 MCP 服务器配置 |
+| `delete_mcp_server(device_id, server_name)` | 删除指定 MCP 服务器 |
+| `toggle_mcp_server(device_id, server_name, disabled)` | 启用或禁用 MCP 服务器 |
+| `toggle_mcp_tool(device_id, server_name, tool_name, disabled)` | 启用或禁用 MCP 服务器中的单个工具 |
+| `get_disabled_mcp(device_id)` | 获取设备的 MCP 禁用列表，返回 `{disabled_servers: [], disabled_tools: {}}` |
+| `mcp_enabled_plugins_add(device_id, server_name)` | 将 `mcp:{server_name}` 加入 `enabled_plugins`，确保 AI 可见 |
+| `mcp_enabled_plugins_remove(device_id, server_name)` | 从 `enabled_plugins` 移除 `mcp:{server_name}` |
+
+**MCP 操作示例：**
+
+```python
+# 添加 MCP 服务器
+await repo.set_mcp_server(
+    device_id, "amap-maps",
+    {"type": "streamable_http", "url": "https://mcp.example.com/weather"}
+)
+await repo.mcp_enabled_plugins_add(device_id, "amap-maps")
+
+# 禁用服务器
+await repo.toggle_mcp_server(device_id, "amap-maps", disabled=True)
+
+# 禁用单个工具（只禁用 maps_weather，其他工具正常）
+await repo.toggle_mcp_tool(device_id, "amap-maps", "maps_weather", disabled=True)
+
+# 获取禁用状态
+disabled = await repo.get_disabled_mcp(device_id)
+# disabled = {"disabled_servers": ["amap-maps"], "disabled_tools": {"amap-maps": ["maps_weather"]}}
+
+# 删除服务器
+await repo.delete_mcp_server(device_id, "amap-maps")
+await repo.mcp_enabled_plugins_remove(device_id, "amap-maps")
+```
+
+### 设备配置更新
+
+| 方法 | 说明 |
+|------|------|
+| `update_device_partial(device_id, updates)` | 部分更新设备配置字段，**不覆盖未传字段** |
+| `get_device_config(device_id)` | 获取设备配置，返回 `dict` |
+
+```python
+# 更新设备部分配置
+await repo.update_device_partial(device_id, {
+    "disabled_mcp_servers": ["amap-maps"],
+    "disabled_mcp_tools": {"amap-maps": ["maps_weather"]},
+})
+```

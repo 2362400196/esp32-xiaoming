@@ -560,9 +560,9 @@ watch(deviceId, () => loadSkills())
 /* ===== 弹窗 ===== */
 .modal-mask {
   position: fixed; inset: 0;
-  background: rgba(15, 23, 42, 0.4);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
   display: flex; align-items: center; justify-content: center;
   z-index: 1000;
 }

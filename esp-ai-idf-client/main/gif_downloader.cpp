@@ -301,8 +301,13 @@ static bool download_from_api(const char *http_base, const char *device_id)
         }
 
         if (!download_url) {
-            ESP_LOGD(TAG, "API 列表中未找到 %s，跳过", target_file);
-            continue;
+            // 当前表情包中缺少此文件，从默认包补充
+            // 避免使用内置 GIF 导致表情显示不一致，确保所有表情都有对应 GIF
+            char fallback_url[512];
+            snprintf(fallback_url, sizeof(fallback_url), "%s/emos/packs/default/%s", http_base, target_file);
+            download_url = fallback_url;
+            expected_size = 0;
+            ESP_LOGI(TAG, "当前包中缺少 %s，从默认包补充", target_file);
         }
 
         // SPIFFS 缓存：优先读本地（存在且大小与服务器一致 → 跳过下载）

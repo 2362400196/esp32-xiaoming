@@ -87,7 +87,11 @@ def _dict_to_model_fields(device_id: str, config: dict) -> dict:
         "enabled_plugins": config.get("enabled_plugins"),
         "plugin_configs": config.get("plugin_configs") or {},
         "has_display": config.get("has_display"),
-        # 技能列表
+        # 屏幕显示配置
+        "robot_mode": config.get("robot_mode", "false"),
+        "screensaver_enabled": config.get("screensaver_enabled", "true"),
+        "screensaver_timeout": config.get("screensaver_timeout", "30"),
+        # 限流技能列表
         "skills": config.get("skills") or [],
         # 表情包 / 运行时状态
         "active_emo_pack": config.get("active_emo_pack", "default") or "default",
@@ -146,6 +150,10 @@ def _model_to_dict(model: DeviceModel) -> dict:
         "enabled_plugins": model.enabled_plugins,
         "plugin_configs": dict(model.plugin_configs or {}),
         "has_display": model.has_display,
+        # 屏幕显示配置
+        "robot_mode": model.robot_mode or "false",
+        "screensaver_enabled": model.screensaver_enabled or "true",
+        "screensaver_timeout": model.screensaver_timeout or "30",
         # 技能
         "skills": list(model.skills or []),
     }
@@ -244,10 +252,7 @@ class DeviceRepository:
         if not device_id or not updates:
             return None
         async with get_session_ctx() as session:
-            result = await session.execute(
-                select(DeviceModel).where(DeviceModel.device_id == device_id)
-            )
-            model = result.scalar_one_or_none()
+            model = await self._select_device(session, device_id)
             if model is None:
                 return None
             # 转为 dict（含 mac，用于合并时保留 mac_address）
@@ -453,6 +458,110 @@ class DeviceRepository:
             if server_name in servers:
                 del servers[server_name]
                 model.mcp_servers = servers
+
+    async def resolve_device(self, device_id_or_mac: str) -> tuple[Optional[str], Optional[dict]]:
+        """解析设备标识，返回 (device_id, config_dict) 或 (None, None)。
+
+        按 device_id → device_key → mac_address 顺序查找。
+        """
+        if not device_id_or_mac:
+            return None, None
+        async with get_session_ctx() as session:
+            model = await self._select_device(session, device_id_or_mac)
+            if model is None:
+                return None, None
+            return model.device_id, _model_to_dict(model)
+
+    async def check_device_owner(self, device_id: str, user_id: str) -> bool:
+        """校验设备是否属于指定用户。"""
+        if not device_id or not user_id:
+            return False
+        async with get_session_ctx() as session:
+            result = await session.execute(
+                select(DeviceModel).where(
+                    DeviceModel.device_id == device_id,
+                    DeviceModel.user_id == user_id,
+                )
+            )
+            return result.scalar_one_or_none() is not None
+
+    async def toggle_mcp_server(self, device_id: str, server_name: str, disabled: bool) -> None:
+        """启用或禁用 MCP 服务器。"""
+        if not device_id or not server_name:
+            return
+        async with get_session_ctx() as session:
+            model = await self._select_device(session, device_id)
+            if model is None:
+                return
+            ds = list(model.disabled_mcp_servers or [])
+            if disabled:
+                if server_name not in ds:
+                    ds.append(server_name)
+            else:
+                ds = [s for s in ds if s != server_name]
+            model.disabled_mcp_servers = ds
+
+    async def toggle_mcp_tool(self, device_id: str, server_name: str, tool_name: str, disabled: bool) -> None:
+        """启用或禁用 MCP 服务器中的单个工具。"""
+        if not device_id or not server_name or not tool_name:
+            return
+        async with get_session_ctx() as session:
+            model = await self._select_device(session, device_id)
+            if model is None:
+                return
+            dt = dict(model.disabled_mcp_tools or {})
+            server_disabled = list(dt.get(server_name, []) or [])
+            if disabled:
+                if tool_name not in server_disabled:
+                    server_disabled.append(tool_name)
+            else:
+                server_disabled = [t for t in server_disabled if t != tool_name]
+            dt[server_name] = server_disabled
+            model.disabled_mcp_tools = dt
+
+    async def get_disabled_mcp(self, device_id: str) -> dict:
+        """获取设备的 MCP 禁用列表。"""
+        if not device_id:
+            return {"disabled_servers": [], "disabled_tools": {}}
+        async with get_session_ctx() as session:
+            model = await self._select_device(session, device_id)
+            if model is None:
+                return {"disabled_servers": [], "disabled_tools": {}}
+            return {
+                "disabled_servers": list(model.disabled_mcp_servers or []),
+                "disabled_tools": dict(model.disabled_mcp_tools or {}),
+            }
+
+    async def mcp_enabled_plugins_add(self, device_id: str, server_name: str) -> None:
+        """将 mcp:{server_name} 加入 enabled_plugins（确保 AI 可见）。"""
+        if not device_id or not server_name:
+            return
+        async with get_session_ctx() as session:
+            model = await self._select_device(session, device_id)
+            if model is None:
+                return
+            plugins = model.enabled_plugins
+            if plugins is None:
+                return
+            mcp_id = f"mcp:{server_name}"
+            if mcp_id not in plugins:
+                plugins.append(mcp_id)
+                model.enabled_plugins = plugins
+
+    async def mcp_enabled_plugins_remove(self, device_id: str, server_name: str) -> None:
+        """从 enabled_plugins 移除 mcp:{server_name}。"""
+        if not device_id or not server_name:
+            return
+        async with get_session_ctx() as session:
+            model = await self._select_device(session, device_id)
+            if model is None:
+                return
+            plugins = model.enabled_plugins
+            if plugins is None:
+                return
+            mcp_id = f"mcp:{server_name}"
+            if mcp_id in plugins:
+                model.enabled_plugins = [p for p in plugins if p != mcp_id]
 
     # ============================================================
     # 同步方法
