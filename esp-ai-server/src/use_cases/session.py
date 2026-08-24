@@ -81,8 +81,8 @@ class Session:
         asr_client: Optional["BaseASRGateway"],
         tool_mgr: Optional["PerUserToolManager"],
         user_config: Optional[dict] = None,
-        no_speech_timeout: float = 5.0,
-        silence_timeout: float = 2.0,
+        no_speech_timeout: float = 8.0,
+        silence_timeout: float = 3.0,
         ltm_service: Optional["LongTermMemoryServiceImpl"] = None,
         client_max_buffer: int = 10240,
         memory_repository: Optional["MemoryRepository"] = None,
@@ -760,11 +760,9 @@ class Session:
         # 通知 pipeline 停止发送数据，避免 session_end 后仍有 TTS 指令到达设备
         self.cancel_event.set()
         await self.channel.send_json({"type": "session_status", "status": "iat_end"})
-        await asyncio.sleep(0.03)
         await self.drain_asr()
         await self.fsm.set(SessionState.IDLE)
         await self.channel.send_json({"type": "session_status", "status": "session_end"})
-        await asyncio.sleep(0.1)
         await self.channel.send_text("session_end")
         logger.info(f"[Session:{self.session_id}] 会话结束消息已发送")
 
@@ -788,7 +786,6 @@ class Session:
             self.runtime.asr_processed = True
 
             await self.channel.send_json({"type": "session_status", "status": "iat_end"})
-            await asyncio.sleep(0.03)
 
             text = self.runtime.asr_full_text
             logger.info(f"[Session:{self.session_id}] ASR 最终: {text}")
@@ -800,7 +797,6 @@ class Session:
 
             try:
                 await self.channel.send_json({"type": "instruct", "command_id": "on_iat_cb", "data": text})
-                await asyncio.sleep(0.03)
             except Exception as e:
                 logger.debug(f"[Session:{self.session_id}] 发送 on_iat_cb 失败: {e}")
 
@@ -840,7 +836,6 @@ class Session:
             self.runtime.asr_processed = True
 
             await self.channel.send_json({"type": "session_status", "status": "iat_end"})
-            await asyncio.sleep(0.03)
 
             text = self.runtime.asr_full_text
             await self.drain_asr()

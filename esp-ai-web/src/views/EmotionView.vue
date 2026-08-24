@@ -491,7 +491,7 @@ watch(() => props.currentDevice, async (d) => {
 
 /* ===== 区块卡片 ===== */
 .section-card {
-  padding: 24px 26px;
+  padding: clamp(16px, 3vw, 26px);
   margin-bottom: 18px;
 }
 .section-head {
@@ -680,7 +680,7 @@ watch(() => props.currentDevice, async (d) => {
   z-index: 1000;
 }
 .modal-card {
-  width: 380px; max-width: 90vw;
+  width: min(380px, 92vw);
   background: var(--grad-panel);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
@@ -734,6 +734,7 @@ watch(() => props.currentDevice, async (d) => {
 @media (max-width: 600px) {
   .emo-grid { grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); }
   .pack-actions { width: 100%; }
+  .hero-title { font-size: 20px; }
   .hero-badge { top: 18px; right: 18px; }
 }
 </style>

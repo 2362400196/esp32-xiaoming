@@ -30,7 +30,7 @@
 #endif
 
 // 麦克风采集目标间隔
-#define MIC_TARGET_INTERVAL_US 40000
+#define MIC_TARGET_INTERVAL_US 20000
 
 // 看门狗超时阈值（每5ms一次检查）
 #define SPK_WATCHDOG_TIMEOUT_NORMAL 2000   // 10秒

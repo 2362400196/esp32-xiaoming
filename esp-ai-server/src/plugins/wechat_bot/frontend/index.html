@@ -141,7 +141,6 @@ body {
       </div>
     </div>
     <div id="qrActions" class="qr-actions" style="display:none">
-      <button class="btn btn-primary" onclick="applyToken()">应用 Token 并启动</button>
       <button class="btn btn-outline" onclick="cancelQr()">取消</button>
     </div>
   </div>
@@ -153,7 +152,8 @@ body {
       <span>微信已登录</span>
       <span class="sep">|</span>
       <span class="text-sub" id="bindCount">共 0 个绑定</span>
-      <button class="btn btn-ghost btn-sm" onclick="loadBindings()" style="margin-left:auto">刷新</button>
+      <button class="btn btn-ghost btn-sm" onclick="showQrLogin()" style="margin-left:auto">重新登录</button>
+      <button class="btn btn-ghost btn-sm" onclick="loadBindings()">刷新</button>
     </div>
     <div id="bindList" class="bind-list">
       <div class="bind-empty">
@@ -166,7 +166,6 @@ body {
 
 <script>
 let qrPollTimer = null;
-let botToken = '';
 let bindings = [];
 
 function getToken() { return localStorage.getItem('espai_token') || ''; }
@@ -222,6 +221,7 @@ async function pollStatus() {
   try {
     const res = await execApi('qr_status');
     if (res.code === 0 && res.data) {
+      // 已配置（自动激活 token 成功后）
       if (res.data.configured) {
         document.getElementById('qrActions').style.display = 'none';
         stopPolling();
@@ -229,42 +229,37 @@ async function pollStatus() {
         loadBindings();
         return;
       }
-      if (res.data.completed) {
-        botToken = res.data.bot_token || '';
-        document.getElementById('qrActions').style.display = 'flex';
-        document.getElementById('qrStatus').textContent = '扫码成功，点击「应用 Token」启动';
-        stopPolling();
+      // 二维码流程结束但未配置（应用 token 失败等异常）
+      if (res.data.completed && !res.data.configured) {
+        document.getElementById('qrStatus').textContent = '扫码成功，正在激活...';
         return;
       }
+      // 二维码已过期
       if (res.data.active === false) {
         document.getElementById('qrRegenBtn').style.display = 'inline-flex';
         document.getElementById('qrStatus').textContent = '二维码已过期，请重新生成';
         stopPolling();
         return;
       }
+      // 显示状态文案
+      var statusMsg = '';
+      switch (res.data.status) {
+        case 'scanned': statusMsg = '已扫码，请在手机上确认登录'; break;
+        case 'redirected': statusMsg = '登录节点已切换，请在手机上确认'; break;
+        default: statusMsg = res.data.message || '请使用微信扫描二维码';
+      }
+      document.getElementById('qrStatus').textContent = statusMsg;
     }
   } catch {}
 }
 
 function startPolling() {
   stopPolling();
-  qrPollTimer = setInterval(pollStatus, 2000);
+  qrPollTimer = setInterval(pollStatus, 1000);
 }
 
 function stopPolling() {
   if (qrPollTimer) { clearInterval(qrPollTimer); qrPollTimer = null; }
-}
-
-async function applyToken() {
-  const res = await execApi('apply_token');
-  if (res.code === 0 && res.data?.ok) {
-    botToken = '';
-    showToast('微信已登录，轮询已启动');
-    showLoginState(true);
-    loadBindings();
-  } else {
-    showToast(res.message || '应用 Token 失败');
-  }
 }
 
 async function cancelQr() {
@@ -274,7 +269,6 @@ async function cancelQr() {
   document.getElementById('qrActions').style.display = 'none';
   document.getElementById('qrPlaceholder').style.display = 'flex';
   document.getElementById('qrPlaceholder').innerHTML = '<button class="btn btn-primary" onclick="startQr()">获取二维码</button>';
-  botToken = '';
 }
 
 async function loadBindings() {
@@ -316,10 +310,17 @@ async function unbind(deviceKey) {
   const res = await execApi('unbind', { device_key: deviceKey });
   if (res.code === 0) {
     showToast('解绑成功');
-    await loadBindings();
+    // 解绑后跳转到二维码页面，方便重新绑定
+    showQrLogin();
   } else {
     showToast(res.message || '解绑失败');
   }
+}
+
+function showQrLogin() {
+  showLoginState(false);
+  // 自动触发获取二维码
+  startQr();
 }
 
 function showLoginState(configured) {
@@ -346,6 +347,9 @@ async function init() {
   if (res.code === 0 && res.data?.configured) {
     showLoginState(true);
     loadBindings();
+  } else {
+    // 未配置或 token 失效，显示二维码页面
+    showLoginState(false);
   }
 }
 

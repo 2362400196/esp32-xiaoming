@@ -463,6 +463,7 @@ class DeviceConfig(BaseModel):
     speed_ratio: Optional[float] = None
     volume_ratio: Optional[float] = None
     pitch_ratio: Optional[float] = None
+    explicit_dialect: Optional[str] = None
     tts_volume: Optional[float] = None
     # 火山 OpenAPI 凭据(tts_config.volc_openapi):设备级 AK/SK/项目名,用于查询复刻音色列表
     tts_volc_openapi: Optional[dict] = None
@@ -536,6 +537,7 @@ _CONFIG_FIELD_MAP: dict[str, list[str]] = {
     "speed_ratio": ["tts_config", "speed_ratio"],
     "volume_ratio": ["tts_config", "volume_ratio"],
     "pitch_ratio": ["tts_config", "pitch_ratio"],
+    "explicit_dialect": ["tts_config", "explicit_dialect"],
     "tts_volume": ["tts_config", "volume"],
     # tts_config 连接池参数
     "tts_enable_pool": ["tts_config", "enable_pool"],

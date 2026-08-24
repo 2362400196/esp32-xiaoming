@@ -441,6 +441,8 @@ class TTSSession:
                 "text": text,
             },
         }
+        if self._gateway.explicit_dialect:
+            request["req_params"]["explicit_dialect"] = self._gateway.explicit_dialect
 
         try:
             await full_client_request(self._websocket, json.dumps(request).encode())
@@ -534,6 +536,7 @@ class VolcEngineTTSGateway(TTSRepository):
         self.speed_ratio = effective.get("speed_ratio", tts_config.speed_ratio)
         self.volume_ratio = effective.get("volume_ratio", tts_config.volume_ratio)
         self.pitch_ratio = effective.get("pitch_ratio", tts_config.pitch_ratio)
+        self.explicit_dialect = effective.get("explicit_dialect", tts_config.explicit_dialect) or ""
         self._max_retries = 3
         self._ping_interval = 30
         self._connection_timeout = 15
@@ -722,6 +725,8 @@ class VolcEngineTTSGateway(TTSRepository):
                         "text": text,
                     },
                 }
+                if self.explicit_dialect:
+                    request["req_params"]["explicit_dialect"] = self.explicit_dialect
 
                 await full_client_request(websocket, json.dumps(request).encode())
                 if attempt > 0:
@@ -833,6 +838,8 @@ class VolcEngineTTSGateway(TTSRepository):
                     "text": text,
                 },
             }
+            if self.explicit_dialect:
+                request["req_params"]["explicit_dialect"] = self.explicit_dialect
 
             await full_client_request(websocket, json.dumps(request).encode())
 

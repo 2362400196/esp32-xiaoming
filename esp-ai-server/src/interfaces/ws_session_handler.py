@@ -283,6 +283,7 @@ class WebSocketSessionHandler:
                     "speed_ratio": user_tts_cfg.get("speed_ratio", 1.0),
                     "volume_ratio": user_tts_cfg.get("volume_ratio", 1.0),
                     "pitch_ratio": user_tts_cfg.get("pitch_ratio", 1.0),
+                    "explicit_dialect": user_tts_cfg.get("explicit_dialect", ""),
                     "enable_pool": user_tts_cfg.get("enable_pool", settings.tts.enable_pool),
                     # 设备级 TTS 连接池参数（回退全局）
                     "pool_max_size": user_tts_cfg.get("pool_max_size"),
@@ -300,6 +301,7 @@ class WebSocketSessionHandler:
                     "speed_ratio": settings.tts.speed_ratio or 1.0,
                     "volume_ratio": settings.tts.volume_ratio or 1.0,
                     "pitch_ratio": settings.tts.pitch_ratio or 1.0,
+                    "explicit_dialect": settings.tts.explicit_dialect or "",
                     "enable_pool": settings.tts.enable_pool,
                 }
             tts_processor = create_tts_gateway(config=tts_config)
@@ -547,7 +549,7 @@ class WebSocketSessionHandler:
                     try:
                         # shield 防止 wait_for 超时误取消 pipeline_task（外部 cancel 仍会传播）
                         result = await asyncio.wait_for(
-                            asyncio.shield(self.pipeline_task), timeout=min(_remaining, 5.0)
+                            asyncio.shield(self.pipeline_task), timeout=min(_remaining, 1.0)
                         )
                         break
                     except asyncio.TimeoutError:
@@ -644,8 +646,8 @@ class WebSocketSessionHandler:
 
         await fsm.set(SessionState.ASR)
         self._start_asr_session()
-        # 性能优化：将 0.1s sleep 降到 0.03s，只需让事件循环调度一次让 ASR 任务启动
-        await asyncio.sleep(0.03)
+        # 让出事件循环，确保 ASR 任务启动
+        await asyncio.sleep(0)
         await channel.send_json({"type": "session_status", "status": "iat_start"})
         logger.info(f"[Session:{session.session_id}] Next round ASR started")
 
@@ -660,7 +662,6 @@ class WebSocketSessionHandler:
         wake_ok = True
         try:
             if wam and _get_wake_enable_audio(settings, user_config):
-                await asyncio.sleep(0.05)
                 # 注意：_wake_audio_played 已在 start 命令处理时 clear()
 
                 # 本轮唤醒轮次号，用于防止上一轮迟到的 client_out_audio_over 串扰
@@ -708,8 +709,8 @@ class WebSocketSessionHandler:
             logger.info(f"[Session:{session.session_id}] Wake audio complete, starting ASR")
             await fsm.set(SessionState.ASR)
             self._start_asr_session()
-            # 性能优化：将 0.1s sleep 降到 0.03s
-            await asyncio.sleep(0.03)
+            # 让出事件循环，确保 ASR 任务启动
+            await asyncio.sleep(0)
             try:
                 await channel.send_json({"type": "session_status", "status": "iat_start"})
                 logger.info(f"[Session:{session.session_id}] iat_start sent to device")

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextvars
 import os
+import asyncio
 import socket
 import time
 import uuid
@@ -275,9 +276,14 @@ async def lifespan(app: FastAPI):
                             device_llm = getattr(device_llm, 'llm_processor', None)
 
                 if device_llm:
-                    # 复用设备 session 的 llm_processor（配置完全一致）
-                    llm_with_tools = device_llm
-                    logger.info(f"[WeChat] 复用设备 session 的 llm_processor（含 MCP 工具）")
+                    # 设备在线时，从 session 的 llm_processor 获取配置，创建独立网关（避免修改共享对象）
+                    wechat_prompt = device_llm.system_prompt or ""
+                    llm_api_key = device_llm.api_key
+                    llm_base_url = device_llm.base_url
+                    llm_model = device_llm.model
+                    if not device_tool_mgr:
+                        device_tool_mgr = getattr(device_llm, 'tool_manager', None)
+                    logger.info(f"[WeChat] 使用设备 session 的 LLM 配置（含 MCP 工具）")
                 else:
                     # 设备不在线时，创建独立的 LLM 网关
                     shared_tm = getattr(app.state, 'shared_tool_manager', None)
@@ -325,17 +331,76 @@ async def lifespan(app: FastAPI):
 
                     if not wechat_prompt:
                         wechat_prompt = settings.llm.system_prompt or "你是一个智能语音助手。"
-                    wechat_prompt += " 用户通过微信和你聊天，请用自然口语化的微信聊天风格回复，控制在200字以内。可以适当使用emoji表情符号让回复更生动亲切。不要使用[e:情绪]标签。"
 
-                    llm_with_tools = OpenAILLMGateway(
-                        config={
-                            "api_key": llm_api_key,
-                            "base_url": llm_base_url,
-                            "model": llm_model,
-                            "system_prompt": wechat_prompt,
-                        },
-                        tool_manager=device_tool_mgr,
-                    )
+                # ── 注入设备能力边界、技能目录、长期记忆等上下文 ──
+                try:
+                    from src.use_cases import skill_system
+
+                    # 设备能力边界
+                    _tm = device_tool_mgr
+                    if _tm is not None and hasattr(_tm, '_enabled_plugins'):
+                        _installed = _tm._enabled_plugins
+                        if _installed is not None and len(_installed) > 0:
+                            _cap_note = (f"\n\n【设备能力边界】本设备仅启用插件: {'、'.join(sorted(_installed))}。"
+                                         "用户询问的功能如果不在上述插件能力或系统自带能力范围内，"
+                                         "直接回答\"该功能未安装/设备暂不支持\"，"
+                                         "绝不可以用猜测、编造或历史经验回答，也不要假装执行了操作。")
+                            wechat_prompt = (wechat_prompt + _cap_note) if wechat_prompt else _cap_note
+
+                    # Skill 目录
+                    skill_catalog = skill_system.render_skills_catalog(device_id=binding.device_key)
+                    if skill_catalog:
+                        wechat_prompt = wechat_prompt + "\n\n" + skill_catalog if wechat_prompt else skill_catalog
+
+                    # 长期记忆摘要标签
+                    try:
+                        from src.use_cases.memory import LongTermMemoryServiceImpl
+                        from src.infrastructure.db.repositories.ltm_repository import SqlLongTermMemoryRepository
+                        _ltm_repo = SqlLongTermMemoryRepository()
+                        _ltm = LongTermMemoryServiceImpl(repository=_ltm_repo)
+                        _catalog = await _ltm.get_summary_catalog(binding.device_key)
+                        if _catalog:
+                            _ltm_block = (
+                                "\n\n[Long-term Memory Summary Labels]\n"
+                                "以下是该用户的长期记忆标签列表。当用户提到与某个标签相关的话题时，\n"
+                                "你应该**主动调用 memory_recall 工具**来回忆相关记忆，并在对话中自然地提及。\n"
+                                f"{_catalog}\n"
+                                "[/Long-term Memory]"
+                            )
+                            wechat_prompt = wechat_prompt + _ltm_block if wechat_prompt else _ltm_block
+                    except Exception as e:
+                        logger.debug(f"[WeChat] LTM 注入失败: {e}")
+
+                    # 用户画像
+                    try:
+                        from src.use_cases.growth.user_profile import UserProfileService
+                        _profile_svc = UserProfileService("")
+                        _profile_summary = await _profile_svc.get_profile_summary(binding.device_key)
+                        if _profile_summary and _profile_summary != "暂无用户信息":
+                            _profile_block = (
+                                "\n\n[User Profile]\n"
+                                "以下是该用户的画像信息，帮助你在回答时更个性化：\n"
+                                f"{_profile_summary}\n"
+                                "[/User Profile]"
+                            )
+                            wechat_prompt = wechat_prompt + _profile_block if wechat_prompt else _profile_block
+                    except Exception as e:
+                        logger.debug(f"[WeChat] 用户画像注入失败: {e}")
+                except Exception as e:
+                    logger.warning(f"[WeChat] 注入上下文失败: {e}")
+
+                # WeChat 专属后缀（在注入之后追加，确保不被覆盖）
+                wechat_prompt += " 用户通过微信和你聊天，请用自然口语化的微信聊天风格回复，控制在200字以内。可以适当使用emoji表情符号让回复更生动亲切。不要使用[e:情绪]标签。"
+
+                llm_with_tools = OpenAILLMGateway(
+                    config={
+                        "api_key": llm_api_key,
+                        "base_url": llm_base_url,
+                        "model": llm_model,
+                        "system_prompt": wechat_prompt,
+                    },
+                    tool_manager=device_tool_mgr,
+                )
 
                 # 语音模式开关检测（必须在 LLM 调用之前）
                 if not hasattr(bot_.state, 'voice_mode'):
@@ -365,11 +430,22 @@ async def lifespan(app: FastAPI):
                 else:
                     context_text += "\n[当前语音模式已关闭，仅文字回复]"
 
-                # 收集工具 LLM 回复
+                # 收集工具 LLM 回复（带 30 秒超时）
+                logger.info(f"[WeChat] 开始 LLM 处理消息: {text[:50]}")
                 full_reply = ""
-                async for chunk in llm_with_tools.stream_with_tools(context_text, device_id=binding.device_key):
-                    if chunk:
-                        full_reply += chunk
+                try:
+                    async def _collect_reply():
+                        r = ""
+                        async for chunk in llm_with_tools.stream_with_tools(context_text, device_id=binding.device_key):
+                            if chunk:
+                                r += chunk
+                        return r
+                    full_reply = await asyncio.wait_for(_collect_reply(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    logger.warning(f"[WeChat] LLM 处理超时 (30s)")
+                except Exception as stream_err:
+                    logger.error(f"[WeChat] LLM 流式处理异常: {stream_err}", exc_info=True)
+                logger.info(f"[WeChat] LLM 处理完成，回复长度: {len(full_reply)}")
 
                 if full_reply and not full_reply.startswith("LLM not configured"):
                     import re
@@ -395,7 +471,6 @@ async def lifespan(app: FastAPI):
                         if need_speak:
                             speaker = getattr(app.state, 'speaker', None)
                             if speaker and device_channel:
-                                import asyncio
                                 asyncio.create_task(speaker.speak(
                                     binding.device_key, clean_reply,
                                     user_config=device_model,

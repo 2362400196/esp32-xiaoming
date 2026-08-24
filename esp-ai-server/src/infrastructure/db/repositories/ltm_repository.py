@@ -152,8 +152,8 @@ class SqlLongTermMemoryRepository(LongTermMemoryRepository):
             effective_limit = limit or 8
             return [_model_to_item(r) for r in rows[:effective_limit]]
 
-    async def find_all(self, device_id: str) -> list[MemoryItem]:
-        """列出设备全部活跃记忆，按 access_count 降序。"""
+    async def find_all(self, device_id: str, limit: int = 50) -> list[MemoryItem]:
+        """列出设备全部活跃记忆（默认最多 50 条），按 access_count 降序。"""
         if not device_id:
             return []
         async with get_session_ctx() as session:
@@ -161,11 +161,9 @@ class SqlLongTermMemoryRepository(LongTermMemoryRepository):
                 select(LongTermMemoryRecordModel).where(
                     LongTermMemoryRecordModel.device_id == device_id,
                     LongTermMemoryRecordModel.deleted.is_(False),
-                )
+                ).order_by(LongTermMemoryRecordModel.access_count.desc()).limit(limit)
             )
-            rows = result.scalars().all()
-            rows.sort(key=lambda r: -r.access_count)
-            return [_model_to_item(r) for r in rows]
+            return [_model_to_item(r) for r in result.scalars().all()]
 
     async def find_by_id(
         self,
@@ -208,15 +206,15 @@ class SqlLongTermMemoryRepository(LongTermMemoryRepository):
             await session.flush()
             await self._rebuild_index(session, device_id)
 
-    async def get_summary_labels(self, device_id: str) -> list[str]:
-        """获取设备的摘要标签列表。"""
+    async def get_summary_labels(self, device_id: str, limit: int = 30) -> list[str]:
+        """获取设备的摘要标签列表（默认最多 30 条，减少 LLM 上下文体积）。"""
         if not device_id:
             return []
         async with get_session_ctx() as session:
             result = await session.execute(
                 select(LongTermMemorySummaryLabelModel.label).where(
                     LongTermMemorySummaryLabelModel.device_id == device_id,
-                )
+                ).limit(limit)
             )
             return list(result.scalars().all())
 

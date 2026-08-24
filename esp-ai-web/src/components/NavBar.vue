@@ -39,7 +39,24 @@
       <div class="nav-user">
         <template v-if="loggedIn">
           <span class="user-name">{{ userName }}</span>
-          <span class="user-avatar">{{ (userName || '?')[0].toUpperCase() }}</span>
+          <div class="user-avatar-wrap" @click.stop="toggleUserMenu">
+            <span class="user-avatar" :class="{ open: userMenuOpen }">{{ (userName || '?')[0].toUpperCase() }}</span>
+            <span class="nav-chevron" :class="{ open: userMenuOpen }">▾</span>
+            <Transition name="drop">
+              <div v-if="userMenuOpen" class="user-dropdown" @click.stop>
+                <button class="nav-dropdown-item" :class="{ active: active === 'profile' }"
+                  @click="selectUserItem('profile')">
+                  <span class="nav-icon" v-html="icons['profile']"></span>
+                  <span class="nav-label">个人中心</span>
+                </button>
+                <button v-if="isAdmin" class="nav-dropdown-item" :class="{ active: active === 'admin' }"
+                  @click="selectUserItem('admin')">
+                  <span class="nav-icon" v-html="icons['admin']"></span>
+                  <span class="nav-label">管理后台</span>
+                </button>
+              </div>
+            </Transition>
+          </div>
         </template>
         <button v-else class="btn-mint nav-login" @click="$emit('switch', 'profile')">登录</button>
       </div>
@@ -54,13 +71,21 @@ import { getUser, isLoggedIn } from '../api'
 const props = defineProps({
   active: { type: String, default: 'home' },
   items: { type: Array, default: () => [] },
+  isAdmin: { type: Boolean, default: false },
 })
 const emit = defineEmits(['switch'])
 
 const dropdownOpen = ref(null)
+const userMenuOpen = ref(false)
 
 function toggleDropdown(id) {
   dropdownOpen.value = dropdownOpen.value === id ? null : id
+  userMenuOpen.value = false
+}
+
+function toggleUserMenu() {
+  userMenuOpen.value = !userMenuOpen.value
+  dropdownOpen.value = null
 }
 
 function selectChild(id) {
@@ -68,8 +93,14 @@ function selectChild(id) {
   emit('switch', id)
 }
 
+function selectUserItem(id) {
+  userMenuOpen.value = false
+  emit('switch', id)
+}
+
 function handleClickOutside() {
   dropdownOpen.value = null
+  userMenuOpen.value = false
 }
 
 onMounted(() => document.addEventListener('click', handleClickOutside))
@@ -122,13 +153,13 @@ const icons = {
   transform: translateY(-24px);
 }
 .nav-inner {
-  max-width: 1080px;
+  max-width: 1400px;
   margin: 0 auto;
   height: 60px;
   padding: 0 20px;
   display: flex;
   align-items: center;
-  gap: 24px;
+  gap: 8px;
   background: linear-gradient(155deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.42));
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
@@ -240,6 +271,24 @@ const icons = {
   background: var(--mint-soft);
 }
 
+.user-dropdown {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  min-width: 150px;
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  padding: 6px;
+  box-shadow: 0 12px 36px rgba(23, 52, 74, 0.15), var(--glass-hi);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 200;
+}
+
 /* 下拉动画 */
 .drop-enter-active, .drop-leave-active {
   transition: opacity 0.2s var(--ease), transform 0.2s var(--ease);
@@ -249,16 +298,16 @@ const icons = {
   transform: translateX(-50%) translateY(-6px);
 }
 
-.nav-user { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.nav-user { display: flex; align-items: center; gap: 10px; flex-shrink: 0; margin-left: auto; }
 .user-name { font-size: 13px; color: var(--text-sub); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.user-avatar {
-  width: 36px; height: 36px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 14px; font-weight: 700; color: #fff;
-  background: var(--grad-brand);
-  box-shadow: var(--shadow-mint), inset 0 1px 0 rgba(255, 255, 255, 0.35);
-  animation: avatarBreathe 3s ease-in-out infinite;
-}
+.user-avatar-wrap { position: relative; display: flex; align-items: center; gap: 4px; cursor: pointer; padding: 4px 8px 4px 4px; border-radius: 30px; transition: background 0.25s var(--ease); }
+.user-avatar-wrap:hover { background: rgba(16, 185, 129, 0.08); }
+.user-avatar-wrap .nav-chevron { font-size: 10px; color: var(--text-sub); transition: transform 0.25s var(--ease); }
+.user-avatar-wrap .nav-chevron.open { transform: rotate(180deg); }
+.user-avatar { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; background: linear-gradient(135deg, #34d399, #059669); color: #fff; font-size: 14px; font-weight: 700; transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease); box-shadow: 0 2px 8px rgba(5, 150, 105, 0.2); }
+.user-avatar-wrap:hover .user-avatar { transform: scale(1.05); box-shadow: 0 4px 14px rgba(5, 150, 105, 0.35); }
+.user-avatar.open { transform: scale(0.95); box-shadow: 0 1px 4px rgba(5, 150, 105, 0.15); }
+
 @keyframes avatarBreathe {
   0%, 100% { box-shadow: 0 4px 12px rgba(16, 185, 129, 0.18); }
   50% { box-shadow: 0 6px 20px rgba(16, 185, 129, 0.32); }
@@ -273,5 +322,18 @@ const icons = {
   .user-name { display: none; }
   .nav-dropdown { left: 0; transform: none; }
   .drop-enter-from, .drop-leave-to { transform: translateY(-6px); }
+}
+@media (min-width: 1600px) {
+  .navbar { padding: 0 32px; }
+  .nav-inner { padding: 0 28px; }
+  .nav-item { padding: 8px 20px; font-size: 14px; }
+}
+@media (max-width: 480px) {
+  .nav-menu { gap: 2px; }
+  .nav-item { padding: 6px 8px; }
+  .nav-label { font-size: 11px; }
+  .nav-icon { width: 14px; height: 14px; }
+  .brand-logo { font-size: 18px; }
+  .brand-name { font-size: 15px; }
 }
 </style>

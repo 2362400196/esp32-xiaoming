@@ -35,7 +35,7 @@ EventGroupHandle_t s_wakeup_event_group;
 static int s_keepalive_check_counter = 0;
 static TickType_t s_last_wakeup_trigger_tick = 0;
 
-#define WAKEUP_TRIGGER_COOLDOWN_MS 8000
+#define WAKEUP_TRIGGER_COOLDOWN_MS 3000
 
 // WakeNet 状态（纯 wakenet 接口，无 AFE）
 static const esp_wn_iface_t *s_wakenet = NULL;      // WakeNet 接口
@@ -588,7 +588,7 @@ esp_err_t wakeup_init(void)
         vTaskDelay(pdMS_TO_TICKS(50));  // 等 MCLK 稳定
         es8311_power_up();
         es8311_set_format_16bit_i2s();  // MCLK 稳定后重新确认 REG09/0A 格式（MCLK 未运行时可能读回 0xFF）
-        es8311_set_mic_gain(24);   // 重新设置麦克风增益（power_up 会重置寄存器）
+        es8311_set_mic_gain(36);   // 重新设置麦克风增益（power_up 会重置寄存器）
         ESP_LOGI(TAG, "ES8311 时钟已锁存（MCLK 稳定后 power_up）");
     } else {
         // main.c 中初始化失败（软重启后 I2C 不响应等），MCLK 运行后再重试一次完整初始化
@@ -601,7 +601,7 @@ esp_err_t wakeup_init(void)
                                        ecfg->mclk_freq,
                                        SPK_SAMPLE_RATE);
         if (es_err == ESP_OK) {
-            es8311_set_mic_gain(24);
+            es8311_set_mic_gain(36);
             ESP_LOGI(TAG, "ES8311 重新初始化成功（MCLK 运行后恢复）");
         } else {
             ESP_LOGE(TAG, "ES8311 重新初始化仍失败: %s（音频不可用，建议断电重启）",

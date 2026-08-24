@@ -2,7 +2,7 @@
   <div class="app">
     <!-- 未登录时不显示导航栏（登录页保持干净）；开发者编辑器打开时隐藏导航栏（带过渡动画） -->
     <Transition name="nav">
-      <NavBar v-if="loggedIn && !editorOpen" :active="tab" :items="navItems" @switch="switchTab" />
+      <NavBar v-if="loggedIn && !editorOpen && tab !== 'admin'" :active="tab" :items="navItems" :is-admin="isAdmin" @switch="switchTab" />
     </Transition>
 
     <main class="stage">
@@ -23,7 +23,7 @@
           @toast="toast" @select-device="selectDevice" />
         <ToolView v-else-if="tab === 'tool'" :key="'tool'" @toast="toast" />
         <PluginPageView v-else-if="tab.startsWith('plugin_')" :key="tab" :plugin-name="currentPluginPage?.name || ''" :plugin-title="currentPluginPage?.title || ''" :plugin-entry="currentPluginPage?.entry || ''" :current-device="currentDevice" @toast="toast" />
-        <AdminView v-else-if="tab === 'admin'" :key="'admin'" @toast="toast" />
+        <AdminView v-else-if="tab === 'admin'" :key="'admin'" @toast="toast" @back="switchTab('devices')" />
         <ProfileView v-else :key="'profile'" :devices="devices" @login="onLogin" @toast="toast" />
       </transition>
     </main>
@@ -72,6 +72,7 @@ function onEditorChange(v) {
   }
 }
 const loggedIn = ref(isLoggedIn())
+const isAdmin = computed(() => getUser()?.role === 'admin')
 const navItems = ref([
   { id: 'devices', label: '设备' },
   { id: 'store', label: '商店' },
@@ -79,17 +80,10 @@ const navItems = ref([
   { id: 'control', label: '控制' },
   { id: 'emotion', label: '表情' },
   { id: 'tool', label: '工具' },
-  { id: 'profile', label: '我的' },
 ])
 
 function syncAdminNav() {
-  const idx = navItems.value.findIndex(i => i.id === 'admin')
-  const isAdmin = getUser()?.role === 'admin'
-  if (isAdmin && idx === -1) {
-    navItems.value.splice(navItems.value.length - 1, 0, { id: 'admin', label: '管理' })
-  } else if (!isAdmin && idx !== -1) {
-    navItems.value.splice(idx, 1)
-  }
+  // 管理入口已移至头像下拉菜单，无需操作导航栏
 }
 
 async function syncPluginNav() {
@@ -341,12 +335,18 @@ onBeforeUnmount(() => { clearInterval(pollTimer); clearTimeout(editorCloseTimer)
   display: flex;
   flex-direction: column;
   min-height: 0;
-  max-width: 1080px;
+  max-width: 1400px;
   width: 100%;
   margin: 0 auto;
-  padding: 24px 24px 40px;
+  padding: 24px 32px 40px;
   position: relative;
   z-index: 1;
+}
+@media (max-width: 768px) {
+  .stage { padding: 16px 16px 40px; }
+}
+@media (min-width: 1600px) {
+  .stage { padding: 32px 48px 60px; }
 }
 
 .toast {

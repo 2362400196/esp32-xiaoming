@@ -463,7 +463,13 @@ class WeChatBot:
             try:
                 await self._qr_poll_once()
                 if self.state.qr.completed:
-                    logger.info("[WeChat] 二维码登录成功！等待 token 激活后开始轮询...")
+                    logger.info("[WeChat] 二维码登录成功，自动激活 token...")
+                    self.state.qr.active = False
+                    ok = await self.apply_qr_token_and_start()
+                    if ok:
+                        logger.info("[WeChat] 自动激活 token 成功，消息轮询已启动")
+                    else:
+                        logger.warning("[WeChat] 自动激活 token 失败，无 bot_token")
                     break
             except WeChatAPIError as e:
                 if "expired" in str(e) or "timeout" in str(e):
@@ -487,7 +493,7 @@ class WeChatBot:
                 self.state.qr.active = False
                 break
 
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
 
     async def _qr_poll_once(self) -> None:
         """单次二维码状态轮询"""
@@ -778,12 +784,13 @@ class WeChatBot:
 
     # ── 消息发送 ──────────────────────────────
 
-    async def send_text(self, chat_id: str, text: str) -> None:
-        """发送文本消息（支持长文本自动分片）"""
+    async def send_text(self, chat_id: str, text: str) -> bool:
+        """发送文本消息（支持长文本自动分片），返回是否全部发送成功"""
         if not self.state.configured:
             raise WeChatAPIError(-1, "微信未配置")
 
         offset = 0
+        success = True
         while offset < len(text):
             chunk = text[offset: offset + MAX_MSG_LEN]
             # UTF-8 安全截断
@@ -792,12 +799,31 @@ class WeChatBot:
             if not chunk:
                 break
 
-            try:
-                await self._send_text_chunk(chat_id, chunk)
-            except WeChatAPIError as e:
-                logger.warning(f"[WeChat] 发送文本分片失败: {e}")
+            sent = False
+            for attempt in range(3):
+                try:
+                    await self._send_text_chunk(chat_id, chunk)
+                    sent = True
+                    break
+                except WeChatAPIError as e:
+                    if e.code == -2 and attempt < 2:
+                        logger.warning(f"[WeChat] 发送文本分片失败 (retry {attempt+1}/3): {e}")
+                        await asyncio.sleep(1.0)
+                    else:
+                        logger.warning(f"[WeChat] 发送文本分片失败: {e}")
+                        break
+            if not sent:
+                success = False
+                # ret=-2 持续失败说明 token 可能已失效，标记为无效
+                logger.error(f"[WeChat] 发送消息彻底失败，token 可能已失效，请重新扫码登录。"
+                            f"base_url={self.state.base_url}, token_len={len(self.state.token)}")
+                self.state.token_invalid = True
+                self.state.configured = False
+                self.state.sync_buf = ""
+                self._clear_persisted_token()
                 break
             offset += len(chunk)
+        return success
 
     async def _send_text_chunk(self, chat_id: str, chunk: str) -> None:
         """发送单条文本消息块"""

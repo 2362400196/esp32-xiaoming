@@ -113,6 +113,7 @@ class TTSConfig(BaseModel):
     speed_ratio: float = Field(default=1.0)
     volume_ratio: float = Field(default=1.0)
     pitch_ratio: float = Field(default=1.0)
+    explicit_dialect: str = Field(default="", description="TTS 方言，可选：beijing/dongbei/henan/shaanxi/shanghai/sichuan/tianjin/yue")
 
     max_concurrency: int = Field(default=10)
 
@@ -335,6 +336,7 @@ class Settings(BaseSettings):
     tts_volcengine_speed: str = Field(default="")
     tts_volcengine_volume: str = Field(default="")
     tts_volcengine_pitch: str = Field(default="")
+    tts_volcengine_dialect: str = Field(default="")
     tts_volcengine_sample_rate: int = Field(default=0)
     tts_pool_enabled: bool = Field(default=True)
     tts_pool_max_size: int = Field(default=0)
@@ -502,6 +504,8 @@ class Settings(BaseSettings):
                 self.tts.pitch_ratio = float(self.tts_volcengine_pitch)
             except (ValueError, TypeError):
                 pass
+        if self.tts_volcengine_dialect:
+            self.tts.explicit_dialect = self.tts_volcengine_dialect
         if self.tts_volcengine_sample_rate:
             try:
                 self.tts.sample_rate = int(self.tts_volcengine_sample_rate)

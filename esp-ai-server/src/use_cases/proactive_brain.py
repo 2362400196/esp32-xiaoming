@@ -260,8 +260,11 @@ class ProactiveBrain:
             for device_id in device_ids:
                 binding = bind_mgr.find_binding(device_id)
                 if binding and binding.wechat_chat_id:
-                    await bot.send_text(binding.wechat_chat_id, text)
-                    logger.info(f"[Proactive] 微信推送成功: {text[:40]}...")
+                    ok = await bot.send_text(binding.wechat_chat_id, text)
+                    if ok:
+                        logger.info(f"[Proactive] 微信推送成功: {text[:40]}...")
+                    else:
+                        logger.warning(f"[Proactive] 微信推送失败: API返回错误")
                 else:
                     logger.warning(f"[Proactive] 设备 {device_id} 未绑定微信")
         except Exception as e:

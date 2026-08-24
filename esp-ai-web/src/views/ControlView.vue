@@ -565,5 +565,7 @@ async function onBrightnessChange() {
   .hero-title { font-size: 20px; }
   .watermark { font-size: 80px; }
   .hero-badge { top: 18px; right: 18px; }
+  .s-slider { width: 80px; }
+  .timeline { max-height: 280px; }
 }
 </style>

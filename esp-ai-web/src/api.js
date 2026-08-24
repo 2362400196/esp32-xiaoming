@@ -186,6 +186,7 @@ getActiveEmoPack: (deviceId) => request('/api/v1/emos/active/' + encodeURICompon
     adminDevices: () => request('/api/v1/admin/devices'),
     adminUpdateDevice: (deviceId, data) => request('/api/v1/admin/devices/' + encodeURIComponent(deviceId), 'PUT', data),
     adminUnbindDevice: (deviceId) => request('/api/v1/admin/devices/' + encodeURIComponent(deviceId) + '/unbind', 'POST'),
+    adminDeleteDevice: (deviceId) => request('/api/v1/admin/devices/' + encodeURIComponent(deviceId), 'DELETE'),
     adminReloadPlugins: () => request('/api/v1/plugins/reload', 'POST'),
     adminBatchWakeup: () => request('/api/v1/admin/devices/batch/wakeup', 'POST'),
     adminBatchStop: () => request('/api/v1/admin/devices/batch/stop', 'POST'),
@@ -201,6 +202,7 @@ getActiveEmoPack: (deviceId) => request('/api/v1/emos/active/' + encodeURICompon
     adminUpdateMarketplacePlugin: (slug, data) => request('/api/v1/admin/marketplace/plugins/' + encodeURIComponent(slug), 'PUT', data),
     adminMarketplaceReviews: () => request('/api/v1/admin/marketplace/reviews'),
     adminDeleteMarketplaceReview: (reviewId) => request('/api/v1/admin/marketplace/reviews/' + encodeURIComponent(reviewId), 'DELETE'),
+    adminMetrics: () => request('/api/v1/system/metrics'),
     // 微信绑定
     wechatQrStart: () => request('/api/v1/wechat/qr-start', 'POST'),
     wechatQrStatus: () => request('/api/v1/wechat/qr-status'),

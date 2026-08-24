@@ -77,7 +77,7 @@ static void play_wakeup_prompt(const uint8_t *data, size_t len)
     audio_spk_play();          // 重置播放缓冲 + 启动播放
     audio_spk_write(data, len);
     audio_spk_wait_drain();    // 设置 drain 等待，播完由 spk_task 置 drain_done
-    for (int i = 0; i < 250; i++) {   // 最长等 5 秒
+    for (int i = 0; i < 100; i++) {   // 最长等 2 秒
         if (audio_spk_check_drain_done()) break;
         vTaskDelay(pdMS_TO_TICKS(20));
     }
@@ -363,7 +363,7 @@ void app_main(void)
                      esp_err_to_name(es_err));
             display_show_status("音频初始化中...");
         } else {
-            es8311_set_mic_gain(24);   // 默认麦克风增益 24dB（ES8311 模拟麦，12dB 偏低致唤醒困难）
+            es8311_set_mic_gain(36);   // 麦克风增益 36dB（从 24dB 提升，进一步改善唤醒灵敏度；最高 42dB）
         }
     }
 #endif

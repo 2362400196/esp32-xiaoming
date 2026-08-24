@@ -29,6 +29,7 @@ dependencies = [
     "bcrypt>=5.0.0",
     "qrcode[pil]==8.1",
     "aiofiles==24.1.0",
+    "psutil>=6.0.0",
     "annotated-types==0.7.0",
     "anyio==4.13.0",
     "attrs==26.1.0",

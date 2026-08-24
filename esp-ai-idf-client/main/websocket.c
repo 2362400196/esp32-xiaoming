@@ -23,6 +23,11 @@ extern int s_tts_duration_ms;
 /* TTS 状态互斥锁（定义在 callback_commands.c，保护上述三个变量） */
 extern SemaphoreHandle_t s_tts_state_mutex;
 
+/* 会话生命周期计时（毫秒，用于 ASR/LLM 日志） */
+static int64_t s_asr_start_ms = 0;
+static int64_t s_llm_start_ms = 0;
+static int64_t s_session_start_ms = 0;
+
 /* 会话看门狗（定义在 main.c） */
 extern void session_watchdog_refresh(void);  // 收到服务端数据时重置会话超时计时
 extern void session_watchdog_start(void);    // 启动看门狗计时（iat_start 暂停 WakeNet 后使用）
@@ -759,6 +764,10 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                         if (status && cJSON_IsString(status)) {
                             if (strcmp(status->valuestring, "iat_start") == 0) {
                                 ESP_LOGI(TAG, "ASR 开始，启动麦克风采集");
+                                // 记录会话/ASR 开始时间
+                                s_session_start_ms = esp_timer_get_time() / 1000;
+                                s_asr_start_ms = s_session_start_ms;
+                                s_llm_start_ms = 0;
                                 // 停止 drain check timer
                                 if (s_drain_check_timer) {
                                     esp_timer_stop(s_drain_check_timer);
@@ -787,6 +796,12 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                                 audio_mic_start();
                             } else if (strcmp(status->valuestring, "iat_end") == 0) {
                                 ESP_LOGI(TAG, "ASR 结束，关闭麦克风");
+                                // 计算 ASR 耗时，记录 LLM 阶段开始时间
+                                int64_t now_ms = esp_timer_get_time() / 1000;
+                                s_llm_start_ms = now_ms;
+                                if (s_asr_start_ms > 0) {
+                                    ESP_LOGI(TAG, "[生命周期] ASR 耗时: %lldms, 等待 LLM 回复...", (long long)(now_ms - s_asr_start_ms));
+                                }
                                 // 与 Arduino 一致：iat_end 不切换表情 GIF（保持"聆听中"）
                                 audio_mic_stop();
                                 // 恢复 WakeNet 以支持 TTS 播放中语音打断：
@@ -806,6 +821,13 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
 #endif
                             } else if (strcmp(status->valuestring, "tts_chunk_start") == 0) {
                                 ESP_LOGI(TAG, "TTS 音频开始");
+                                // 计算 LLM 耗时（从 ASR 结束到 TTS 开始 = LLM 推理 + TTS 合成）
+                                int64_t now_ms = esp_timer_get_time() / 1000;
+                                if (s_llm_start_ms > 0) {
+                                    ESP_LOGI(TAG, "[生命周期] LLM+TTS 耗时: %lldms, 总延迟: %lldms",
+                                             (long long)(now_ms - s_llm_start_ms),
+                                             (long long)(now_ms - s_asr_start_ms));
+                                }
                                 if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
                                 s_audio_playing = true;
                                 if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
@@ -835,6 +857,15 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                                  * 由后续 session_end 或新对话 iat_start 清除 */
                             } else if (strcmp(status->valuestring, "session_end") == 0) {
                                 ESP_LOGI(TAG, "会话结束");
+                                // 计算整轮对话耗时
+                                int64_t now_ms = esp_timer_get_time() / 1000;
+                                if (s_session_start_ms > 0) {
+                                    ESP_LOGI(TAG, "[生命周期] 整轮对话耗时: %lldms (ASR→LLM→TTS)",
+                                             (long long)(now_ms - s_session_start_ms));
+                                }
+                                s_asr_start_ms = 0;
+                                s_llm_start_ms = 0;
+                                s_session_start_ms = 0;
                                 // 与 Arduino 一致：如果 drain 动作已在等待，跳过
                                 if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
                                 drain_action_t cur_drain = s_drain_action;

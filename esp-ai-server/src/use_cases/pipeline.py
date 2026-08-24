@@ -773,10 +773,10 @@ class ConversationPipeline:
                     if tts_duration_ms < 500:
                         tts_duration_ms = 500
                     logger.info(f"[Pipeline] TTS #{seq_id} {len(original_text)}字(中{cn_chars}英{en_chars}), 估 {tts_duration_ms}ms")
-                    # 合成前直接把文字发给发送器，不等音频帧
+                    # 合成前直接发送字幕和时长，不等音频帧，避免被音频队列阻塞
                     payload = json.dumps({"text": original_text, "duration_ms": tts_duration_ms}, ensure_ascii=False)
-                    await self.queues.send.put((seq_id, b"TEXT", payload, tts_duration_ms))
-                    await self.queues.send.put((seq_id, b"DURATION", None, tts_duration_ms))
+                    await self.channel.send_json({"type": "instruct", "command_id": "on_llm_cb", "data": payload})
+                    await self.channel.send_json({"type": "instruct", "command_id": "tts_duration", "data": str(tts_duration_ms)})
                 total_audio_bytes = 0
                 try:
                     async for audio_chunk in session.synthesize(sentence_text, cancel_event=self.cancel_event):
@@ -806,7 +806,7 @@ class ConversationPipeline:
 
                 if actual_ms > 0:
                     logger.info(f"[Pipeline] TTS #{seq_id} 修正: {tts_duration_ms}ms → {actual_ms}ms")
-                    await self.queues.send.put((seq_id, b"DURATION", None, actual_ms))
+                    await self.channel.send_json({"type": "instruct", "command_id": "tts_duration", "data": str(actual_ms)})
                     self._total_duration_ms += actual_ms
                 elif tts_duration_ms > 0:
                     # 使用文本估算的时长
@@ -825,22 +825,18 @@ class ConversationPipeline:
                     logger.debug(f"[Pipeline] 关闭 TTS session 异常: {e}")
 
     async def _sender_task(self):
-        """Sender Worker：send_queue → 发送到客户端"""
+        """Sender Worker：send_queue → 发送音频到客户端
+        字幕和时长信息已由 _tts_task 直接发送，不再经过此队列。"""
         total_sent = 0
         frame_count = 0
-        current_seq_id = -1
-        pending_text = None
-        pending_duration = 0
-        text_delay_frames = 0
-        text_sent_for_seq = -1
         client_max_buffer = self.config.client_max_buffer
         # 按播放速率(1x)节流发送音频，避免发送超前导致：
-        # 1) 控制帧(on_llm_cb/tts_duration)被 TCP 背压阻塞 → 字幕迟到
-        # 2) 客户端缓冲被打满 → 播放卡顿
+        # 1) 客户端缓冲被打满 → 播放卡顿
+        # 2) WiFi 半双工下音频抢占语音数据通道
         # 不依赖客户端 client_available_audio 上报（客户端已禁用该上报）。
         send_start_time = None
         sent_audio_ms_total = 0.0
-        TARGET_AUDIO_LEAD_MS = 500   # 允许发送超前播放的最大毫秒数（保证无缝播放）
+        TARGET_AUDIO_LEAD_MS = 300   # 允许发送超前播放的最大毫秒数
         AUDIO_BITRATE_KBPS = 64      # MP3 发送比特率（与客户端 spk_bitrate=64 一致）
 
         try:
@@ -850,7 +846,6 @@ class ConversationPipeline:
 
                 item = await self.queues.send.get()
                 seq_id, audio, sentence_text = item[0], item[1], item[2]
-                item_duration = item[3] if len(item) > 3 else 0
 
                 if self.cancel_event.is_set():
                     self.queues.send.task_done()
@@ -861,113 +856,54 @@ class ConversationPipeline:
                     self.queues.send.task_done()
                     return
 
-                if audio:
+                if not audio:
+                    self.queues.send.task_done()
+                    continue
+
+                try:
+                    # 第一帧实际音频数据到达时，发送 play_audio 和 tts_chunk_start
+                    if not self._play_audio_sent:
+                        self._play_audio_sent = True
+                        await self.channel.send_json({"type": "play_audio", "tts_task_id": self.config.tts_session_id})
+                        # 等待客户端处理 play_audio 并上报缓冲区状态，最多 50ms
+                        wait_start = time.time()
+                        while self._device_buffer >= client_max_buffer and time.time() - wait_start < 0.05:
+                            await asyncio.sleep(0.01)
+                        await self.channel.send_json({"type": "session_status", "status": "tts_chunk_start"})
+                        logger.info(f"[Pipeline] 发送 play_audio + tts_chunk_start，device_buffer={self._device_buffer}")
+
                     if self.cancel_event.is_set():
                         self.queues.send.task_done()
                         return
 
-                    # 处理文字消息：合成前即刻转发给设备
-                    if audio == b"TEXT":
-                        text_sent_for_seq = seq_id
-                        if sentence_text and len(sentence_text) > 10:
-                            try:
-                                await self.channel.send_json({"type": "instruct", "command_id": "on_llm_cb", "data": sentence_text})
-                            except Exception as e:
-                                logger.debug(f"[Pipeline] 转发 on_llm_cb 失败: {e}")
-                        self.queues.send.task_done()
-                        continue
+                    await self.channel.send_bytes(audio)
+                    total_sent += len(audio)
+                    frame_count += 1
 
-                    # 处理 TTS 时长信息，也转发给设备
-                    if audio == b"DURATION":
-                        pending_duration = item_duration
-                        if item_duration > 0:
-                            try:
-                                await self.channel.send_json({"type": "instruct", "command_id": "tts_duration", "data": str(item_duration)})
-                            except Exception as e:
-                                logger.debug(f"[Pipeline] 转发 tts_duration 失败: {e}")
-                        self.queues.send.task_done()
-                        continue
+                    if frame_count % 50 == 0:
+                        logger.info(f"[Pipeline] Sender: {frame_count}帧/{total_sent}B")
 
-                    try:
-                        # 第一帧实际音频数据到达时，发送 play_audio 和 tts_chunk_start
-                        if not self._play_audio_sent:
-                            self._play_audio_sent = True
-                            await self.channel.send_json({"type": "play_audio", "tts_task_id": self.config.tts_session_id})
-                            # 等待客户端处理 play_audio 并上报缓冲区状态
-                            # 客户端收到 play_audio 后会 reset StreamBuffer 并发送 client_available_audio
-                            # 等待最多 500ms，让客户端有时间上报
-                            wait_start = time.time()
-                            # 首帧不阻塞等待，缩短超时到 150ms
-                            while self._device_buffer >= client_max_buffer and time.time() - wait_start < 0.15:
-                                await asyncio.sleep(0.01)
-                            await self.channel.send_json({"type": "session_status", "status": "tts_chunk_start"})
-                            logger.info(f"[Pipeline] 延迟发送 play_audio + tts_chunk_start，device_buffer={self._device_buffer}")
+                except Exception as e:
+                    logger.debug(f"[Pipeline] Sender 发送失败: {e}")
+                    self.queues.send.task_done()
+                    return
 
-                        if seq_id != current_seq_id:
-                            current_seq_id = seq_id
-                            if sentence_text:
-                                pending_text = sentence_text
-                                text_delay_frames = 0
+                # 流控：按音频播放速率(1x)节流，允许 TARGET_AUDIO_LEAD_MS 超前。
+                # 帧时长按 MP3 比特率估算：frame_ms = bytes * 8 / bitrate_kbps
+                if send_start_time is None:
+                    send_start_time = time.time()
+                frame_audio_ms = len(audio) * 8.0 / AUDIO_BITRATE_KBPS
+                sent_audio_ms_total += frame_audio_ms
+                elapsed_real_ms = (time.time() - send_start_time) * 1000.0
+                overrun_ms = sent_audio_ms_total - elapsed_real_ms
+                if overrun_ms > TARGET_AUDIO_LEAD_MS:
+                    await asyncio.sleep((overrun_ms - TARGET_AUDIO_LEAD_MS) / 1000.0)
 
-                        # 如果 TEXT 已经发过，跳过音频路径的重复发送
-                        if seq_id == text_sent_for_seq:
-                            if sentence_text:
-                                sentence_text = None  # 不处理 pending_text
-                        else:
-                            # TEXT 没发过时才从音频路径发 on_llm_cb
-                            text_delay_frames += 1
-                            send_now = (pending_duration > 0 and text_delay_frames >= self.config.text_send_delay)
-                            send_now = send_now or (pending_duration == 0 and text_delay_frames >= self.config.text_send_delay + 5)
-                            if pending_text is not None and send_now:
-                                if self.cancel_event.is_set():
-                                    pending_text = None
-                                    self.queues.send.task_done()
-                                    return
-                                try:
-                                    if pending_duration:
-                                        # 将时长嵌入 data 字段，设备端无需改库
-                                        wrapped = json.dumps({"text": pending_text, "duration_ms": pending_duration}, ensure_ascii=False)
-                                        await self.channel.send_json({"type": "instruct", "command_id": "on_llm_cb", "data": wrapped})
-                                    else:
-                                        await self.channel.send_json({"type": "instruct", "command_id": "on_llm_cb", "data": pending_text})
-                                except Exception as e:
-                                    logger.debug(f"[Pipeline] 发送 instruct 失败: {e}")
-                                pending_text = None
-                                pending_duration = 0
-                                text_delay_frames = 0
-
-                        if self.cancel_event.is_set():
-                            self.queues.send.task_done()
-                            return
-
-                        await self.channel.send_bytes(audio)
-                        total_sent += len(audio)
-                        frame_count += 1
-
-                        if frame_count % 50 == 0:
-                            logger.info(f"[Pipeline] Sender: {frame_count}帧/{total_sent}B")
-
-                    except Exception as e:
-                        logger.debug(f"[Pipeline] Sender 发送失败: {e}")
-                        self.queues.send.task_done()
-                        return
-
-                    # 流控：按音频播放速率(1x)节流，允许 TARGET_AUDIO_LEAD_MS 超前。
-                    # 帧时长按 MP3 比特率估算：frame_ms = bytes * 8 / bitrate_kbps
-                    if send_start_time is None:
-                        send_start_time = time.time()
-                    frame_audio_ms = len(audio) * 8.0 / AUDIO_BITRATE_KBPS
-                    sent_audio_ms_total += frame_audio_ms
-                    elapsed_real_ms = (time.time() - send_start_time) * 1000.0
-                    overrun_ms = sent_audio_ms_total - elapsed_real_ms
-                    if overrun_ms > TARGET_AUDIO_LEAD_MS:
-                        await asyncio.sleep((overrun_ms - TARGET_AUDIO_LEAD_MS) / 1000.0)
-
-                    # 兜底：客户端若仍上报 client_available_audio，保留缓冲满保护
-                    if self._device_buffer < client_max_buffer * 0.1:
-                        await asyncio.sleep(0.5)
-                    elif self._device_buffer < client_max_buffer * 0.3:
-                        await asyncio.sleep(0.2)
+                # 兜底：客户端若仍上报 client_available_audio，保留缓冲满保护
+                if self._device_buffer < client_max_buffer * 0.1:
+                    await asyncio.sleep(0.5)
+                elif self._device_buffer < client_max_buffer * 0.3:
+                    await asyncio.sleep(0.2)
 
                 self.queues.send.task_done()
 

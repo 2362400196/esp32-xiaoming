@@ -15,8 +15,10 @@ async def send_wechat_message(chat_id: str, text: str, tool_manager=None) -> str
     if not bot or not bot.state.configured:
         return "微信未配置或未登录，无法发送消息"
     try:
-        await bot.send_text(chat_id, text)
-        return f"消息已发送到 {chat_id[:16]}"
+        ok = await bot.send_text(chat_id, text)
+        if ok:
+            return f"消息已发送到 {chat_id[:16]}"
+        return f"发送失败: 微信API返回错误"
     except Exception as e:
         return f"发送失败: {e}"
 
@@ -92,6 +94,9 @@ async def get_wechat_qr_login_status(tool_manager=None) -> str:
 
 async def _api_qr_start():
     bot = get_wechat_bot()
+    # 生成新二维码前先停止旧的轮询，避免多个轮询同时运行
+    if bot.state.configured or bot.state.poll_task:
+        await bot.stop()
     state = await bot.qr_login_start()
     qr_image = ""
     if state.qr_data_url:
@@ -128,6 +133,8 @@ async def _api_qr_start():
 async def _api_qr_status():
     bot = get_wechat_bot()
     state = await bot.qr_login_get_status()
+    # 如果正在二维码登录流程中（active=True），即使 bot 已配置也不显示绑定页
+    configured = bot.state.configured and not state.active
     return {
         "active": state.active, "completed": state.completed,
         "status": state.status, "message": state.message,
@@ -135,7 +142,7 @@ async def _api_qr_status():
         "ilink_bot_id": state.ilink_bot_id if state.completed else "",
         "ilink_user_id": state.ilink_user_id if state.completed else "",
         "base_url": state.base_url if state.completed else "",
-        "configured": bot.state.configured,
+        "configured": configured,
         "token_invalid": bot.state.token_invalid,
     }
 
@@ -143,6 +150,28 @@ async def _api_qr_status():
 async def _api_apply_token():
     bot = get_wechat_bot()
     ok = await bot.apply_qr_token_and_start()
+    if ok:
+        # 自动绑定：将扫码用户的微信账号绑定到第一个在线设备
+        user_id = bot.state.qr.ilink_user_id
+        if user_id:
+            from src.use_cases.wechat_binding import get_wechat_binding_manager
+            from src.infrastructure.web import get_device_registry
+            mgr = get_wechat_binding_manager()
+            binding = mgr.get_by_wechat(user_id)
+            if not binding:
+                registry = get_device_registry()
+                if registry:
+                    device_ids = registry.get_all_ids()
+                    if device_ids:
+                        first_id = device_ids[0]
+                        entry = registry.resolve(first_id)
+                        if entry:
+                            mac = entry.get("mac", "") or entry.get("device_id", "") or first_id
+                            mgr.bind(user_id, user_id, first_id, device_mac=mac)
+                            try:
+                                await bot.send_text(user_id, "已自动绑定设备，现在可以开始对话了")
+                            except Exception:
+                                pass
     return {"ok": ok}
 
 
@@ -159,6 +188,11 @@ async def _api_bindings():
 async def _api_unbind(device_key: str):
     mgr = get_wechat_binding_mgr()
     ok = mgr.unbind(device_key)
+    # 解绑后停止旧轮询并重置二维码状态，让前端可以立即生成新二维码
+    if ok:
+        bot = get_wechat_bot()
+        if bot:
+            await bot.stop()
     return {"ok": ok}
 
 

@@ -121,7 +121,7 @@ class BackpressureQueue:
 class TextQueue(BackpressureQueue):
     """文本队列：LLM输出 → Splitter，满时丢弃最旧"""
 
-    def __init__(self, maxsize: int = 10):
+    def __init__(self, maxsize: int = 50):
         super().__init__(maxsize=maxsize, name="text_queue", on_full="drop_oldest")
 
 

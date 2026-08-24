@@ -1149,17 +1149,21 @@ void eeui_port_hide_music_player(void)
     if (lvgl_lock(100)) {
         eeui_port_destroy_music_overlay_locked();
 
-        if (s_bat_ui.body != NULL && lv_obj_is_valid(s_bat_ui.body)) {
-            lv_obj_remove_flag(s_bat_ui.body, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(s_bat_ui.top, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(s_bat_ui.label, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(s_bat_ui.fill, LV_OBJ_FLAG_HIDDEN);
-        }
-        if (s_vol_ui.icon != NULL && lv_obj_is_valid(s_vol_ui.icon)) {
-            lv_obj_remove_flag(s_vol_ui.icon, LV_OBJ_FLAG_HIDDEN);
-        }
-        if (s_sig_ui.canvas != NULL && lv_obj_is_valid(s_sig_ui.canvas)) {
-            lv_obj_remove_flag(s_sig_ui.canvas, LV_OBJ_FLAG_HIDDEN);
+        // 只在非机器人模式下恢复电量/音量/WiFi 图标显示
+        // 机器人模式下这些图标应保持隐藏
+        if (!s_robot_mode) {
+            if (s_bat_ui.body != NULL && lv_obj_is_valid(s_bat_ui.body)) {
+                lv_obj_remove_flag(s_bat_ui.body, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_remove_flag(s_bat_ui.top, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_remove_flag(s_bat_ui.label, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_remove_flag(s_bat_ui.fill, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (s_vol_ui.icon != NULL && lv_obj_is_valid(s_vol_ui.icon)) {
+                lv_obj_remove_flag(s_vol_ui.icon, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (s_sig_ui.canvas != NULL && lv_obj_is_valid(s_sig_ui.canvas)) {
+                lv_obj_remove_flag(s_sig_ui.canvas, LV_OBJ_FLAG_HIDDEN);
+            }
         }
         lvgl_unlock();
     }

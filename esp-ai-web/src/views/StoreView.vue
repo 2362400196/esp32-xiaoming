@@ -607,10 +607,10 @@ onMounted(() => {
   -webkit-backdrop-filter: blur(12px) saturate(140%);
 }
 .detail-panel { 
-  width: min(480px, 90vw); max-height: 90vh; overflow-y: auto;
-  padding: 32px; border-radius: var(--radius-xl); box-shadow: var(--shadow-hover), var(--glass-hi); 
-  position: relative; 
-}
+	  max-height: 90vh; overflow-y: auto;
+	  padding: min(32px, 5vw); border-radius: var(--radius-xl); box-shadow: var(--shadow-hover), var(--glass-hi); 
+	  position: relative; 
+	}
 
 /* ===== 详情弹窗 ===== */
 .detail-panel { width: min(560px, 94vw); }
@@ -700,7 +700,7 @@ onMounted(() => {
 /* ===== 卸载确认弹窗 ===== */
 .confirm-panel {
   position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-  width: 360px; max-width: 88vw; padding: 32px 28px 24px; border-radius: 16px;
+  width: min(360px, 88vw); padding: 32px 28px 24px; border-radius: 16px;
   z-index: 2000; text-align: center;
   background: var(--grad-panel);
   backdrop-filter: var(--glass-blur);
@@ -723,9 +723,12 @@ onMounted(() => {
 
 /* ===== 响应式 ===== */
 @media (max-width: 640px) {
-  .market-toolbar { flex-direction: column; }
-  .filter-group { width: 100%; }
-  .sort-select, .cat-select { flex: 1; }
-  .market-grid { grid-template-columns: 1fr; }
-}
+	  .market-toolbar { flex-direction: column; }
+	  .filter-group { width: 100%; }
+	  .sort-select, .cat-select { flex: 1; }
+	  .market-grid { grid-template-columns: 1fr; }
+	  .confirm-panel { width: min(320px, 92vw); }
+	  .detail-panel { width: min(480px, 96vw); padding: 20px; }
+	  .hero-title { font-size: 20px; }
+	}
 </style>

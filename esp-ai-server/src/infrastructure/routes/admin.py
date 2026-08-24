@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select, update
 
@@ -154,6 +155,12 @@ async def admin_stats(_: UserModel = Depends(require_admin)):
             "online_devices": online_count,
         },
     }
+
+
+@router.get("/dashboard", response_class=HTMLResponse)
+async def admin_dashboard():
+    """管理员仪表盘页面（HTML），页面内处理登录认证"""
+    return HTMLResponse(ADMIN_DASHBOARD_HTML)
 
 
 # ==================== 用户管理 ====================
@@ -320,6 +327,21 @@ async def unbind_device(device_id: str, _: UserModel = Depends(require_admin)):
     return {"code": 0, "message": "设备已解绑", "data": {"device_id": device_id}}
 
 
+@router.delete("/devices/{device_id}")
+async def delete_device(device_id: str, _: UserModel = Depends(require_admin)):
+    """管理员删除设备记录（仅限未绑定设备）"""
+    async with get_session_ctx() as session:
+        result = await session.execute(select(DeviceModel).where(DeviceModel.device_id == device_id))
+        device = result.scalar_one_or_none()
+        if not device:
+            raise HTTPException(404, "Device not found")
+        if device.user_id:
+            raise HTTPException(400, "已绑定的设备请先解绑再删除")
+        await session.delete(device)
+
+    return {"code": 0, "message": "设备已删除", "data": {"device_id": device_id}}
+
+
 
 # ==================== 设备批量操作 ====================
 
@@ -430,11 +452,11 @@ async def admin_system_info(_: UserModel = Depends(require_admin)):
     if ":///" in sync_url:
         db_path = Path(sync_url.split(":///", 1)[1])
         if not db_path.is_absolute():
-            db_path = Path(__file__).resolve().parent.parent.parent / db_path
+            db_path = _project_root() / db_path
 
     log_path = Path(settings.log.file_path) if settings.log.file_path else None
     if log_path and not log_path.is_absolute():
-        log_path = Path(__file__).resolve().parent.parent.parent / log_path
+        log_path = _project_root() / log_path
 
     registry = get_device_registry()
     data = {
@@ -471,7 +493,7 @@ async def admin_logs(lines: int = Query(200, ge=1, le=5000), _: UserModel = Depe
 
     path = Path(log_path)
     if not path.is_absolute():
-        path = Path(__file__).resolve().parent.parent.parent / path
+        path = _project_root() / path
 
     if not path.exists():
         return {"code": 0, "message": "ok", "data": {"path": str(path), "lines": []}}
@@ -487,7 +509,7 @@ async def admin_logs(lines: int = Query(200, ge=1, le=5000), _: UserModel = Depe
 # ==================== 数据库备份 ====================
 
 def _project_root() -> Path:
-    return Path(__file__).resolve().parent.parent.parent
+    return Path(__file__).resolve().parent.parent.parent.parent
 
 
 def _backup_dir() -> Path:
@@ -504,6 +526,7 @@ async def admin_backup(_: UserModel = Depends(require_admin)):
         db_path = _project_root() / db_path
 
     backup_dir = _backup_dir()
+    backup_dir.mkdir(parents=True, exist_ok=True)
     try:
         backup_path = backup_database(db_path, backup_dir, keep_days=30)
     except Exception as e:
@@ -540,6 +563,35 @@ async def admin_list_backups(_: UserModel = Depends(require_admin)):
         "path": str(p),
     } for p in files]
     return {"code": 0, "message": "ok", "data": {"backups": items}}
+
+
+@router.get("/backup/download/{filename}")
+async def admin_download_backup(filename: str, _: UserModel = Depends(require_admin)):
+    """下载备份文件"""
+    import os
+    # 防止路径穿越
+    if ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(400, "非法文件名")
+    backup_dir = _backup_dir()
+    file_path = backup_dir / filename
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(404, "备份文件不存在")
+    from starlette.responses import FileResponse
+    return FileResponse(str(file_path), media_type="application/octet-stream", filename=filename)
+
+
+@router.delete("/backup/{filename}")
+async def admin_delete_backup(filename: str, _: UserModel = Depends(require_admin)):
+    """删除指定备份文件"""
+    if ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(400, "非法文件名")
+    backup_dir = _backup_dir()
+    file_path = backup_dir / filename
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(404, "备份文件不存在")
+    file_path.unlink()
+    logger.info(f"[Admin] 删除备份文件: {filename}")
+    return {"code": 0, "message": "备份文件已删除"}
 
 
 # ==================== 市场管理 ====================
@@ -649,3 +701,312 @@ async def admin_delete_review(review_id: int, _: UserModel = Depends(require_adm
             session.add(plugin)
 
     return {"code": 0, "message": "评论已删除"}
+
+
+ADMIN_DASHBOARD_HTML = r"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>管理员仪表盘 - ESP AI Server</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1923; color: #e0e6ed; min-height: 100vh; }
+.header { background: linear-gradient(135deg, #1a2a3a 0%, #0f1923 100%); padding: 20px 30px; border-bottom: 1px solid #1e3a4a; display: flex; justify-content: space-between; align-items: center; }
+.header h1 { font-size: 22px; font-weight: 600; color: #4fc3f7; }
+.header h1 span { color: #8899aa; font-weight: 400; }
+.header .update-time { font-size: 13px; color: #667788; }
+.container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+.row { display: grid; gap: 16px; margin-bottom: 24px; }
+.row-4 { grid-template-columns: repeat(4, 1fr); }
+.row-3 { grid-template-columns: repeat(3, 1fr); }
+.row-2 { grid-template-columns: repeat(2, 1fr); }
+.card { background: #1a2a3a; border-radius: 12px; border: 1px solid #1e3a4a; padding: 20px; transition: all 0.2s; }
+.card:hover { border-color: #2a5a7a; }
+.card .label { font-size: 12px; text-transform: uppercase; color: #667788; letter-spacing: 1px; margin-bottom: 8px; }
+.card .value { font-size: 32px; font-weight: 700; }
+.card .sub { font-size: 13px; color: #667788; margin-top: 4px; }
+.card.users .value { color: #4fc3f7; }
+.card.devices .value { color: #81c784; }
+.card.online .value { color: #aed581; }
+.card.cpu .value { color: #ffb74d; }
+.card.memory .value { color: #e57373; }
+.card.threads .value { color: #ba68c8; }
+.card.db .value { color: #4dd0e1; }
+.card.uptime .value { color: #90a4ae; font-size: 20px; }
+.section-title { font-size: 16px; font-weight: 600; color: #8899aa; margin-bottom: 16px; padding-bottom: 8px; border-bottom: 1px solid #1e3a4a; }
+.nav-tabs { display: flex; gap: 4px; margin-bottom: 24px; background: #1a2a3a; border-radius: 10px; padding: 4px; border: 1px solid #1e3a4a; }
+.nav-tab { padding: 10px 24px; border-radius: 8px; cursor: pointer; font-size: 14px; color: #667788; transition: all 0.2s; border: none; background: none; }
+.nav-tab:hover { color: #e0e6ed; }
+.nav-tab.active { background: #2a5a7a; color: #fff; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+.pool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.pool-item { background: #0f1923; border-radius: 8px; padding: 14px; border: 1px solid #1e3a4a; }
+.pool-item .pool-name { font-size: 13px; color: #4fc3f7; margin-bottom: 6px; }
+.pool-item .pool-stat { font-size: 12px; color: #8899aa; line-height: 1.6; }
+.concurrency-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.concurrency-item { background: #0f1923; border-radius: 8px; padding: 14px; text-align: center; }
+.concurrency-item .conc-label { font-size: 11px; color: #667788; }
+.concurrency-item .conc-value { font-size: 24px; font-weight: 700; margin-top: 4px; }
+.concurrency-item .conc-value.semaphore { color: #81c784; }
+.concurrency-item .conc-value.active { color: #ffb74d; }
+.concurrency-item .conc-value.queued { color: #4fc3f7; }
+.concurrency-item .conc-value.done { color: #aed581; }
+.loading { text-align: center; padding: 60px; color: #667788; }
+.error { text-align: center; padding: 40px; color: #e57373; }
+.error .detail { font-size: 13px; color: #667788; margin-top: 8px; }
+.refresh-btn { background: #2a5a7a; color: #fff; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: background 0.2s; }
+.refresh-btn:hover { background: #3a7a9a; }
+@media (max-width: 900px) { .row-4 { grid-template-columns: repeat(2, 1fr); } .row-3 { grid-template-columns: 1fr; } .row-2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <h1>ESP AI Server <span>管理员仪表盘</span></h1>
+  </div>
+  <div style="display:flex;align-items:center;gap:16px;">
+    <span class="update-time" id="updateTime">加载中...</span>
+    <button class="refresh-btn" onclick="refreshAll()">&#x21bb; 刷新</button>
+  </div>
+</div>
+<div id="loginPage" style="display:none;">
+  <div style="max-width:400px;margin:80px auto;text-align:center;">
+    <div style="font-size:28px;font-weight:700;color:#4fc3f7;margin-bottom:8px;">管理员登录</div>
+    <div style="color:#667788;margin-bottom:32px;font-size:14px;">请输入管理员账号密码</div>
+    <div style="background:#1a2a3a;border-radius:12px;border:1px solid #1e3a4a;padding:32px;">
+      <input id="loginEmail" type="email" placeholder="邮箱" style="width:100%;padding:12px 16px;background:#0f1923;border:1px solid #1e3a4a;border-radius:8px;color:#e0e6ed;font-size:14px;margin-bottom:12px;outline:none;">
+      <input id="loginPassword" type="password" placeholder="密码" style="width:100%;padding:12px 16px;background:#0f1923;border:1px solid #1e3a4a;border-radius:8px;color:#e0e6ed;font-size:14px;margin-bottom:20px;outline:none;">
+      <div id="loginError" style="color:#e57373;font-size:13px;margin-bottom:12px;display:none;"></div>
+      <button onclick="doLogin()" style="width:100%;padding:12px;background:#2a5a7a;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer;">登录</button>
+    </div>
+  </div>
+</div>
+<div id="dashboardPage" style="display:none;">
+  <div class="nav-tabs">
+    <button class="nav-tab active" onclick="switchTab('overview',this)">&#x1F4CA; 概览</button>
+    <button class="nav-tab" onclick="switchTab('metrics',this)">&#x2699; 性能指标</button>
+    <button class="nav-tab" onclick="switchTab('pools',this)">&#x1F4E1; 连接池</button>
+    <button class="nav-tab" onclick="switchTab('system',this)">&#x1F4BB; 系统信息</button>
+  </div>
+
+  <div id="tab-overview" class="tab-content active">
+    <div class="row row-4" id="statsCards">
+      <div class="card loading" style="grid-column:1/-1;">加载统计信息中...</div>
+    </div>
+    <div class="section-title">&#x1F504; 实时动态</div>
+    <div class="row row-2">
+      <div class="card" id="lastLogsCard">
+        <div class="label">最近的日志</div>
+        <div id="lastLogs" style="font-size:12px;color:#667788;font-family:monospace;line-height:1.8;max-height:300px;overflow-y:auto;">加载中...</div>
+      </div>
+      <div class="card" id="deviceListCard">
+        <div class="label">在线设备</div>
+        <div id="onlineDevices" style="font-size:12px;color:#667788;font-family:monospace;line-height:1.8;max-height:300px;overflow-y:auto;">加载中...</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-metrics" class="tab-content">
+    <div class="row row-3" id="metricsCards">
+      <div class="card loading" style="grid-column:1/-1;">加载性能指标中...</div>
+    </div>
+    <div class="section-title">&#x1F4CA; 系统资源</div>
+    <div class="row row-4" id="systemResourceCards">
+      <div class="card loading" style="grid-column:1/-1;">加载中...</div>
+    </div>
+  </div>
+
+  <div id="tab-pools" class="tab-content">
+    <div class="section-title">&#x1F4E1; 连接池详情</div>
+    <div id="poolDetails" class="pool-grid">
+      <div class="loading" style="grid-column:1/-1;">加载连接池信息中...</div>
+    </div>
+  </div>
+
+  <div id="tab-system" class="tab-content">
+    <div class="row row-2" id="systemInfoCards">
+      <div class="card loading" style="grid-column:1/-1;">加载系统信息中...</div>
+    </div>
+  </div>
+</div>
+</div>
+<script>
+let lastMetrics = null;
+let token = localStorage.getItem('admin_token') || '';
+
+function switchTab(name, btn) {
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+}
+function updateTime() {
+  document.getElementById('updateTime').textContent = '更新于 ' + new Date().toLocaleString('zh-CN');
+}
+function getAuthHeaders() {
+  const h = {};
+  if (token) h['Authorization'] = 'Bearer ' + token;
+  return h;
+}
+async function fetchJSON(url) {
+  const res = await fetch(url, { headers: getAuthHeaders() });
+  if (res.status === 401) { token = ''; localStorage.removeItem('admin_token'); showLogin(); throw new Error('未登录'); }
+  const data = await res.json();
+  if (data.code !== 0) throw new Error(data.message);
+  return data.data;
+}
+async function doLogin() {
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  document.getElementById('loginError').style.display = 'none';
+  if (!email || !password) { document.getElementById('loginError').textContent = '请输入邮箱和密码'; document.getElementById('loginError').style.display = 'block'; return; }
+  try {
+    const res = await fetch('/api/v1/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+    const data = await res.json();
+    if (data.code !== 0) throw new Error(data.message || '登录失败');
+    token = data.data.access_token;
+    localStorage.setItem('admin_token', token);
+    showDashboard();
+    refreshAll();
+  } catch(e) {
+    document.getElementById('loginError').textContent = e.message;
+    document.getElementById('loginError').style.display = 'block';
+  }
+}
+function showLogin() {
+  document.getElementById('loginPage').style.display = 'block';
+  document.getElementById('dashboardPage').style.display = 'none';
+  document.querySelector('.header').style.display = 'none';
+}
+function showDashboard() {
+  document.getElementById('loginPage').style.display = 'none';
+  document.getElementById('dashboardPage').style.display = 'block';
+  document.querySelector('.header').style.display = 'flex';
+}
+async function checkAuth() {
+  if (!token) { showLogin(); return; }
+  try {
+    await fetchJSON('/api/v1/admin/stats');
+    showDashboard();
+  } catch(e) { showLogin(); }
+}
+async function refreshAll() {
+  updateTime();
+  try {
+    const [stats, sysInfo, metrics] = await Promise.all([
+      fetchJSON('/api/v1/admin/stats'),
+      fetchJSON('/api/v1/admin/system/info'),
+      fetchJSON('/api/v1/system/metrics').catch(() => null)
+    ]);
+    lastMetrics = metrics;
+    renderStats(stats);
+    renderSysInfo(sysInfo);
+    if (metrics) renderMetrics(metrics);
+    loadLogs();
+    loadDevices();
+  } catch(e) {
+    document.querySelectorAll('.card.loading').forEach(c => {
+      c.className = 'card error';
+      c.innerHTML = '<div>&#x26A0; 加载失败: ' + e.message + '</div>';
+    });
+  }
+}
+function renderStats(stats) {
+  document.getElementById('statsCards').innerHTML = [
+    { label: '用户总数', value: stats.users, sub: '管理员 ' + stats.admins, cls: 'users', icon: '&#x1F464;' },
+    { label: '设备总数', value: stats.devices, sub: '已绑定 ' + stats.bound_devices, cls: 'devices', icon: '&#x1F4F1;' },
+    { label: '在线设备', value: stats.online_devices, sub: '在线率 ' + (stats.devices ? (stats.online_devices/stats.devices*100).toFixed(1) : 0) + '%', cls: 'online', icon: '&#x1F4E1;' },
+    { label: '未绑定设备', value: stats.devices - stats.bound_devices, sub: '待绑定设备数', cls: 'cpu', icon: '&#x1F50C;' },
+  ].map(c => '<div class="card ' + c.cls + '"><div class="label">' + c.icon + ' ' + c.label + '</div><div class="value">' + c.value + '</div><div class="sub">' + c.sub + '</div></div>').join('');
+}
+function renderSysInfo(info) {
+  const memGB = info.memory_bytes ? (info.memory_bytes / 1024 / 1024 / 1024).toFixed(2) : 'N/A';
+  const dbSize = info.db_size ? (info.db_size / 1024 / 1024).toFixed(2) + ' MB' : 'N/A';
+  const logSize = info.log_size ? (info.log_size / 1024 / 1024).toFixed(2) + ' MB' : 'N/A';
+  document.getElementById('systemInfoCards').innerHTML = [
+    { label: '服务器版本', value: info.server_version, cls: 'users' },
+    { label: 'Python 版本', value: info.python_version, cls: 'memory' },
+    { label: '运行平台', value: info.platform, cls: 'threads' },
+    { label: '数据库大小', value: dbSize, cls: 'db' },
+    { label: '日志大小', value: logSize, cls: 'cpu' },
+    { label: '注册设备', value: info.registry_devices, cls: 'online' },
+  ].map(c => '<div class="card ' + c.cls + '"><div class="label">' + c.label + '</div><div class="value" style="font-size:18px;">' + c.value + '</div></div>').join('');
+}
+function renderMetrics(metrics) {
+  const sys = metrics.system || {};
+  const cpu = sys.cpu_percent != null ? sys.cpu_percent.toFixed(1) + '%' : 'N/A';
+  const mem = sys.memory_mb != null ? sys.memory_mb.toFixed(1) + ' MB' : 'N/A';
+  const memPct = sys.memory_percent != null ? sys.memory_percent.toFixed(1) + '%' : 'N/A';
+  const threads = sys.num_threads != null ? sys.num_threads : 'N/A';
+  const uptime = metrics.uptime ? Math.floor((Date.now()/1000 - metrics.uptime)/60) + ' 分钟' : 'N/A';
+
+  document.getElementById('metricsCards').innerHTML = [
+    { label: 'CPU 使用率', value: cpu, cls: 'cpu' },
+    { label: '内存使用', value: mem, cls: 'memory' },
+    { label: '内存占比', value: memPct, cls: 'db' },
+    { label: '线程数', value: threads, cls: 'threads' },
+  ].map(c => '<div class="card ' + c.cls + '"><div class="label">' + c.label + '</div><div class="value">' + c.value + '</div></div>').join('');
+
+  // 并发统计
+  const conc = metrics.concurrency || {};
+  const concItems = [
+    { label: '信号量', value: conc.semaphore_size ?? 'N/A', cls: 'semaphore' },
+    { label: '活跃任务', value: conc.active_tasks ?? 'N/A', cls: 'active' },
+    { label: '排队任务', value: conc.queued_tasks ?? 'N/A', cls: 'queued' },
+    { label: '已完成任务', value: conc.completed_tasks ?? 'N/A', cls: 'done' },
+  ];
+  document.getElementById('systemResourceCards').innerHTML =
+    '<div style="grid-column:1/-1;"><div class="section-title">&#x2699; 并发控制</div><div class="concurrency-grid">' +
+    concItems.map(c => '<div class="concurrency-item"><div class="conc-label">' + c.label + '</div><div class="conc-value ' + c.cls + '">' + c.value + '</div></div>').join('') +
+    '</div></div>';
+
+  // 连接池
+  const pools = metrics.pools || {};
+  const poolHtml = Object.entries(pools).map(([name, p]) => {
+    if (typeof p === 'object') {
+      return '<div class="pool-item"><div class="pool-name">' + name + '</div><div class="pool-stat">' +
+        Object.entries(p).map(([k, v]) => k + ': ' + v).join(' | ') +
+        '</div></div>';
+    }
+    return '<div class="pool-item"><div class="pool-name">' + name + '</div><div class="pool-stat">' + p + '</div></div>';
+  }).join('');
+  if (poolHtml) document.getElementById('poolDetails').innerHTML = poolHtml || '<div style="color:#667788;text-align:center;padding:20px;">暂无连接池信息</div>';
+}
+async function loadLogs() {
+  try {
+    const data = await fetchJSON('/api/v1/admin/logs?lines=15');
+    const lines = data.lines || [];
+    document.getElementById('lastLogs').innerHTML = lines.length
+      ? lines.map(l => escapeHtml(l)).join('<br>')
+      : '暂无日志';
+  } catch(e) {
+    document.getElementById('lastLogs').textContent = '加载日志失败: ' + e.message;
+  }
+}
+async function loadDevices() {
+  try {
+    const data = await fetchJSON('/api/v1/admin/devices');
+    const devices = data.devices || data || [];
+    if (Array.isArray(devices)) {
+      const online = devices.filter(d => d.online);
+      document.getElementById('onlineDevices').innerHTML = online.length
+        ? online.map(d => '&#x1F7E2; ' + escapeHtml(d.name || d.device_id) + ' (' + (d.mac || '') + ')').join('<br>')
+        : '暂无在线设备';
+    } else {
+      document.getElementById('onlineDevices').textContent = '暂无设备数据';
+    }
+  } catch(e) {
+    document.getElementById('onlineDevices').textContent = '加载设备列表失败';
+  }
+}
+function escapeHtml(s) {
+  if (typeof s !== 'string') return s;
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+checkAuth();
+if (token) setInterval(refreshAll, 30000);
+</script>
+</body>
+</html>"""

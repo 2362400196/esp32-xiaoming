@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="settings-mask" @click.self="$emit('close')">
     <div class="settings-panel">
       <div class="settings-head">
@@ -225,6 +225,11 @@
             <p class="block-label">音调 <span class="value-tag">{{ (form.tts_pitch_ratio ?? 1.0).toFixed(2) }}</span></p>
             <input class="input" type="range" min="0.5" max="2.0" step="0.05" v-model.number="form.tts_pitch_ratio" />
             <p class="form-tip">0.5 低沉 ~ 2.0 高亢，默认 1.0</p>
+          </div>
+          <div class="block">
+            <p class="block-label">方言</p>
+            <AppSelect v-model="form.tts_explicit_dialect" :options="dialectOptions" placeholder="不设置（默认普通话）" />
+            <p class="form-tip">指定方言口音，需配合支持方言的音色。可选：北京话、东北话、河南话、陕西话、上海话、四川话、天津话、粤语</p>
           </div>
           <div class="block">
             <div class="collapse-head" @click="ttsPoolOpen = !ttsPoolOpen">
@@ -469,6 +474,16 @@ const voiceOptions = computed(() => {
   const list = ttsModel.value === 'seed-tts-2.0' ? ttsVoices2 : ttsVoices1
   return list.map(v => ({ label: v.name, value: v.type, tag: v.tag }))
 })
+const dialectOptions = [
+  { label: '北京话', value: 'beijing' },
+  { label: '东北话', value: 'dongbei' },
+  { label: '河南话', value: 'henan' },
+  { label: '陕西话', value: 'shaanxi' },
+  { label: '上海话', value: 'shanghai' },
+  { label: '四川话', value: 'sichuan' },
+  { label: '天津话', value: 'tianjin' },
+  { label: '粤语', value: 'yue' },
+]
 
 watch(() => props.device, () => { if (props.device) load() }, { immediate: true })
 
@@ -508,6 +523,7 @@ async function load() {
       tts_speed_ratio: cfg.tts_config?.speed_ratio ?? 1.0,
       tts_volume_ratio: cfg.tts_config?.volume_ratio ?? 1.0,
       tts_pitch_ratio: cfg.tts_config?.pitch_ratio ?? 1.0,
+      tts_explicit_dialect: cfg.tts_config?.explicit_dialect || '',
       tts_enable_pool: cfg.tts_config?.enable_pool ?? true,
       tts_pool_max_size: cfg.tts_config?.pool_max_size ?? null,
       tts_pool_min_size: cfg.tts_config?.pool_min_size ?? null,
@@ -625,6 +641,7 @@ async function save() {
     speed_ratio: form.value.tts_speed_ratio,
     volume_ratio: form.value.tts_volume_ratio,
     pitch_ratio: form.value.tts_pitch_ratio,
+    explicit_dialect: form.value.tts_explicit_dialect || '',
     tts_enable_pool: form.value.tts_enable_pool,
     tts_pool_max_size: form.value.tts_pool_max_size || null,
     tts_pool_min_size: form.value.tts_pool_min_size || null,

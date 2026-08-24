@@ -81,7 +81,7 @@ static uint8_t *download_file(const char *url, size_t *out_size)
 
     esp_http_client_config_t cfg = {};
     cfg.url = url;
-    cfg.timeout_ms = 8000;
+    cfg.timeout_ms = 15000;
     cfg.keep_alive_enable = false;
     // 不强制指定 transport_type，让 ESP-IDF 根据 URL scheme 自动选择（http→TCP, https→SSL）
 
@@ -450,10 +450,15 @@ static void download_gifs_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 
-    // 从 websocket 获取服务器 HTTP 基础地址
-    const char *http_base = websocket_get_http_base();
+    // 从 websocket 获取服务器 HTTP 基础地址（等待最多 10 秒）
+    const char *http_base = NULL;
+    for (int i = 0; i < 20; i++) {
+        http_base = websocket_get_http_base();
+        if (http_base && http_base[0] != '\0') break;
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
     if (!http_base || http_base[0] == '\0') {
-        ESP_LOGW(TAG, "服务器 HTTP 地址为空，无法下载表情");
+        ESP_LOGW(TAG, "服务器 HTTP 地址（等待超时），无法下载表情");
         vTaskDelete(NULL);
         return;
     }
@@ -473,13 +478,25 @@ static void download_gifs_task(void *arg)
     char device_id[64];
     device_id_get(device_id, sizeof(device_id));
 
-    // 先尝试从 API 获取表情列表
-    bool ok = download_from_api(http_base, device_id);
-    if (!ok) {
-        // API 失败，回退到固定 URL 前缀模式
-        ESP_LOGW(TAG, "API 模式失败，回退到静态 URL 模式");
+    // 先尝试从 API 获取表情列表（最多重试 3 次）
+    // 每次重试间隔 3 秒，避免服务器短暂繁忙/网络抖动导致立即 fallback 到默认表情包
+    bool ok = false;
+    for (int retry = 0; retry < 3; retry++) {
+        ok = download_from_api(http_base, device_id);
+        if (ok) {
+            break;
+        }
+        ESP_LOGW(TAG, "API 模式失败 (retry %d/3)，3s 后重试", retry + 1);
+        if (retry < 2) {
+            vTaskDelay(pdMS_TO_TICKS(3000));
+        }
+    }
 
-        // 先测试连通性，每 5 秒重试
+    if (!ok) {
+        // 所有重试均失败，回退到固定 URL 前缀模式（默认表情包）
+        ESP_LOGW(TAG, "API 模式 3 次重试均失败，回退到静态 URL 模式");
+
+        // 先测试连通性，每 3 秒重试
         char test_url[512];
         snprintf(test_url, sizeof(test_url), "%s/emos/packs/default/sleep.gif", http_base);
         bool reachable = false;
