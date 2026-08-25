@@ -48,7 +48,7 @@ _BLOCKED_MODULES = frozenset({
     "distutils", "setuptools", "pip", "site", "runpy", "trace",
     "smtplib", "ftplib", "telnetlib", "imaplib", "poplib",
     "msvcrt", "curses", "tkinter", "winreg",
-    "zipfile", "tarfile", "gzip", "bz2", "lzma", "zlib",
+    "zipfile", "tarfile", "gzip", "bz2", "lzma",
     "configparser", "email", "platform", "gc", "signal",
 })
 
@@ -106,13 +106,36 @@ def _is_site_packages(path: str) -> bool:
 
 
 def _is_stdlib_origin(origin: str | None) -> bool:
-    """判断模块 origin 是否属于标准库目录（非 site-packages）。"""
+    """判断模块 origin 是否属于标准库目录（非 site-packages）。
+
+    特别处理：Python 根目录下的 *.zip 文件（如 python311.zip）包含压缩的标准库模块，
+    这些文件在导入时需要读取，必须放行。
+    """
     if not origin:
         return False
     try:
         origin = os.path.realpath(origin)
     except Exception:
         return False
+    # 检查 Python 根目录下的 .zip 文件（压缩标准库）
+    p = Path(origin)
+    if p.suffix == ".zip" or ".zip" in str(origin):
+        # 提取 zip 文件路径部分
+        parts = origin.split(".zip")
+        if len(parts) >= 2:
+            zip_path = parts[0] + ".zip"
+            try:
+                zip_real = os.path.realpath(zip_path)
+            except Exception:
+                pass
+            else:
+                for base in (sys.base_prefix, sys.prefix):
+                    try:
+                        base_real = os.path.realpath(base)
+                    except Exception:
+                        continue
+                    if zip_real.startswith(base_real + os.sep) or zip_real == base_real:
+                        return True
     stdlib_dirs = _stdlib_roots()
     # 项目根（PYTHONPATH 中的服务器源码）也在白名单之外
     for lib in stdlib_dirs:
@@ -250,11 +273,25 @@ def install_audit_hook(plugin_root: str, state_root: str,
     _ALLOWED_FS_ROOTS = [_PLUGIN_ROOT, _STATE_ROOT]
 
     def _is_stdlib_path(path: Any) -> bool:
-        """判断路径是否位于标准库目录（import stdlib 模块时读取源码/字节码）。"""
+        """判断路径是否位于标准库目录（import stdlib 模块时读取源码/字节码）。
+
+        特别处理：Python 根目录下的 *.zip 文件（如 python311.zip）包含压缩的标准库模块，
+        这些文件在导入时需要读取，必须放行。
+        """
         try:
             real = os.path.realpath(path)
         except Exception:
             return False
+        # 检查 Python 根目录下的 .zip 文件（压缩标准库）
+        p = Path(real)
+        if p.suffix == ".zip":
+            prefix = Path(sys.prefix).resolve()
+            try:
+                if real.startswith(str(prefix)):
+                    return True
+            except Exception:
+                pass
+        # 检查标准库目录
         for lib in _stdlib_roots():
             if real == lib or real.startswith(lib + os.sep):
                 # 排除 site-packages（第三方库）
@@ -341,7 +378,7 @@ _PURGE_MODULES = frozenset({
     "pickle", "shelve",
     "http", "urllib", "email", "smtplib", "ftplib", "telnetlib",
     "imaplib", "poplib", "webbrowser",
-    "sqlite3", "zipfile", "tarfile", "gzip", "bz2", "lzma", "zlib",
+    "sqlite3", "zipfile", "tarfile", "gzip", "bz2", "lzma",
     "configparser", "platform", "distutils", "setuptools", "pip",
     "pty", "pwd", "grp", "spwd", "resource", "pdb", "trace", "runpy",
     "shutil", "tempfile", "ctypes", "msvcrt", "curses", "tkinter",

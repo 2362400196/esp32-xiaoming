@@ -79,6 +79,9 @@ class PluginManifest(BaseModel):
     frontend_config: dict[str, Any] = Field(
         default_factory=dict, description="前端页面配置（nav_label, nav_icon, width 等）"
     )
+    provides: dict[str, list[str]] = Field(
+        default_factory=dict, description="服务插件声明，如 {'llm': ['openai'], 'tts': ['volcengine'], 'asr': ['tencent']}"
+    )
     file_hashes: list[dict[str, str]] = Field(
         default_factory=list, description="包内每个文件的 SHA-256（签名负载的一部分）"
     )
@@ -178,6 +181,7 @@ class PluginManifest(BaseModel):
             "optional": self.optional,
             "frontend": self.frontend,
             "frontend_config": dict(self.frontend_config),
+            "provides": dict(self.provides),
         }
 
     # ──────────────────────────────────────────────────────────
@@ -202,6 +206,7 @@ class PluginManifest(BaseModel):
             "config_fields": list(self.config_fields),
             "permissions": list(self.permissions),
             "optional": self.optional,
+            "provides": dict(self.provides),
             "file_hashes": sorted(self.file_hashes, key=lambda h: h.get("path", "")),
         }
         return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

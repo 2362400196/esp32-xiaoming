@@ -21,6 +21,11 @@ from src.use_cases.tools_system import PerUserToolManager, _shared_tool_manager
 from src.interfaces.gateways import create_asr_gateway
 from src.interfaces.llm_gateways import create_llm_gateway
 from src.interfaces.tts_gateways import create_tts_gateway, VoiceGenerator
+from src.interfaces.plugin_gateways import (
+    create_plugin_llm_gateway,
+    create_plugin_tts_gateway,
+    create_plugin_asr_gateway,
+)
 from src.use_cases.session_fsm import WSChannel, SessionFSM
 from src.domain.entities import SessionState
 from src.use_cases.session import Session
@@ -81,6 +86,8 @@ class WebSocketSessionHandler:
         self._growth_last_messages = []  # 暂存最近消息
         self.connect_audio_task = None
         self.wake_start_task = None
+        self._asr_starting = False  # ASR 启动同步标志，防止 _start_asr_session 双重启动竞态
+        self._new_wake_pending = False  # 新一轮 start 流程进行中，抑制旧 pipeline 取消后的 _start_next_asr
         # 后台任务引用（防止被 GC 回收导致协程中途取消且无告警）
         self._mcp_init_task = None
         self._vad_tasks: set = set()
@@ -205,67 +212,109 @@ class WebSocketSessionHandler:
 
         asr_client = None
         try:
+            # 优先尝试 ASR 服务插件
+            asr_plugin_config = {}
             if is_multi_mode and user_config and user_config.asr_provider:
-                asr_provider = user_config.asr_provider
-                user_asr_cfg = user_config.get_asr_config(asr_provider) or {}
-                asr_config = {
-                    "provider": asr_provider,
+                user_asr_cfg = user_config.get_asr_config(user_config.asr_provider) or {}
+                asr_plugin_config = {
                     "api_key": user_asr_cfg.get("api_key", ""),
                     "resource_id": user_asr_cfg.get("resource_id", "volc.bigasr.sauc.duration"),
-                    "model_name": user_asr_cfg.get("model_name", "bigmodel"),
+                    "model": user_asr_cfg.get("model_name", "bigmodel"),
                     "app_id": user_asr_cfg.get("app_id", ""),
-                    "secret_id": user_asr_cfg.get("secret_id", ""),
-                    "secret_key": user_asr_cfg.get("secret_key", ""),
-                    "engine_model_type": user_asr_cfg.get("engine_model_type", "16k_zh"),
-                    "enable_pool": user_asr_cfg.get("enable_pool", settings.asr.enable_pool),
-                    # 设备级超时/并发（回退全局）
-                    "no_speech_timeout": user_asr_cfg.get("no_speech_timeout"),
-                    "silence_timeout": user_asr_cfg.get("silence_timeout"),
-                    "max_concurrency": user_asr_cfg.get("max_concurrency"),
-                    # 设备级连接池参数（回退全局）
-                    "pool_max_size": user_asr_cfg.get("pool_max_size"),
-                    "pool_min_size": user_asr_cfg.get("pool_min_size"),
-                    "pool_heartbeat_interval": user_asr_cfg.get("pool_heartbeat_interval"),
-                    "pool_idle_timeout": user_asr_cfg.get("pool_idle_timeout"),
-                    "pool_connection_timeout": user_asr_cfg.get("pool_connection_timeout"),
                 }
             else:
-                asr_config = {
-                    "provider": settings.asr.provider,
-                    "app_id": settings.asr.tencent_app_id,
-                    "secret_id": settings.asr.tencent_secret_id,
-                    "secret_key": settings.asr.tencent_secret_key,
-                    "engine_model_type": settings.asr.tencent_engine,
+                asr_plugin_config = {
                     "api_key": settings.asr.volcengine_api_key,
                     "resource_id": settings.asr.volcengine_resource_id,
-                    "model_name": settings.asr.volcengine_model,
-                    "enable_pool": settings.asr.enable_pool,
+                    "model": settings.asr.volcengine_model,
                 }
-            asr_client = create_asr_gateway(provider=asr_config["provider"], config=asr_config)
-            logger.info(f"[WS] ASR client created (mode={'multi' if is_multi_mode else 'single'})")
+            asr_client = create_plugin_asr_gateway(config=asr_plugin_config)
+            if asr_client is None:
+                # 回退到传统网关
+                if is_multi_mode and user_config and user_config.asr_provider:
+                    asr_provider = user_config.asr_provider
+                    user_asr_cfg = user_config.get_asr_config(asr_provider) or {}
+                    asr_config = {
+                        "provider": asr_provider,
+                        "api_key": user_asr_cfg.get("api_key", ""),
+                        "resource_id": user_asr_cfg.get("resource_id", "volc.bigasr.sauc.duration"),
+                        "model_name": user_asr_cfg.get("model_name", "bigmodel"),
+                        "app_id": user_asr_cfg.get("app_id", ""),
+                        "secret_id": user_asr_cfg.get("secret_id", ""),
+                        "secret_key": user_asr_cfg.get("secret_key", ""),
+                        "engine_model_type": user_asr_cfg.get("engine_model_type", "16k_zh"),
+                        "enable_pool": user_asr_cfg.get("enable_pool", settings.asr.enable_pool),
+                        "no_speech_timeout": user_asr_cfg.get("no_speech_timeout"),
+                        "silence_timeout": user_asr_cfg.get("silence_timeout"),
+                        "max_concurrency": user_asr_cfg.get("max_concurrency"),
+                        "pool_max_size": user_asr_cfg.get("pool_max_size"),
+                        "pool_min_size": user_asr_cfg.get("pool_min_size"),
+                        "pool_heartbeat_interval": user_asr_cfg.get("pool_heartbeat_interval"),
+                        "pool_idle_timeout": user_asr_cfg.get("pool_idle_timeout"),
+                        "pool_connection_timeout": user_asr_cfg.get("pool_connection_timeout"),
+                    }
+                else:
+                    asr_config = {
+                        "provider": settings.asr.provider,
+                        "app_id": settings.asr.tencent_app_id,
+                        "secret_id": settings.asr.tencent_secret_id,
+                        "secret_key": settings.asr.tencent_secret_key,
+                        "engine_model_type": settings.asr.tencent_engine,
+                        "api_key": settings.asr.volcengine_api_key,
+                        "resource_id": settings.asr.volcengine_resource_id,
+                        "model_name": settings.asr.volcengine_model,
+                        "enable_pool": settings.asr.enable_pool,
+                    }
+                asr_client = create_asr_gateway(provider=asr_config["provider"], config=asr_config)
+                logger.info(f"[WS] ASR client created (mode={'multi' if is_multi_mode else 'single'})")
+            else:
+                logger.info("[WS] 使用 ASR 插件网关")
         except Exception as e:
             logger.warning(f"[WS] ASR client initialization failed: {e}")
+        if asr_client and getattr(asr_client, 'is_plugin', False):
+            asr_client.set_tool_manager(tool_mgr)
         self.asr_client = asr_client
 
         llm_processor = None
         try:
+            # 优先尝试 LLM 服务插件
+            llm_plugin_config = {}
             if is_multi_mode and user_config and user_config.llm_api_key:
-                llm_config = {
+                llm_plugin_config = {
                     "api_key": user_config.llm_api_key,
                     "base_url": user_config.llm_base_url or "",
                     "model": user_config.llm_model or "",
                     "system_prompt": user_config.llm_system_prompt or "",
                 }
-                logger.info(f"[WS] LLM using user_config: api_key={'***' + llm_config['api_key'][-4:] if llm_config['api_key'] else 'EMPTY'}, model={llm_config['model']}")
             else:
-                llm_config = {
+                llm_plugin_config = {
                     "api_key": settings.llm.api_key,
                     "base_url": settings.llm.base_url,
                     "model": settings.llm.model,
                     "system_prompt": settings.llm.system_prompt,
                 }
-                logger.info(f"[WS] LLM using global settings: api_key={'***' + llm_config['api_key'][-4:] if llm_config['api_key'] else 'EMPTY'}")
-            llm_processor = create_llm_gateway(config=llm_config, tool_manager=tool_mgr)
+            llm_processor = create_plugin_llm_gateway(config=llm_plugin_config, tool_manager=tool_mgr)
+            if llm_processor is None:
+                # 回退到传统网关
+                if is_multi_mode and user_config and user_config.llm_api_key:
+                    llm_config = {
+                        "api_key": user_config.llm_api_key,
+                        "base_url": user_config.llm_base_url or "",
+                        "model": user_config.llm_model or "",
+                        "system_prompt": user_config.llm_system_prompt or "",
+                    }
+                    logger.info(f"[WS] LLM using user_config: api_key={'***' + llm_config['api_key'][-4:] if llm_config['api_key'] else 'EMPTY'}, model={llm_config['model']}")
+                else:
+                    llm_config = {
+                        "api_key": settings.llm.api_key,
+                        "base_url": settings.llm.base_url,
+                        "model": settings.llm.model,
+                        "system_prompt": settings.llm.system_prompt,
+                    }
+                    logger.info(f"[WS] LLM using global settings: api_key={'***' + llm_config['api_key'][-4:] if llm_config['api_key'] else 'EMPTY'}")
+                llm_processor = create_llm_gateway(config=llm_config, tool_manager=tool_mgr)
+            else:
+                logger.info("[WS] 使用 LLM 插件网关")
         except Exception as e:
             logger.warning(f"[WS] LLM processor initialization failed: {e}")
             llm_processor = None
@@ -273,9 +322,11 @@ class WebSocketSessionHandler:
 
         tts_processor = None
         try:
+            # 优先尝试 TTS 服务插件
+            tts_plugin_config = {}
             if is_multi_mode and user_config and user_config.tts_config:
                 user_tts_cfg = user_config.tts_config
-                tts_config = {
+                tts_plugin_config = {
                     "api_key": user_tts_cfg.get("api_key", ""),
                     "resource_id": user_tts_cfg.get("resource_id", ""),
                     "voice_type": user_tts_cfg.get("voice_type", ""),
@@ -283,17 +334,9 @@ class WebSocketSessionHandler:
                     "speed_ratio": user_tts_cfg.get("speed_ratio", 1.0),
                     "volume_ratio": user_tts_cfg.get("volume_ratio", 1.0),
                     "pitch_ratio": user_tts_cfg.get("pitch_ratio", 1.0),
-                    "explicit_dialect": user_tts_cfg.get("explicit_dialect", ""),
-                    "enable_pool": user_tts_cfg.get("enable_pool", settings.tts.enable_pool),
-                    # 设备级 TTS 连接池参数（回退全局）
-                    "pool_max_size": user_tts_cfg.get("pool_max_size"),
-                    "pool_min_size": user_tts_cfg.get("pool_min_size"),
-                    "pool_heartbeat_interval": user_tts_cfg.get("pool_heartbeat_interval"),
-                    "pool_idle_timeout": user_tts_cfg.get("pool_idle_timeout"),
-                    "pool_connection_timeout": user_tts_cfg.get("pool_connection_timeout"),
                 }
             else:
-                tts_config = {
+                tts_plugin_config = {
                     "api_key": settings.tts.api_key,
                     "resource_id": settings.tts.resource_id or "",
                     "voice_type": settings.tts.voice_type or "BV001_streaming",
@@ -301,10 +344,44 @@ class WebSocketSessionHandler:
                     "speed_ratio": settings.tts.speed_ratio or 1.0,
                     "volume_ratio": settings.tts.volume_ratio or 1.0,
                     "pitch_ratio": settings.tts.pitch_ratio or 1.0,
-                    "explicit_dialect": settings.tts.explicit_dialect or "",
-                    "enable_pool": settings.tts.enable_pool,
                 }
-            tts_processor = create_tts_gateway(config=tts_config)
+            tts_processor = create_plugin_tts_gateway(config=tts_plugin_config)
+            if tts_processor is None:
+                # 回退到传统网关
+                if is_multi_mode and user_config and user_config.tts_config:
+                    user_tts_cfg = user_config.tts_config
+                    tts_config = {
+                        "api_key": user_tts_cfg.get("api_key", ""),
+                        "resource_id": user_tts_cfg.get("resource_id", ""),
+                        "voice_type": user_tts_cfg.get("voice_type", ""),
+                        "sample_rate": self.spk_sample_rate or settings.tts.sample_rate or 24000,
+                        "speed_ratio": user_tts_cfg.get("speed_ratio", 1.0),
+                        "volume_ratio": user_tts_cfg.get("volume_ratio", 1.0),
+                        "pitch_ratio": user_tts_cfg.get("pitch_ratio", 1.0),
+                        "explicit_dialect": user_tts_cfg.get("explicit_dialect", ""),
+                        "enable_pool": user_tts_cfg.get("enable_pool", settings.tts.enable_pool),
+                        # 设备级 TTS 连接池参数（回退全局）
+                        "pool_max_size": user_tts_cfg.get("pool_max_size"),
+                        "pool_min_size": user_tts_cfg.get("pool_min_size"),
+                        "pool_heartbeat_interval": user_tts_cfg.get("pool_heartbeat_interval"),
+                        "pool_idle_timeout": user_tts_cfg.get("pool_idle_timeout"),
+                        "pool_connection_timeout": user_tts_cfg.get("pool_connection_timeout"),
+                    }
+                else:
+                    tts_config = {
+                        "api_key": settings.tts.api_key,
+                        "resource_id": settings.tts.resource_id or "",
+                        "voice_type": settings.tts.voice_type or "BV001_streaming",
+                        "sample_rate": self.spk_sample_rate or settings.tts.sample_rate or 24000,
+                        "speed_ratio": settings.tts.speed_ratio or 1.0,
+                        "volume_ratio": settings.tts.volume_ratio or 1.0,
+                        "pitch_ratio": settings.tts.pitch_ratio or 1.0,
+                        "explicit_dialect": settings.tts.explicit_dialect or "",
+                        "enable_pool": settings.tts.enable_pool,
+                    }
+                tts_processor = create_tts_gateway(config=tts_config)
+            else:
+                logger.info("[WS] 使用 TTS 插件网关")
         except Exception as e:
             logger.warning(f"[WS] TTS processor initialization failed: {e}")
             tts_processor = None
@@ -585,6 +662,12 @@ class WebSocketSessionHandler:
                 session.tts_playback_done.set()
                 self._trigger_growth()
                 if not session._closed and fsm.get() != SessionState.IDLE:
+                    # 新一轮唤醒流程进行中（新 start 命令取消了本 pipeline）：
+                    # 不在此启动下一轮 ASR，由 _do_wake_start 在唤醒音频播完后统一启动，
+                    # 避免双重启动竞态导致音频发往被取消的旧会话
+                    if self._new_wake_pending:
+                        logger.info(f"[Session:{session.session_id}] 新一轮唤醒流程进行中，跳过 _start_next_asr（由 _do_wake_start 启动 ASR）")
+                        return
                     await self._start_next_asr()
                 elif fsm.get() == SessionState.IDLE:
                     logger.info(f"[Session:{session.session_id}] Session is IDLE, skip next ASR")
@@ -625,6 +708,9 @@ class WebSocketSessionHandler:
             # 即使出错也尝试启动下一轮 ASR，避免卡死
             try:
                 if not session._closed and fsm.get() != SessionState.IDLE:
+                    if self._new_wake_pending:
+                        logger.info(f"[Session:{session.session_id}] 新一轮唤醒流程进行中，跳过恢复启动 ASR")
+                        return
                     logger.info(f"[Session:{session.session_id}] Attempting recovery: starting next ASR after error")
                     await self._start_next_asr()
             except Exception as e2:
@@ -722,18 +808,40 @@ class WebSocketSessionHandler:
             session._waiting_wake_audio = False
             logger.info(f"[Session:{session.session_id}] Wake start task cancelled")
             raise
+        finally:
+            # 唤醒流程结束（正常/失败/取消），清除新一轮唤醒标志
+            self._new_wake_pending = False
 
     def _start_asr_session(self) -> None:
         """启动 ASR 会话"""
         session = self.session
         asr_client = self.asr_client
+        # 幂等保护：已有活跃 ASR 任务（或正在启动）时跳过重复启动。
+        # 防止 _start_next_asr（旧 pipeline 取消触发）与 _do_wake_start（唤醒音频播完触发）
+        # 双重启动竞态：旧会话被取消后音频发往已关闭连接，新会话无输入 → 识别空文本断连。
+        if self._asr_starting or (session.runtime.asr_task and not session.runtime.asr_task.done()):
+            logger.info(f"[Session:{session.session_id}] ASR 已活跃，跳过重复启动")
+            return
+        self._asr_starting = True
         session.runtime.asr_start_time = time.time()
         session.runtime.asr_last_result_time = None
         session.runtime.asr_full_text = ""
         if asr_client:
             session.runtime.asr_stop_event = asyncio.Event()
-            asyncio.create_task(session.start_asr(self.on_asr_text, self.on_vad_end))
+            task = asyncio.create_task(session.start_asr(self.on_asr_text, self.on_vad_end))
+            task.add_done_callback(self._on_asr_start_done)
+        else:
+            # 无 ASR 客户端：没有启动任务可回调，立即清除标志避免卡死
+            self._asr_starting = False
         asyncio.create_task(session.start_watchdog(self.on_vad_end))
+
+    def _on_asr_start_done(self, task: asyncio.Task) -> None:
+        """start_asr 启动任务完成回调，清除同步启动标志"""
+        self._asr_starting = False
+        if task.cancelled():
+            logger.info(f"[Session:{self.session.session_id}] ASR 启动任务已取消")
+        elif task.exception():
+            logger.warning(f"[Session:{self.session.session_id}] ASR 启动任务异常: {task.exception()}")
 
     async def _play_connect_audio(self) -> None:
         """播放连接音频"""
@@ -825,32 +933,38 @@ class WebSocketSessionHandler:
             # 复用主流程的 client + model 解析，确保 device_config 中的 base_url 正确生效
             client, model, _ = llm_processor._resolve_config(user_config)
 
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.3,
-                max_tokens=4000,
-            )
+            if client is not None:
+                # 传统直连模式：有 OpenAI client 可以直接调用
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.3,
+                    max_tokens=4000,
+                )
 
-            result = response.choices[0].message.content or ""
-            logger.debug(f"[Growth] LLM直接调用返回: {result[:200]}")
-            return result
+                result = response.choices[0].message.content or ""
+                logger.debug(f"[Growth] LLM直接调用返回: {result[:200]}")
+                return result
 
         except Exception as e:
             logger.error(f"[Growth] LLM直接调用失败: {e}")
-            # 回退到主流程
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
-            result = ""
-            async for token in llm_processor.stream_chat(messages):
-                if isinstance(token, str) and not token.startswith("__"):
-                    result += token
-            return result
+
+        # 插件模式或直接调用失败：回退到 stream_chat 收集完整结果
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        result = ""
+        async for token in llm_processor.stream_chat(messages, user_config=user_config):
+            if isinstance(token, str) and not token.startswith("[LLM"):
+                result += token
+        if not result and llm_processor:
+            # 如果仍然为空，可能是 LLM 插件返回了错误，记录一下
+            logger.warning(f"[Growth] LLM返回为空，可能是插件配置问题")
+        return result
 
     async def _growth_cooldown_timer(self, device_id: str, messages: list) -> None:
         """冷却定时器 - 等待一段时间后执行成长任务"""
@@ -976,6 +1090,10 @@ class WebSocketSessionHandler:
 
                             logger.info("[WS] Received start command")
 
+                            # 标记新一轮唤醒流程进行中：旧 pipeline 被取消时，
+                            # _on_tts_complete 不应再启动下一轮 ASR（由 _do_wake_start 负责）
+                            self._new_wake_pending = True
+
                             # 立即清除唤醒音频事件，防止上一轮迟到的 client_out_audio_over 触发
                             session._wake_audio_played.clear()
 
@@ -1022,6 +1140,8 @@ class WebSocketSessionHandler:
                                     self.wake_start_task.cancel()
                                 self.wake_start_task = asyncio.create_task(self._do_wake_start())
                             else:
+                                # 无唤醒音频：直接启动 ASR，唤醒流程标志在此清除
+                                self._new_wake_pending = False
                                 await fsm.set(SessionState.ASR)
                                 self._start_asr_session()
                                 await asyncio.sleep(0.1)

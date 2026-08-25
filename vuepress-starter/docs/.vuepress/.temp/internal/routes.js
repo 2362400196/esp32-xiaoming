@@ -29,22 +29,9 @@ export const routes = Object.fromEntries([
   ["/dev/server/skill-system.html", { loader: () => import(/* webpackChunkName: "dev_server_skill-system.html" */"C:/Users/23624/Desktop/esp/esp32-xiaoming/vuepress-starter/docs/dev/server/skill-system.md"), meta: {"title":"技能系统"} }],
   ["/dev/server/ws.html", { loader: () => import(/* webpackChunkName: "dev_server_ws.html" */"C:/Users/23624/Desktop/esp/esp32-xiaoming/vuepress-starter/docs/dev/server/ws.md"), meta: {"title":"WebSocket 通信协议"} }],
   ["/guide/app/guide.html", { loader: () => import(/* webpackChunkName: "guide_app_guide.html" */"C:/Users/23624/Desktop/esp/esp32-xiaoming/vuepress-starter/docs/guide/app/guide.md"), meta: {"title":"App 操作指南"} }],
-  ["/guide/client/flash.html", { loader: () => import(/* webpackChunkName: "guide_client_flash.html" */"C:/Users/23624/Desktop/esp/esp32-xiaoming/vuepress-starter/docs/guide/client/flash.md"), meta: {"title":"烧录固件"} }],
-  ["/guide/client/wiring.html", { loader: () => import(/* webpackChunkName: "guide_client_wiring.html" */"C:/Users/23624/Desktop/esp/esp32-xiaoming/vuepress-starter/docs/guide/client/wiring.md"), meta: {"title":"默认接线"} }],
   ["/guide/server/config.html", { loader: () => import(/* webpackChunkName: "guide_server_config.html" */"C:/Users/23624/Desktop/esp/esp32-xiaoming/vuepress-starter/docs/guide/server/config.md"), meta: {"title":"最小配置"} }],
   ["/guide/server/get-started.html", { loader: () => import(/* webpackChunkName: "guide_server_get-started.html" */"C:/Users/23624/Desktop/esp/esp32-xiaoming/vuepress-starter/docs/guide/server/get-started.md"), meta: {"title":"快速开始"} }],
+  ["/guide/client/flash.html", { loader: () => import(/* webpackChunkName: "guide_client_flash.html" */"C:/Users/23624/Desktop/esp/esp32-xiaoming/vuepress-starter/docs/guide/client/flash.md"), meta: {"title":"烧录固件"} }],
+  ["/guide/client/wiring.html", { loader: () => import(/* webpackChunkName: "guide_client_wiring.html" */"C:/Users/23624/Desktop/esp/esp32-xiaoming/vuepress-starter/docs/guide/client/wiring.md"), meta: {"title":"默认接线"} }],
   ["/404.html", { loader: () => import(/* webpackChunkName: "404.html" */"C:/Users/23624/Desktop/esp/esp32-xiaoming/vuepress-starter/docs/.vuepress/.temp/pages/404.html.vue"), meta: {"title":""} }],
 ]);
-
-if (import.meta.webpackHot) {
-  import.meta.webpackHot.accept()
-  __VUE_HMR_RUNTIME__.updateRoutes?.(routes)
-  __VUE_HMR_RUNTIME__.updateRedirects?.(redirects)
-}
-
-if (import.meta.hot) {
-  import.meta.hot.accept((m) => {
-    __VUE_HMR_RUNTIME__.updateRoutes?.(m.routes)
-    __VUE_HMR_RUNTIME__.updateRedirects?.(m.redirects)
-  })
-}

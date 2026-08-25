@@ -162,6 +162,24 @@ class DeviceRegistry:
 
     def get_all_sessions(self):
         return [d["session"] for d in self._devices.values() if d.get("session")]
+
+    async def close_all(self) -> None:
+        """关闭所有设备连接（服务端退出时调用，避免残留 WebSocket/SSL 连接）。"""
+        devices = list(self._devices.values())
+        for d in devices:
+            try:
+                session = d.get("session")
+                if session and hasattr(session, "cancel_event"):
+                    session.cancel_event.set()
+                channel = d.get("channel")
+                if channel and hasattr(channel, "close"):
+                    await channel.close()
+            except Exception as e:
+                logger.warning(f"[DeviceRegistry] 关闭设备连接异常: {e}")
+        self._devices.clear()
+        self._mac_index.clear()
+        if devices:
+            logger.info(f"[DeviceRegistry] 已关闭 {len(devices)} 个设备连接")
     
     def get_stats(self) -> dict:
         return {

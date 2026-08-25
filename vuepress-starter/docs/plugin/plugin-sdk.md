@@ -792,6 +792,92 @@ async def read_light_sensor(tool_manager=None) -> str:
 - 读操作需要 `tool_manager` 参数，写操作可选 `device_key` 参数
 - 写操作先发送硬件配置再发送数据，无需手动调用 `pinMode`
 
+## 十八、WebSocket 与流式 HTTP（权限 `network`）
+
+ASR / TTS 插件需要 WebSocket 双向通信，LLM 插件需要 SSE 流式读取。SDK 提供了底层封装，插件只需关注协议拼装与解析。完整开发示例见 [插件开发教程 → 语音服务插件开发](./plugin-dev.md#语音服务插件开发（asr--llm--tts）)。
+
+### WebSocket 操作
+
+```python
+from src.use_cases._plugin_helpers import ws_connect, ws_send, ws_recv, ws_close
+```
+
+| 函数 | 说明 |
+|------|------|
+| `ws_connect(url, headers=None) -> str` | 建立 WebSocket 连接，返回 `session_id`（后续操作的句柄） |
+| `ws_send(session_id, data: bytes) -> None` | 发送二进制数据（协议帧通常拼成 bytes 一次性发送） |
+| `ws_recv(session_id, timeout=0.1) -> bytes \| None` | 接收一帧数据；超时返回 `None` |
+| `ws_close(session_id) -> None` | 关闭连接并清理会话 |
+
+```python
+from src.use_cases._plugin_helpers import ws_connect, ws_send, ws_recv, ws_close
+
+# 连接（失败会抛异常，需 try/except）
+ws_id = await ws_connect("wss://example.com/ws", headers={"X-Api-Key": key})
+
+# 发送协议帧（bytes）
+await ws_send(ws_id, header_bytes + payload_bytes)
+
+# 轮询接收（超时返回 None，不代表出错）
+while True:
+    data = await ws_recv(ws_id, timeout=0.5)
+    if data is None:
+        continue  # 暂无新数据，继续轮询
+    break
+
+# 关闭
+await ws_close(ws_id)
+```
+
+::: tip 使用要点
+- `ws_send` 只接受 `bytes`，文本需先 `.encode("utf-8")`
+- `ws_recv` 带超时，**超时返回 `None` 不代表出错**，是"暂无新数据"，调用方应轮询
+- 连接失败时 `ws_connect` 会抛异常，需 `try/except` 捕获
+- 同一 WebSocket 会话**不能并发 recv**（websockets 库限制），多个协程共享连接时需加锁：
+
+```python
+import asyncio
+_ws_recv_lock = asyncio.Lock()
+
+async with _ws_recv_lock:
+    data = await ws_recv(ws_id, timeout=0.1)
+```
+:::
+
+### 流式 HTTP（SSE）
+
+```python
+from src.use_cases._plugin_helpers import http_stream_open, http_stream_read, http_stream_close
+```
+
+| 函数 | 说明 |
+|------|------|
+| `http_stream_open(method, url, *, headers=None, content=None, timeout=30.0) -> (stream_id, err)` | 发起流式请求，请求发出后立即返回 `stream_id`，响应体由后台任务逐行读取 |
+| `http_stream_read(stream_id, timeout=0.5) -> (line, err)` | 读取下一行响应；超时返回 `(None, None)`；流结束返回 `(None, None)`；出错返回 `(None, err)` |
+| `http_stream_close(stream_id) -> None` | 关闭流并释放资源 |
+
+```python
+stream_id, err = await http_stream_open(
+    "POST", f"{base_url}/chat/completions",
+    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+    content=json.dumps({"model": model, "messages": messages, "stream": True}),
+)
+if err:
+    return f"请求失败: {err}"
+
+while True:
+    line, err = await http_stream_read(stream_id, timeout=0.3)
+    if err:
+        break
+    if line is None:
+        break  # 超时或流结束
+    print(line)
+```
+
+::: tip 与 `http_request` 的区别
+`http_request` 一次性拿到完整响应体，适合普通 API；`http_stream_open/read` 逐行返回，适合 SSE（`text/event-stream`）等流式协议。流有 120 秒空闲 TTL，长时间不读取会被自动回收。
+:::
+
 ## 参考文件
 
 | 文件 | 说明 |

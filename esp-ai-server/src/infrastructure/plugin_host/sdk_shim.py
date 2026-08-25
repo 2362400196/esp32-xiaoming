@@ -269,6 +269,42 @@ async def http_get_json(url: str, params: dict | None = None, headers: dict | No
     return data, None
 
 
+# ── 流式 HTTP（SSE）────────────────────────────────────────
+
+
+async def http_stream_open(method: str, url: str, *, headers: dict | None = None,
+                           content=None, timeout: float = 30.0):
+    """打开流式 HTTP 请求，返回 (stream_id, None) 或 (None, error)。"""
+    result = await client.send_async(
+        "http_stream_open", {"method": method, "url": url, "headers": headers,
+                             "content": content, "timeout": timeout}
+    )
+    if not isinstance(result, list) or len(result) < 2:
+        return None, RuntimeError("无效的 http_stream_open 返回")
+    stream_id, err = result
+    if err is not None:
+        return None, RuntimeError(err)
+    return stream_id, None
+
+
+async def http_stream_read(stream_id: str, timeout: float = 0.5):
+    """读取流式响应下一行。返回 (line, None)；超时返回 (None, None)；出错返回 (None, err)。"""
+    result = await client.send_async(
+        "http_stream_read", {"stream_id": stream_id, "timeout": timeout}
+    )
+    if not isinstance(result, list) or len(result) < 2:
+        return None, RuntimeError("无效的 http_stream_read 返回")
+    line, err = result
+    if err is not None:
+        return None, RuntimeError(err)
+    return line, None
+
+
+async def http_stream_close(stream_id: str) -> None:
+    """关闭流式响应。"""
+    await client.send_async("http_stream_close", {"stream_id": stream_id})
+
+
 # ── LTM / Repository 代理 ──────────────────────────────────
 
 
@@ -348,6 +384,36 @@ def plugin_log(message: str, level: str = "info") -> None:
         client.send_sync("plugin_log", {"level": level, "message": message})
     except Exception:
         pass
+
+
+# ════════════════════════════════════════════════════════════
+# WebSocket 连接管理（沙箱插件通过 SDK 使用）
+# ════════════════════════════════════════════════════════════
+
+
+async def ws_connect(url: str, headers: dict | None = None) -> str:
+    """创建 WebSocket 连接，返回 session_id。"""
+    return await client.send_async("ws_connect", {"url": url, "headers": headers or {}})
+
+
+async def ws_send(session_id: str, data: bytes) -> None:
+    """通过 WebSocket 发送二进制数据。"""
+    import base64
+    await client.send_async("ws_send", {"session_id": session_id, "data": base64.b64encode(data).decode("ascii")})
+
+
+async def ws_recv(session_id: str, timeout: float = 0.1) -> bytes | None:
+    """从 WebSocket 接收数据（带超时），返回 bytes 或 None。"""
+    import base64
+    result = await client.send_async("ws_recv", {"session_id": session_id, "timeout": timeout})
+    if result:
+        return base64.b64decode(result)
+    return None
+
+
+async def ws_close(session_id: str) -> None:
+    """关闭 WebSocket 连接。"""
+    await client.send_async("ws_close", {"session_id": session_id})
 
 
 # ════════════════════════════════════════════════════════════
@@ -486,6 +552,9 @@ def build_helpers_shim() -> types.ModuleType:
         "get_plugin_config_or_env": get_plugin_config_or_env,
         "http_request": http_request,
         "http_get_json": http_get_json,
+        "http_stream_open": http_stream_open,
+        "http_stream_read": http_stream_read,
+        "http_stream_close": http_stream_close,
         "get_ltm_service": get_ltm_service,
         "get_default_ltm_service": get_default_ltm_service,
         "get_diary_repository": get_diary_repository,
@@ -514,6 +583,11 @@ def build_helpers_shim() -> types.ModuleType:
         "current_timestamp": current_timestamp,
         "json_dumps": json_dumps,
         "json_loads": json_loads,
+        # WebSocket 操作
+        "ws_connect": ws_connect,
+        "ws_send": ws_send,
+        "ws_recv": ws_recv,
+        "ws_close": ws_close,
     })
     return mod
 

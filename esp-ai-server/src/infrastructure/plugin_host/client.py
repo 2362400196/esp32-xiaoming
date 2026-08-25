@@ -62,8 +62,14 @@ def _next_id() -> int:
 def _write(msg: dict) -> None:
     payload = encode(msg)
     with _write_lock:
-        sys.stdout.write(payload)
-        sys.stdout.flush()
+        try:
+            sys.stdout.write(payload)
+            sys.stdout.flush()
+        except (OSError, ValueError) as e:
+            import sys as _sys
+            _sys.stderr.write(f"[client._write] stdout 写入失败: {type(e).__name__}: {e}\n")
+            _sys.stderr.flush()
+            raise
 
 
 # ════════════════════════════════════════════════════════════
@@ -99,8 +105,14 @@ async def send_async(op: str, params: dict) -> dict:
     with _pending_lock:
         _pending[msg_id] = fut
     try:
-        _write({"type": "sdk_request", "id": msg_id, "call": call_id_ctx.get(),
-                "op": op, "params": params})
+        try:
+            _write({"type": "sdk_request", "id": msg_id, "call": call_id_ctx.get(),
+                    "op": op, "params": params})
+        except Exception as we:
+            import sys as _sys
+            _sys.stderr.write(f"[send_async] _write 异常: {type(we).__name__}: {we}\n")
+            _sys.stderr.flush()
+            raise
         reply = await asyncio.wait_for(fut, timeout=60.0)
     finally:
         with _pending_lock:

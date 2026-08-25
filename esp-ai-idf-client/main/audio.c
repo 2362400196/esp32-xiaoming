@@ -460,13 +460,15 @@ static void spk_task(void *arg)
         }
 
         // drain 检查：必须在 continue 之前，否则 StreamBuffer 空时永远到不了
-        // 必须同时检查 residual_len == 0，否则残留 MP3 数据没解码完就认为播放完成
         // 必须同时检查待播放缓冲为空，否则 play_audio 晚到时先到的音频会被误判为已完成
+        // 不检查 residual_len：流空后残留 MP3 是"缺后续帧无法解码"的尾部字节（流式
+        // 分块常以不完整帧结尾），播放已完成，继续等待只会触发下方 3s stall 保护，
+        // 造成"播完停顿 3 秒"才进入下一轮。
         size_t pending_now = 0;
         if (s_audio_mutex) xSemaphoreTake(s_audio_mutex, portMAX_DELAY);
         pending_now = s_spk_pending_len;
         if (s_audio_mutex) xSemaphoreGive(s_audio_mutex);
-        if (s_spk_wait_drain && xStreamBufferBytesAvailable(s_spk_stream) == 0 && got == 0 && residual_len == 0 && pending_now == 0) {
+        if (s_spk_wait_drain && xStreamBufferBytesAvailable(s_spk_stream) == 0 && got == 0 && pending_now == 0) {
             // StreamBuffer 空了且无新数据，等 I2S DMA 播完最后的数据
             vTaskDelay(pdMS_TO_TICKS(400));
             s_spk_wait_drain = false;

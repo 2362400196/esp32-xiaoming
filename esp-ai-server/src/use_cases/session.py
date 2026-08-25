@@ -207,14 +207,21 @@ class Session:
             pre_ws = None
             pre_wrapper = None
 
-        self.runtime.asr_task = asyncio.create_task(
-            self._asr_streaming_loop(
-                on_text, _vad_cb,
-                self.runtime.asr_stop_event,
-                pre_ws, pre_wrapper,
+        if self.asr_client and getattr(self.asr_client, 'is_plugin', False):
+            # 插件 ASR 模式：使用专有流式循环（插件内部管理 WS 连接）
+            self.runtime.asr_task = asyncio.create_task(
+                self._plugin_asr_streaming_loop(on_text, _vad_cb, self.runtime.asr_stop_event)
             )
-        )
-        logger.info(f"[Session:{self.session_id}] ASR 流式识别已启动")
+            logger.info(f"[Session:{self.session_id}] 插件 ASR 流式识别已启动")
+        else:
+            self.runtime.asr_task = asyncio.create_task(
+                self._asr_streaming_loop(
+                    on_text, _vad_cb,
+                    self.runtime.asr_stop_event,
+                    pre_ws, pre_wrapper,
+                )
+            )
+            logger.info(f"[Session:{self.session_id}] ASR 流式识别已启动")
 
     async def _connect_asr_ws(self, url: str, headers: dict):
         """创建 ASR WebSocket 连接"""
@@ -618,6 +625,146 @@ class Session:
                 except Exception:
                     pass
                 get_metrics().track_asr_request(_asr_provider, _asr_track_status, time.time() - _asr_track_start)
+            except Exception:
+                pass
+
+    async def _plugin_asr_streaming_loop(self, on_text, vad_end_callback, stop_event):
+        """插件 ASR 流式循环
+
+        插件模式下 ASR 由插件内部管理 WebSocket 连接和协议解析。
+        框架只需：
+          1. 创建插件 ASR 会话（已由 init_connection 完成）
+          2. 发送音频数据
+          3. 轮询获取识别结果
+          4. 结束时关闭会话
+        """
+        asr_client = self.asr_client
+        audio_queue = self.runtime.audio_queue
+
+        send_done = False
+        _asr_track_start = time.time()
+        _asr_track_status = "success"
+
+        try:
+            # 创建插件 ASR 会话（如果尚未创建）
+            if not getattr(asr_client, 'plugin_session_active', lambda: False)():
+                success = await asr_client.init_connection(None)
+                if not success:
+                    logger.error("[PluginASR] 创建插件 ASR 会话失败")
+                    return
+
+            async def send_audio():
+                nonlocal send_done
+                audio_sent = 0
+                # 批量发送：每次子进程 RPC 开销不小，把多个音频分片累积成
+                # 一块再发送，避免 31 次/秒的 IPC 导致音频滞后于实时速率
+                batch_size = 5120  # 160ms @ 16kHz 16bit
+                buf = bytearray()
+                first_sent = False
+                while not send_done and not stop_event.is_set():
+                    try:
+                        audio_data = await asyncio.wait_for(audio_queue.get(), timeout=0.5)
+                        if stop_event.is_set():
+                            break
+                        if audio_data is None:
+                            # 音频结束标记：先冲刷缓冲，再发结束信号
+                            if buf:
+                                await asr_client.send_audio_data(None, bytes(buf))
+                                audio_sent += len(buf)
+                                buf.clear()
+                            await asr_client.send_audio_end(None)
+                            break
+                        if not first_sent:
+                            # 首块立即发送，保证首个部分结果尽快返回
+                            await asr_client.send_audio_data(None, audio_data)
+                            audio_sent += len(audio_data)
+                            first_sent = True
+                        else:
+                            buf.extend(audio_data)
+                            if len(buf) >= batch_size:
+                                await asr_client.send_audio_data(None, bytes(buf))
+                                audio_sent += len(buf)
+                                buf.clear()
+                    except asyncio.TimeoutError:
+                        if buf:
+                            await asr_client.send_audio_data(None, bytes(buf))
+                            audio_sent += len(buf)
+                            buf.clear()
+                        continue
+                    except Exception as e:
+                        logger.debug(f"[PluginASR] send_audio 异常: {e}")
+                        break
+                if buf:
+                    await asr_client.send_audio_data(None, bytes(buf))
+                    audio_sent += len(buf)
+                if audio_sent > 0:
+                    logger.info(f"[PluginASR] 发送结束, 共 {audio_sent} bytes")
+
+            async def poll_result():
+                nonlocal send_done
+                _last_text = ""
+                while not send_done and not stop_event.is_set():
+                    try:
+                        result = await asyncio.wait_for(
+                            asr_client.plugin_get_result(), timeout=0.5
+                        )
+                        text = result.get("text", "")
+                        is_final = result.get("is_final", False)
+                        # 插件返回累积文本：仅当文本变化时才回调，避免重复刷屏
+                        if text and text != _last_text:
+                            _last_text = text
+                            logger.info(f"[PluginASR] 识别: {text}")
+                            on_text(text)
+                        if is_final:
+                            err = result.get("error")
+                            if err:
+                                logger.error(f"[PluginASR] 会话异常终止: {err}")
+                            logger.info("[PluginASR] 识别完成")
+                            send_done = True
+                            if vad_end_callback and not stop_event.is_set():
+                                cb_result = vad_end_callback()
+                                if asyncio.iscoroutine(cb_result):
+                                    await cb_result
+                            break
+                    except asyncio.TimeoutError:
+                        continue
+                    except Exception as e:
+                        logger.debug(f"[PluginASR] poll_result 异常: {e}")
+                        break
+
+            send_task = asyncio.create_task(send_audio())
+            poll_task = asyncio.create_task(poll_result())
+            stop_waiter = asyncio.create_task(stop_event.wait())
+
+            try:
+                done, pending = await asyncio.wait(
+                    [send_task, poll_task, stop_waiter],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                send_done = True
+                for t in pending:
+                    t.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                await asyncio.gather(*done, return_exceptions=True)
+            except Exception as e:
+                _asr_track_status = "error"
+                logger.error(f"[PluginASR] 任务异常: {e}")
+        except Exception as e:
+            _asr_track_status = "error"
+            logger.error(f"[PluginASR] 流式识别异常: {e}")
+        finally:
+            send_done = True
+            # 无论何种退出路径（超时/识别完成/异常），都关闭插件 ASR 会话，
+            # 避免残留会话被下一轮复用（旧 WS 连接已失效，音频全部静默丢失）
+            try:
+                if getattr(asr_client, "plugin_session_active", lambda: False)():
+                    final_text = await asr_client.send_audio_end(None)
+                    if final_text:
+                        logger.info(f"[PluginASR] 关闭会话，补取最终文本: {final_text}")
+            except Exception as e:
+                logger.debug(f"[PluginASR] 关闭插件会话异常: {e}")
+            try:
+                get_metrics().track_asr_request("plugin", _asr_track_status, time.time() - _asr_track_start)
             except Exception:
                 pass
 

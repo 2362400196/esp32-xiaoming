@@ -83,6 +83,77 @@ _plugin_optional: dict[str, bool] = {}
 # 工具名 → 所属插件名（避免重复遍历 _loaded_tools，且消除重名归属歧义）
 _tool_owner: dict[str, str] = {}
 
+# ── 服务插件注册表 ──────────────────────────────────────────
+# service_type: str → {provider_name: plugin_name}
+# 如 {"llm": {"openai": "llm_openai", "deepseek": "llm_deepseek"},
+#     "tts": {"volcengine": "tts_volcengine"},
+#     "asr": {"tencent": "asr_tencent"}}
+_service_registry: dict[str, dict[str, str]] = {}
+
+
+def register_service(service_type: str, provider_name: str, plugin_name: str) -> None:
+    """注册服务插件到全局注册表。"""
+    if service_type not in _service_registry:
+        _service_registry[service_type] = {}
+    _service_registry[service_type][provider_name] = plugin_name
+
+
+def unregister_service(service_type: str, provider_name: str) -> None:
+    """注销服务插件。"""
+    providers = _service_registry.get(service_type)
+    if providers:
+        providers.pop(provider_name, None)
+        if not providers:
+            _service_registry.pop(service_type, None)
+
+
+def get_service_plugin(service_type: str, provider_name: str | None = None) -> str | None:
+    """获取服务插件名称。provider_name 为 None 时返回第一个注册的插件。"""
+    providers = _service_registry.get(service_type)
+    if not providers:
+        return None
+    if provider_name:
+        return providers.get(provider_name)
+    # 返回第一个注册的
+    return next(iter(providers.values()))
+
+
+def get_service_providers(service_type: str) -> list[str]:
+    """获取某服务类型的所有已注册 Provider 名称列表。"""
+    providers = _service_registry.get(service_type)
+    return list(providers.keys()) if providers else []
+
+
+def has_service_plugin(service_type: str) -> bool:
+    """检查是否有某类型的服务插件已注册。"""
+    return service_type in _service_registry and bool(_service_registry[service_type])
+
+
+def _register_plugin_services(plugin_name: str, manifest: object) -> None:
+    """从 manifest 的 provides 字段注册服务。"""
+    provides = getattr(manifest, "provides", None) or {}
+    if not provides:
+        return
+    for service_type, providers in provides.items():
+        for provider_name in providers:
+            register_service(service_type, provider_name, plugin_name)
+            logger.info(
+                f"[插件服务] {plugin_name} 注册 {service_type} 服务: {provider_name}"
+            )
+
+
+def _unregister_plugin_services(plugin_name: str, manifest: object) -> None:
+    """从 manifest 的 provides 字段注销服务。"""
+    provides = getattr(manifest, "provides", None) or {}
+    if not provides:
+        return
+    for service_type, providers in provides.items():
+        for provider_name in providers:
+            unregister_service(service_type, provider_name)
+            logger.info(
+                f"[插件服务] {plugin_name} 注销 {service_type} 服务: {provider_name}"
+            )
+
 
 def _resolve_plugin_dir(plugin_name: str) -> tuple[Path | None, str]:
     """解析插件目录：优先 installed，其次 built-in。
@@ -190,6 +261,7 @@ def _load_builtin_plugin(plugin_name: str, plugin_dir: Path, plugin_file: Path) 
             _tool_owner[tname] = plugin_name
 
         _record_meta(plugin_name, plugin_dir)
+        _register_plugin_services(plugin_name, _plugin_manifest.get(plugin_name))
         logger.info(
             f"[插件] 已加载: {plugin_name}（来源: built-in，版本: {_plugin_version[plugin_name]}，"
             f"工具: {_loaded_tools[plugin_name]}，名称: {_plugin_meta[plugin_name].get('name', plugin_name)}）"
@@ -216,6 +288,7 @@ async def _load_installed_plugin(plugin_name: str, plugin_dir: Path) -> bool:
     for t in tools:
         _tool_owner[t] = plugin_name
     _record_meta(plugin_name, plugin_dir)
+    _register_plugin_services(plugin_name, _plugin_manifest.get(plugin_name))
     logger.info(
         f"[插件] 已加载: {plugin_name}（来源: installed，版本: {_plugin_version[plugin_name]}，"
         f"工具: {_loaded_tools[plugin_name]}，名称: {_plugin_meta[plugin_name].get('name', plugin_name)}，沙箱运行）"
@@ -254,11 +327,15 @@ async def _unload_plugin(plugin_name: str) -> None:
     """
     old_tools = _loaded_tools.pop(plugin_name, [])
     old_source = _plugin_source.pop(plugin_name, None)
+    old_manifest = _plugin_manifest.pop(plugin_name, None)
     _plugin_meta.pop(plugin_name, None)
     _plugin_version.pop(plugin_name, None)
-    _plugin_manifest.pop(plugin_name, None)
     _plugin_optional.pop(plugin_name, None)
     module_name = _plugin_module_names.pop(plugin_name, None)
+
+    # 注销服务注册
+    if old_manifest is not None:
+        _unregister_plugin_services(plugin_name, old_manifest)
 
     if old_source == "installed" or (INSTALLED_PLUGINS_DIR / plugin_name).is_dir():
         try:

@@ -48,6 +48,9 @@ from src.use_cases.sdk.device import (  # noqa: F401
 from src.use_cases.sdk.http import (  # noqa: F401
     http_request,
     http_get_json,
+    http_stream_open,
+    http_stream_read,
+    http_stream_close,
 )
 
 # ════════════════════════════════════════════════════════════
@@ -115,4 +118,14 @@ from src.use_cases.sdk.infrastructure import (  # noqa: F401
     get_wechat_bot,
     get_wechat_binding_mgr,
     get_remote_config_provider,
+)
+
+# ════════════════════════════════════════════════════════════
+# WebSocket 操作 SDK（沙箱插件通过此 SDK 管理 WS 连接）
+# ════════════════════════════════════════════════════════════
+from src.use_cases.sdk.ws import (  # noqa: F401
+    ws_connect,
+    ws_send,
+    ws_recv,
+    ws_close,
 )

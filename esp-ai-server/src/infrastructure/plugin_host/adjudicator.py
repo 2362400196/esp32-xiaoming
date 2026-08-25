@@ -29,6 +29,9 @@ _OP_PERMS: dict[str, str] = {
     "device_request_result": "device",
     "http_request": "network",
     "http_get_json": "network",
+    "http_stream_open": "network",
+    "http_stream_read": "network",
+    "http_stream_close": "network",
     "ltm_store": "ltm",
     "ltm_recall": "ltm",
     "ltm_list_all": "ltm",
@@ -55,6 +58,11 @@ _OP_PERMS: dict[str, str] = {
     "kv_delete": "kv",
     "kv_list": "kv",
     "get_user_profile_summary": "db",
+    # WebSocket 操作（网络权限）
+    "ws_connect": "network",
+    "ws_send": "network",
+    "ws_recv": "network",
+    "ws_close": "network",
 }
 
 # 无需显式权限的只读 op（设备 key 解析 / 技能目录 / 插件配置）
@@ -141,8 +149,8 @@ async def validate_url(url: str, allowlist: set[str]) -> tuple[str | None, str |
         传给 HTTP 客户端 pin 连接以防止 DNS 重绑定。
     """
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return f"仅允许 http/https 协议: {url}", None
+    if parsed.scheme not in ("http", "https", "ws", "wss"):
+        return f"仅允许 http/https/ws/wss 协议: {url}", None
     host = (parsed.hostname or "").lower()
     if not host:
         return f"URL 缺少主机名: {url}", None
@@ -189,6 +197,10 @@ class Adjudicator:
         self.permissions = frozenset(permissions or [])
         self.url_allowlist = set(url_allowlist or _global_url_allowlist())
         self._permission_setup_done = False
+        # WebSocket 连接池：session_id → WebSocketClientProtocol
+        self._ws_connections: dict[str, Any] = {}
+        self._ws_recv_locks: dict[str, asyncio.Lock] = {}
+        self._ws_counter = 0
 
     # ── 权限上下文 ──────────────────────────────────────────
 
@@ -329,6 +341,121 @@ class Adjudicator:
         if http_err is not None:
             return [None, str(http_err)]
         return [data, None]
+
+    # ── 流式 HTTP（SSE）─────────────────────────────────────
+
+    async def _op_http_stream_open(self, params, ctx) -> list:
+        """打开流式 HTTP 请求，返回 [stream_id, err]。"""
+        from src.use_cases._plugin_helpers import http_stream_open
+
+        url = str(params.get("url", ""))
+        err, pin_ip = await validate_url(url, self.url_allowlist)
+        if err:
+            logger.warning(f"[插件沙箱] 插件 {self.plugin_id} 的流式 HTTP 请求被拦截: {err}")
+            return [None, err]
+        stream_id, open_err = await http_stream_open(
+            str(params.get("method", "POST")),
+            url,
+            headers=params.get("headers"),
+            content=params.get("content"),
+            timeout=float(params.get("timeout", 30.0)),
+            pin_ip=pin_ip,
+        )
+        if open_err is not None:
+            return [None, str(open_err)]
+        return [stream_id, None]
+
+    async def _op_http_stream_read(self, params, ctx) -> list:
+        """读取流式响应下一行，返回 [line, err]；超时 line 为 None。"""
+        from src.use_cases._plugin_helpers import http_stream_read
+
+        line, read_err = await http_stream_read(
+            str(params.get("stream_id", "")),
+            float(params.get("timeout", 0.5)),
+        )
+        if read_err is not None:
+            return [None, str(read_err)]
+        return [line, None]
+
+    async def _op_http_stream_close(self, params, ctx) -> None:
+        """关闭流式响应。"""
+        from src.use_cases._plugin_helpers import http_stream_close
+
+        await http_stream_close(str(params.get("stream_id", "")))
+
+    # ═════════════════════════════════════════════════════════
+    # WebSocket 连接管理
+    # ═════════════════════════════════════════════════════════
+
+    async def _op_ws_connect(self, params, ctx) -> str:
+        """创建 WebSocket 连接，返回 session_id。"""
+        url = str(params.get("url", ""))
+        headers = params.get("headers") or {}
+        try:
+            import websockets
+        except ImportError:
+            raise RuntimeError("WebSocket 支持不可用（缺少 websockets 库）")
+        err, _ = await validate_url(url, self.url_allowlist)
+        if err:
+            raise PermissionDenied(f"WebSocket URL 被拦截: {err}")
+        extra_headers = [(k, str(v)) for k, v in headers.items()]
+        try:
+            ws = await websockets.connect(url, additional_headers=extra_headers, open_timeout=15)
+        except Exception as e:
+            raise RuntimeError(f"WebSocket 连接失败: {e}")
+        self._ws_counter += 1
+        session_id = f"ws_{self.plugin_id}_{self._ws_counter}"
+        self._ws_connections[session_id] = ws
+        self._ws_recv_locks[session_id] = asyncio.Lock()
+        logger.info(f"[插件沙箱] 插件 {self.plugin_id} 创建 WebSocket 连接: {session_id}")
+        return session_id
+
+    async def _op_ws_send(self, params, ctx) -> None:
+        """通过 WebSocket 发送数据。"""
+        session_id = str(params.get("session_id", ""))
+        data_b64 = params.get("data", "")
+        ws = self._ws_connections.get(session_id)
+        if ws is None:
+            raise RuntimeError(f"WebSocket 连接不存在: {session_id}")
+        import base64
+        data = base64.b64decode(data_b64)
+        try:
+            await ws.send(data)
+        except Exception as e:
+            raise RuntimeError(f"WebSocket 发送失败: {e}")
+
+    async def _op_ws_recv(self, params, ctx) -> str | None:
+        """从 WebSocket 接收数据（带超时）。返回 base64 编码数据，无数据返回 None。"""
+        session_id = str(params.get("session_id", ""))
+        timeout = float(params.get("timeout", 0.1))
+        ws = self._ws_connections.get(session_id)
+        if ws is None:
+            raise RuntimeError(f"WebSocket 连接不存在: {session_id}")
+        lock = self._ws_recv_locks.get(session_id)
+        import base64
+        try:
+            async with lock:
+                data = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            if isinstance(data, bytes):
+                return base64.b64encode(data).decode("ascii")
+            return base64.b64encode(data.encode("utf-8")).decode("ascii")
+        except asyncio.TimeoutError:
+            return None
+        except Exception as e:
+            raise RuntimeError(f"WebSocket 接收失败: {e}")
+
+    async def _op_ws_close(self, params, ctx) -> None:
+        """关闭 WebSocket 连接。"""
+        session_id = str(params.get("session_id", ""))
+        ws = self._ws_connections.pop(session_id, None)
+        self._ws_recv_locks.pop(session_id, None)
+        if ws is None:
+            return
+        try:
+            await ws.close()
+        except Exception:
+            pass
+        logger.info(f"[插件沙箱] 插件 {self.plugin_id} 关闭 WebSocket 连接: {session_id}")
 
     # ── 插件配置 / 环境变量 ─────────────────────────────────
 

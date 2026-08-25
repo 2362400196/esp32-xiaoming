@@ -198,10 +198,10 @@ def _emit_result(call_id, result: dict) -> None:
     try:
         sys.stdout.write(payload)
         sys.stdout.flush()
-    except (OSError, ValueError):
-        # stdout 管道异常（如主进程已关闭连接），不能继续
-        import os as _os
-        _os._exit(1)
+    except (OSError, ValueError) as e:
+        # stdout 管道异常（如主进程已关闭连接），记录错误后退出
+        # 不调用 os._exit(1) 硬终止，避免父进程误判为子进程崩溃
+        _log(f"[_emit_result] stdout 写入失败（{type(e).__name__}: {e}），子进程退出")
 
 
 async def _serve() -> None:

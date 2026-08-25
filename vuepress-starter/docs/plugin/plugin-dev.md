@@ -407,6 +407,845 @@ async def get_weather(city: str = "", tool_manager=None) -> str:
 - **即时生效**：保存后热重载在线设备，无需重启
 - **前端保存**：通过 `save_config` 工具，前端调用通用工具接口写入
 
+## 语音服务插件开发（ASR / LLM / TTS）
+
+ASR（语音识别）、LLM（大模型对话）、TTS（语音合成）三类插件是系统的 **AI 服务提供商**。与天气、闹钟这类普通工具插件不同，它们**不直接控制设备**，而是把外部 AI 服务接入系统，供核心语音交互流程调用。
+
+### 与普通插件的区别
+
+| 维度 | 普通工具插件 | 语音服务插件 |
+|------|-------------|-------------|
+| 调用方 | LLM 自主决策调用 | 系统语音流程按固定顺序调用 |
+| 数据形态 | 一次性请求/响应 | **流式**：数据边产生边传输 |
+| 状态管理 | 无状态 | **跨多次调用**保存会话状态 |
+| 底层依赖 | `http_request` | WebSocket（ASR/TTS）+ SSE（LLM） |
+| 返回值 | 文本（会被 TTS 播报） | 结构化 dict（`session_id`/`text`/`audio`） |
+
+### 通用工具链设计
+
+三类插件都遵循 **"开始 → 传输/读取 → 结束"** 三段式工具链，每次调用返回结构化 dict 而不是文本：
+
+| 阶段 | ASR | LLM | TTS | 作用 |
+|------|-----|-----|-----|------|
+| 开始 | `start_session` | `start_chat` | `start_synthesis` | 建立连接/请求，返回会话 ID |
+| 传输 | `send_audio` / `get_result` | `get_next` | `get_audio` | 发送数据或拉取增量结果 |
+| 结束 | `end_session` | `end_chat` | `end_synthesis` | 发送结束信号、清理资源 |
+
+**会话缓存**：用模块级字典 `_sessions: dict[str, dict]` 保存会话状态，key 是工具返回给上层的短 ID（如 `uuid.uuid4().hex[:8]`）：
+
+```python
+_sessions: dict[str, dict] = {}
+
+@tool(cache=False)
+async def xxx_start(...) -> dict:
+    sess_id = uuid.uuid4().hex[:8]
+    _sessions[sess_id] = {"ws_id": ws_id, "done": False, ...}
+    return {"session_id": sess_id, "error": None}
+```
+
+::: warning 必须 `cache=False`
+语音服务工具**全部**要设 `@tool(cache=False)`。默认缓存会在相同参数下 300 秒内跳过函数体，导致第二次识别/合成直接返回旧结果。
+:::
+
+### 返回值约定
+
+所有语音服务工具返回**结构化 dict**（而非文本），统一格式：
+
+```python
+# 开始类
+{"session_id": str, "error": str | None}
+# 传输类
+{"text": str, "is_final": bool, "error": str | None}     # ASR / LLM
+{"audio_base64": str, "done": bool, "error": str | None}  # TTS
+# 结束类
+{"final_text": str, "error": str | None}
+```
+
+- 成功时 `error` 为 `None`，失败时返回可读的中文错误
+- 上层根据 `error` 判断是否继续，`is_final` / `done` 判断是否结束
+
+---
+
+### 一、ASR 插件开发（WebSocket 双向流式）
+
+#### 原理
+
+ASR 是**双向流式**：客户端持续发送音频分片，服务端持续返回识别文本。典型协议是火山引擎的 SAUC：
+
+```
+客户端 → 服务端：初始化配置帧 → 音频数据帧 → 结束帧
+服务端 → 客户端：识别结果帧（增量文本 + 最终标记）
+```
+
+SAUC 协议帧格式（火山引擎）：
+
+```
+┌──────────────┬──────────────┬──────────────────────────┐
+│  4 字节头部   │  4 字节长度   │  payload（JSON / 音频）    │
+└──────────────┴──────────────┴──────────────────────────┘
+头部字节：
+  byte0: version(高4位) | header_size(低4位)
+  byte1: message_type(高4位) | flags(低4位)
+  byte2: serialization(高4位) | compression(低4位)
+  byte3: 保留
+```
+
+#### 工具链
+
+| 工具 | 作用 |
+|------|------|
+| `asr_start_session(config)` | 连接 WebSocket，发送初始化配置，返回 `session_id` |
+| `asr_send_audio(session_id, audio)` | 发送 base64 音频分片（16bit PCM / 16kHz / 单声道） |
+| `asr_get_result(session_id)` | 拉取最新识别结果（增量文本 + `is_final` 标记） |
+| `asr_end_session(session_id)` | 发送结束帧，读取最终结果，关闭连接 |
+
+#### 完整代码
+
+```python
+"""ASR 服务插件示例（火山引擎 SAUC 协议）"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import struct
+import uuid
+
+from src.use_cases.tools_system import tool
+from src.use_cases._plugin_helpers import ws_connect, ws_send, ws_recv, ws_close
+
+ASR_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel"
+
+# 会话缓存：session_id → {"ws_id", "current_text", "is_final"}
+_sessions: dict[str, dict] = {}
+
+# 互斥锁：同一 WebSocket 不能并发 recv
+_ws_recv_lock = asyncio.Lock()
+
+
+def _make_header(message_type: int, flags: int = 0) -> bytes:
+    """构造 SAUC 协议 4 字节头部。"""
+    version = 0x1 << 4
+    header_size = 0x1 << 0
+    byte0 = (version | header_size).to_bytes(1, "big")
+    byte1 = ((message_type << 4) | flags).to_bytes(1, "big")
+    serialization = 0x1 << 4  # JSON
+    compression = 0x0 << 0
+    byte2 = (serialization | compression).to_bytes(1, "big")
+    byte3 = (0).to_bytes(1, "big")
+    return byte0 + byte1 + byte2 + byte3
+
+
+def _make_payload(data: dict) -> bytes:
+    """构造 JSON payload：4 字节长度 + JSON 数据。"""
+    json_bytes = json.dumps(data).encode("utf-8")
+    return struct.pack(">I", len(json_bytes)) + json_bytes
+
+
+def _parse_response(data: bytes) -> dict | None:
+    """解析 SAUC 响应帧。"""
+    if len(data) < 12:
+        return None
+    payload_size = struct.unpack(">I", data[8:12])[0]
+    if len(data) < 12 + payload_size:
+        return None
+    try:
+        return json.loads(data[12:12 + payload_size].decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def _extract_text(result: dict) -> str:
+    """从 ASR 结果中提取文本。"""
+    texts = result.get("result", {}).get("texts", [])
+    if texts:
+        return texts[0].get("text", "")
+    return result.get("result", {}).get("text", "")
+
+
+def _is_final(result: dict) -> bool:
+    """判断是否为最终结果。"""
+    if result.get("is_final"):
+        return True
+    additions = result.get("result", {}).get("additions", {})
+    if additions.get("definite"):
+        return True
+    return False
+
+
+@tool(cache=False)
+async def asr_start_session(config: dict | None = None, tool_manager=None) -> dict:
+    """开始 ASR 识别会话，返回 session_id。
+
+    Args:
+        config: 配置，包含 api_key, resource_id, model_name
+
+    Returns:
+        {"session_id": str, "error": str|null}
+    """
+    cfg = config or {}
+    api_key = cfg.get("api_key", "")
+    if not api_key:
+        return {"session_id": "", "error": "api_key 未配置"}
+
+    headers = {
+        "X-Api-Key": api_key,
+        "X-Api-Resource-Id": cfg.get("resource_id", "volc.bigasr.sauc.duration"),
+        "X-Api-Connect-Id": str(uuid.uuid4()),
+    }
+    try:
+        ws_id = await ws_connect(ASR_URL, headers)
+    except Exception as e:
+        return {"session_id": "", "error": f"WebSocket 连接失败: {e}"}
+
+    # 发送初始化配置（message_type=1）
+    config_request = _make_header(message_type=1, flags=0)
+    config_payload = _make_payload({
+        "user": {"uid": "esp-ai"},
+        "audio": {"format": "pcm", "rate": 16000, "bits": 16, "channel": 1},
+        "request": {
+            "model_name": cfg.get("model_name", "bigmodel"),
+            "enable_itn": False,
+            "enable_punc": False,
+            "end_window_size": 400,
+            "vad_segment_duration": 2000,
+            "force_to_speech_time": 1000,
+        },
+    })
+    await ws_send(ws_id, config_request + config_payload)
+
+    sess_id = uuid.uuid4().hex[:8]
+    _sessions[sess_id] = {"ws_id": ws_id, "current_text": "", "is_final": False}
+    return {"session_id": sess_id, "error": None}
+
+
+@tool(cache=False)
+async def asr_send_audio(session_id: str, audio: str, tool_manager=None) -> dict:
+    """发送音频分片（base64，16bit PCM / 16kHz / 单声道）。"""
+    session = _sessions.get(session_id)
+    if not session:
+        return {"text": "", "is_final": True, "error": "session not found"}
+
+    audio_bytes = base64.b64decode(audio)
+    # 发送音频数据（message_type=2），不等待结果
+    audio_header = _make_header(message_type=2)
+    audio_payload = struct.pack(">I", len(audio_bytes)) + audio_bytes
+    try:
+        await ws_send(session["ws_id"], audio_header + audio_payload)
+    except Exception as e:
+        return {"text": session["current_text"], "is_final": True,
+                "error": f"发送音频失败: {e}"}
+    return {"text": session["current_text"], "is_final": session["is_final"], "error": None}
+
+
+@tool(cache=False)
+async def asr_get_result(session_id: str, tool_manager=None) -> dict:
+    """拉取最新识别结果。"""
+    session = _sessions.get(session_id)
+    if not session:
+        return {"text": "", "is_final": True, "error": "session not found"}
+
+    async with _ws_recv_lock:
+        data = await ws_recv(session["ws_id"], timeout=0.1)
+        if data:
+            result = _parse_response(data)
+            if result:
+                text = _extract_text(result)
+                if text:
+                    session["current_text"] = text
+                if _is_final(result):
+                    session["is_final"] = True
+    return {"text": session["current_text"], "is_final": session["is_final"], "error": None}
+
+
+@tool(cache=False)
+async def asr_end_session(session_id: str, tool_manager=None) -> dict:
+    """结束会话，返回最终识别结果。"""
+    session = _sessions.pop(session_id, None)
+    if not session:
+        return {"final_text": "", "error": "session not found"}
+
+    # 发送结束帧（message_type=2, flags=2），必须带 4 字节长度前缀（值为 0）
+    try:
+        end_frame = _make_header(message_type=2, flags=2) + struct.pack(">I", 0)
+        await ws_send(session["ws_id"], end_frame)
+    except Exception as e:
+        return {"final_text": session["current_text"], "error": f"发送结束帧失败: {e}"}
+
+    # 读取最终结果
+    final_text = session["current_text"]
+    while True:
+        data = await ws_recv(session["ws_id"], timeout=0.5)
+        if data is None:
+            break
+        result = _parse_response(data)
+        if result:
+            text = _extract_text(result)
+            if text:
+                final_text = text
+            if _is_final(result) or result.get("code") == 0:
+                break
+
+    try:
+        await ws_close(session["ws_id"])
+    except Exception:
+        pass
+    return {"final_text": final_text, "error": None}
+```
+
+#### 关键点
+
+- **音频格式**：火山 ASR 要求 16bit PCM / 16kHz / 单声道。设备端麦克风采集后需转成该格式，再 base64 编码传给 `send_audio`
+- **结束帧的坑**：结束帧也必须带 4 字节 payload 长度前缀（值为 0），否则火山报 `parse payload size failed: body too short` 并强制断连
+- **并发 recv**：同一 WebSocket 不能并发 `recv`（websockets 库限制），多协程共享连接时用 `asyncio.Lock()` 保护
+- **增量结果**：`get_result` 返回的 `text` 是**累计文本**（服务端回传的是全量），`is_final` 为 True 时表示该句已定稿
+
+#### manifest.json
+
+```json
+{
+  "id": "asr_volcengine",
+  "name": "火山引擎 ASR 提供商",
+  "version": "1.0.0",
+  "permissions": ["network"],
+  "provides": {"asr": ["volcengine"]},
+  "config_fields": [
+    {"key": "api_key", "label": "API Key", "type": "password"},
+    {"key": "resource_id", "label": "Resource ID", "type": "text"},
+    {"key": "model_name", "label": "模型", "type": "text", "default": "bigmodel"}
+  ]
+}
+```
+
+- `permissions: ["network"]`：WebSocket 连接需要 `network` 权限
+- `provides`：声明本插件提供的服务类型（`asr` / `llm` / `tts`），供系统按能力路由
+
+---
+
+### 二、LLM 插件开发（HTTP SSE 流式）
+
+#### 原理
+
+LLM 是**单向流式**：一次 POST 请求，服务端以 SSE（Server-Sent Events）逐行推送 token。OpenAI 兼容接口的 SSE 格式：
+
+```
+data: {"choices":[{"delta":{"content":"你"}}]}
+data: {"choices":[{"delta":{"content":"好"}}]}
+data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}
+data: [DONE]
+```
+
+#### 工具链
+
+| 工具 | 作用 |
+|------|------|
+| `llm_start_chat(messages, config)` | 发起流式请求，返回 `chat_id` |
+| `llm_get_next(chat_id)` | 从 SSE 流读取下一个 token |
+| `llm_end_chat(chat_id)` | 关闭流并清理 |
+
+#### 完整代码
+
+```python
+"""LLM 服务插件示例（OpenAI 兼容接口，真流式）"""
+
+from __future__ import annotations
+
+import json
+import time
+import uuid
+
+from src.use_cases.tools_system import tool
+from src.use_cases._plugin_helpers import (
+    http_stream_open,
+    http_stream_read,
+    http_stream_close,
+)
+
+_sessions: dict[str, dict] = {}
+
+
+@tool(cache=False)
+async def llm_start_chat(messages: list, config: dict | None = None, tool_manager=None) -> dict:
+    """开始 LLM 对话（真流式），返回 chat_id。
+
+    Args:
+        messages: 对话消息列表 [{"role": "user", "content": "..."}, ...]
+        config: 配置，包含 api_key, base_url, model
+
+    Returns:
+        {"chat_id": str, "error": str|null}
+    """
+    cfg = config or {}
+    api_key = cfg.get("api_key", "")
+    if not api_key:
+        return {"chat_id": "", "error": "api_key 未配置"}
+
+    payload = {
+        "model": cfg.get("model", "gpt-4o"),
+        "messages": messages,
+        "stream": True,
+    }
+    stream_id, err = await http_stream_open(
+        "POST",
+        f"{cfg.get('base_url', 'https://api.openai.com/v1')}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        },
+        content=json.dumps(payload),
+        timeout=30.0,
+    )
+    if err:
+        return {"chat_id": "", "error": str(err)}
+
+    chat_id = uuid.uuid4().hex[:8]
+    _sessions[chat_id] = {"stream_id": stream_id, "done": False, "error": None}
+    return {"chat_id": chat_id, "error": None}
+
+
+@tool(cache=False)
+async def llm_get_next(chat_id: str, tool_manager=None) -> dict:
+    """获取下一个 token（从 SSE 流实时读取）。"""
+    session = _sessions.get(chat_id)
+    if not session:
+        return {"token": "", "done": True, "error": "session not found"}
+    if session["error"]:
+        return {"token": "", "done": True, "error": session["error"]}
+    if session["done"]:
+        return {"token": "", "done": True, "error": None}
+
+    # 持续读取 SSE 行，直到拿到一段内容或流结束
+    while True:
+        line, err = await http_stream_read(session["stream_id"], timeout=0.3)
+        if err:
+            session["error"] = str(err)
+            session["done"] = True
+            return {"token": "", "done": True, "error": str(err)}
+        if line is None:
+            # 超时无新数据：LLM 仍在生成，返回空 token 保持轮询
+            return {"token": "", "done": False, "error": None}
+
+        line = line.strip()
+        if not line or line.startswith(":") or not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            session["done"] = True
+            return {"token": "", "done": True, "error": None}
+
+        try:
+            obj = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+
+        choices = obj.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+        content = delta.get("content") or ""
+        if content:
+            return {"token": content, "done": False, "error": None}
+        if choices[0].get("finish_reason"):
+            session["done"] = True
+            return {"token": "", "done": True, "error": None}
+
+
+@tool(cache=False)
+async def llm_end_chat(chat_id: str, tool_manager=None) -> dict:
+    """清理 LLM 会话并关闭流。"""
+    session = _sessions.pop(chat_id, None)
+    if session and session.get("stream_id"):
+        try:
+            await http_stream_close(session["stream_id"])
+        except Exception:
+            pass
+    return {}
+```
+
+#### 关键点
+
+- **真流式 vs 假流式**：`http_stream_open/read` 是逐行读取响应体（真流式），不要用 `http_request` 一次性缓冲后逐字符模拟（假流式，首字延迟高）
+- **SSE 行解析**：跳过空行、注释行（`:` 开头）、非 `data:` 行；`data: [DONE]` 表示流结束
+- **空 token 轮询**：`http_stream_read` 超时返回 `(None, None)`，此时 LLM 仍在生成，应返回空 token 让上层继续轮询，**不要**把它当流结束
+- **推理模型**：部分模型（如 DeepSeek-R1）先输出 `reasoning_content` 再输出 `content`，首字延迟会包含推理耗时，可在日志中记录
+- **兼容性**：OpenAI 兼容接口（DeepSeek、通义千问、Kimi 等）都可用此模板，只需改 `base_url` 和 `model`
+
+#### manifest.json
+
+```json
+{
+  "id": "llm_openai",
+  "name": "OpenAI LLM 提供商",
+  "version": "1.0.0",
+  "permissions": ["network", "env_read"],
+  "provides": {"llm": ["openai"]},
+  "config_fields": [
+    {"key": "api_key", "label": "API Key", "type": "password"},
+    {"key": "base_url", "label": "接口地址", "type": "text", "default": "https://api.openai.com/v1"},
+    {"key": "model", "label": "模型", "type": "text", "default": "gpt-4o"}
+  ]
+}
+```
+
+---
+
+### 三、TTS 插件开发（WebSocket 单向流式）
+
+#### 原理
+
+TTS 是**单向流式**：客户端发一次合成请求，服务端持续推送音频分片。典型协议是火山引擎 V3：
+
+```
+客户端 → 服务端：FullClientRequest（合成请求）
+服务端 → 客户端：AudioOnlyServer（音频分片）→ FullServerResponse（事件帧）→ 结束事件
+```
+
+V3 协议帧格式（火山引擎）：
+
+```
+┌──────────────┬──────────────┬────────────┬──────────────┬──────────────┬──────────────┐
+│  4 字节头部   │  4 字节 event │ session_id │  4 字节 seq   │  4 字节长度   │   payload    │
+└──────────────┴──────────────┴────────────┴──────────────┴──────────────┴──────────────┘
+```
+
+#### 工具链
+
+| 工具 | 作用 |
+|------|------|
+| `tts_start_synthesis(text, config)` | 连接 WebSocket，发送合成请求，返回 `syn_id` |
+| `tts_get_audio(syn_id)` | 接收下一段音频（base64），`done` 标记合成完成 |
+| `tts_end_synthesis(syn_id)` | 清理会话（保留持久连接） |
+
+#### 完整代码
+
+```python
+"""TTS 服务插件示例（火山引擎 V3 协议）"""
+
+from __future__ import annotations
+
+import base64
+import io
+import json
+import struct
+import time
+import uuid
+
+from src.use_cases.tools_system import tool
+from src.use_cases._plugin_helpers import ws_connect, ws_send, ws_recv, ws_close
+
+TTS_URL = "wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream"
+
+_sessions: dict[str, dict] = {}
+
+# 持久连接：跨多句合成复用同一 WebSocket，避免每句新建连接触发限流
+_conn: dict | None = None
+_CONN_IDLE_TIMEOUT = 60.0
+
+# 协议常量
+MSG_TYPE_FULL_CLIENT_REQUEST = 0b1
+MSG_TYPE_AUDIO_ONLY_SERVER = 0b1011
+MSG_TYPE_FULL_SERVER_RESPONSE = 0b1001
+MSG_TYPE_ERROR = 0b1111
+
+FLAG_WITH_EVENT = 0b100
+
+EVENT_FINISH_SESSION = 102
+EVENT_SESSION_FINISHED = 152
+EVENT_SESSION_FAILED = 153
+EVENT_TTS_RESPONSE = 352
+EVENT_TTS_ENDED = 359
+EVENT_CONNECTION_FINISHED = 52
+
+
+def _build_message(type_: int, flags: int = 0, payload: bytes = b"",
+                   event: int | None = None, session_id: str = "") -> bytes:
+    """构造 TTS V3 协议帧。"""
+    buf = io.BytesIO()
+    version = 0x1 << 4
+    header_size = 0x1 << 0
+    byte0 = (version | header_size).to_bytes(1, "big")
+    byte1 = ((type_ << 4) | flags).to_bytes(1, "big")
+    serialization = 0x1 << 4  # JSON
+    compression = 0x0 << 0
+    byte2 = (serialization | compression).to_bytes(1, "big")
+    byte3 = (0).to_bytes(1, "big")
+    buf.write(byte0 + byte1 + byte2 + byte3)
+
+    if flags & FLAG_WITH_EVENT:
+        buf.write(struct.pack(">i", event or 0))
+        if event not in (2, 1, 50, 51):  # 这些事件省略 session_id
+            sid_bytes = session_id.encode("utf-8")
+            buf.write(struct.pack(">I", len(sid_bytes)))
+            if sid_bytes:
+                buf.write(sid_bytes)
+
+    buf.write(struct.pack(">I", len(payload)))
+    if payload:
+        buf.write(payload)
+    return buf.getvalue()
+
+
+def _parse_message(data: bytes) -> dict:
+    """解析 TTS V3 协议帧。"""
+    msg = {"type": None, "flags": 0, "event": None, "session_id": "",
+           "sequence": 0, "payload": b"", "error_code": 0}
+    if len(data) < 3:
+        msg["type"] = MSG_TYPE_ERROR
+        return msg
+
+    buf = io.BytesIO(data)
+    byte0 = buf.read(1)[0]
+    byte1 = buf.read(1)[0]
+    msg["type"] = byte1 >> 4
+    msg["flags"] = byte1 & 0b00001111
+
+    header_size = byte0 & 0b00001111
+    read_size = 3
+    if padding := (header_size * 4) - read_size:
+        buf.read(padding)
+
+    if msg["flags"] & FLAG_WITH_EVENT:
+        ev_bytes = buf.read(4)
+        if len(ev_bytes) == 4:
+            msg["event"] = struct.unpack(">i", ev_bytes)[0]
+        if msg["event"] not in (1, 2, 50, 51):
+            sid_len_bytes = buf.read(4)
+            if len(sid_len_bytes) == 4:
+                sid_len = struct.unpack(">I", sid_len_bytes)[0]
+                if sid_len > 0:
+                    msg["session_id"] = buf.read(sid_len).decode("utf-8", errors="replace")
+
+    if msg["type"] == MSG_TYPE_ERROR:
+        ec_bytes = buf.read(4)
+        if len(ec_bytes) == 4:
+            msg["error_code"] = struct.unpack(">I", ec_bytes)[0]
+    else:
+        seq_bytes = buf.read(4)
+        if len(seq_bytes) == 4:
+            msg["sequence"] = struct.unpack(">i", seq_bytes)[0]
+
+    plen_bytes = buf.read(4)
+    if len(plen_bytes) == 4:
+        plen = struct.unpack(">I", plen_bytes)[0]
+        if plen > 0:
+            msg["payload"] = buf.read(plen)
+    return msg
+
+
+def _build_request_payload(config: dict, text: str) -> bytes:
+    """构造合成请求 JSON payload。"""
+    request = {
+        "user": {"uid": str(uuid.uuid4())},
+        "req_params": {
+            "speaker": config.get("voice_type", "BV001_streaming"),
+            "audio_params": {
+                "format": "mp3",
+                "sample_rate": int(config.get("sample_rate", "24000")),
+                "speed_ratio": float(config.get("speed_ratio", "1.0")),
+                "volume_ratio": float(config.get("volume_ratio", "1.0")),
+                "pitch_ratio": float(config.get("pitch_ratio", "1.0")),
+            },
+            "text": text,
+        },
+    }
+    return json.dumps(request, ensure_ascii=False).encode("utf-8")
+
+
+@tool(cache=False)
+async def tts_start_synthesis(text: str, config: dict | None = None, tool_manager=None) -> dict:
+    """开始 TTS 语音合成，返回 syn_id。
+
+    Args:
+        text: 待合成文本
+        config: 配置，包含 api_key, resource_id, voice_type 等
+
+    Returns:
+        {"syn_id": str, "error": str|null}
+    """
+    global _conn
+    cfg = config or {}
+    api_key = cfg.get("api_key", "")
+    if not api_key:
+        return {"syn_id": "", "error": "api_key 未配置"}
+
+    headers = {
+        "X-Api-Key": api_key,
+        "X-Api-Resource-Id": cfg.get("resource_id", "volc.tts.222222222"),
+        "X-Api-Connect-Id": str(uuid.uuid4()),
+    }
+
+    now = time.time()
+    ws_id = None
+    # 复用空闲持久连接；超时则重建
+    if _conn is not None:
+        if now - _conn["last_used"] > _CONN_IDLE_TIMEOUT:
+            try:
+                await ws_close(_conn["ws_id"])
+            except Exception:
+                pass
+            _conn = None
+        else:
+            ws_id = _conn["ws_id"]
+
+    if ws_id is None:
+        try:
+            ws_id = await ws_connect(TTS_URL, headers)
+        except Exception as e:
+            return {"syn_id": "", "error": f"WebSocket 连接失败: {e}"}
+        _conn = {"ws_id": ws_id, "last_used": now}
+
+    payload = _build_request_payload(cfg, text)
+    request_frame = _build_message(type_=MSG_TYPE_FULL_CLIENT_REQUEST, payload=payload)
+    try:
+        await ws_send(ws_id, request_frame)
+    except Exception:
+        # 连接可能已被服务端关闭，重建后重试
+        try:
+            await ws_close(ws_id)
+        except Exception:
+            pass
+        _conn = None
+        try:
+            ws_id = await ws_connect(TTS_URL, headers)
+            _conn = {"ws_id": ws_id, "last_used": now}
+            await ws_send(ws_id, request_frame)
+        except Exception as e:
+            return {"syn_id": "", "error": f"发送请求失败: {e}"}
+
+    syn_id = uuid.uuid4().hex[:8]
+    _sessions[syn_id] = {"ws_id": ws_id, "done": False, "buffer": []}
+    return {"syn_id": syn_id, "error": None}
+
+
+@tool(cache=False)
+async def tts_get_audio(syn_id: str, tool_manager=None) -> dict:
+    """获取下一段音频数据（base64 编码）。"""
+    global _conn
+    session = _sessions.get(syn_id)
+    if not session:
+        return {"audio_base64": "", "done": True, "error": "session not found"}
+
+    # 优先从缓冲区取
+    if session["buffer"]:
+        return {"audio_base64": session["buffer"].pop(0), "done": False, "error": None}
+    if session["done"]:
+        return {"audio_base64": "", "done": True, "error": None}
+
+    try:
+        data = await ws_recv(session["ws_id"], timeout=0.5)
+    except Exception as e:
+        if _conn and _conn["ws_id"] == session["ws_id"]:
+            _conn = None
+        return {"audio_base64": "", "done": True, "error": f"接收失败: {e}"}
+    if data is None:
+        return {"audio_base64": "", "done": False, "error": None}
+
+    msg = _parse_message(data)
+    msg_type = msg.get("type")
+    msg_event = msg.get("event")
+    payload = msg.get("payload", b"")
+
+    if msg_type == MSG_TYPE_ERROR:
+        session["done"] = True
+        return {"audio_base64": "", "done": True, "error": f"服务端错误: code={msg.get('error_code')}"}
+
+    if msg_type == MSG_TYPE_AUDIO_ONLY_SERVER:
+        if payload:
+            return {"audio_base64": base64.b64encode(payload).decode("ascii"), "done": False, "error": None}
+        return {"audio_base64": "", "done": False, "error": None}
+
+    if msg_type == MSG_TYPE_FULL_SERVER_RESPONSE:
+        if msg_event in (EVENT_SESSION_FINISHED, EVENT_TTS_ENDED):
+            session["done"] = True
+            return {"audio_base64": "", "done": True, "error": None}
+        if msg_event == EVENT_SESSION_FAILED:
+            session["done"] = True
+            return {"audio_base64": "", "done": True, "error": f"合成失败: {payload.decode('utf-8', errors='replace')}"}
+        if msg_event == EVENT_CONNECTION_FINISHED:
+            session["done"] = True
+            if _conn and _conn["ws_id"] == session["ws_id"]:
+                _conn = None
+            return {"audio_base64": "", "done": True, "error": None}
+
+    return {"audio_base64": "", "done": False, "error": None}
+
+
+@tool(cache=False)
+async def tts_end_synthesis(syn_id: str, tool_manager=None) -> dict:
+    """清理 TTS 合成会话（保留持久连接供后续句子复用）。"""
+    global _conn
+    session = _sessions.pop(syn_id, None)
+    if session and _conn and _conn["ws_id"] == session["ws_id"]:
+        _conn["last_used"] = time.time()
+    return {}
+```
+
+#### 关键点
+
+- **持久连接复用**：`_conn` 全局缓存最近一次连接，60 秒内复用，避免每句合成新建连接触发火山限流。`end_synthesis` **不关闭连接**，只刷新最后使用时间
+- **事件驱动结束**：TTS 没有"一次性返回全部"的响应，靠事件帧判断结束——`SessionFinished`(152) / `TTSEnded`(359) 表示合成完成，`SessionFailed`(153) 表示失败
+- **音频分片**：`AudioOnlyServer`(0b1011) 帧的 payload 就是一段 MP3 音频，base64 编码后返回，上层拼接后播放
+- **断线重连**：发送请求失败时，连接可能已被服务端关闭，需关闭旧连接、重建、重发请求
+
+#### manifest.json
+
+```json
+{
+  "id": "tts_volcengine",
+  "name": "火山引擎 TTS 提供商",
+  "version": "1.0.0",
+  "permissions": ["network"],
+  "provides": {"tts": ["volcengine"]},
+  "config_fields": [
+    {"key": "api_key", "label": "API Key", "type": "password"},
+    {"key": "resource_id", "label": "Resource ID", "type": "text"},
+    {"key": "voice_type", "label": "音色", "type": "text", "default": "BV001_streaming"},
+    {"key": "speed_ratio", "label": "语速", "type": "text", "default": "1.0"},
+    {"key": "volume_ratio", "label": "音量", "type": "text", "default": "1.0"},
+    {"key": "pitch_ratio", "label": "音调", "type": "text", "default": "1.0"}
+  ]
+}
+```
+
+---
+
+### 四、调试与排错
+
+#### 日志
+
+插件中可用 `logging.getLogger("plugin.<插件id>")` 打日志，管理员可在 Web 界面查看插件日志：
+
+```python
+import logging
+logger = logging.getLogger("plugin.asr_volcengine")
+
+logger.info(f"收到 {len(data)} bytes, 前16字节: {data[:16].hex()}")
+logger.info(f"解析结果: type={msg['type']}, event={msg['event']}")
+```
+
+#### 常见问题
+
+| 现象 | 原因 | 排查 |
+|------|------|------|
+| 连接失败 | API Key 错误 / 网络不通 | 检查 `config` 里的 `api_key`，确认服务地址可达 |
+| 识别/合成无结果 | 协议帧拼错 | 打印收发帧的 hex 前 16 字节，对照协议文档 |
+| 第二次调用返回旧结果 | 忘了 `cache=False` | 所有语音服务工具必须 `@tool(cache=False)` |
+| 报 `cannot call recv while another coroutine is running` | 并发 recv | 用 `asyncio.Lock()` 保护 `ws_recv` |
+| TTS 每句都新建连接被限流 | 未复用连接 | 实现持久连接缓存（见上文 `_conn`） |
+| 会话 ID 无效 | 会话被清理 | 确认 `start` 返回的 ID 与后续调用一致，超时后会话可能已过期 |
+
+#### 参考实现
+
+| 插件 | 协议 | 文件 |
+|------|------|------|
+| 火山引擎 ASR | SAUC | `data/plugins/installed/asr_volcengine/plugin.py` |
+| OpenAI LLM | SSE | `data/plugins/installed/llm_openai/plugin.py` |
+| 火山引擎 TTS | V3 | `data/plugins/installed/tts_volcengine/plugin.py` |
+
+---
+
 ## 发布与市场
 
 ### 开发者模式

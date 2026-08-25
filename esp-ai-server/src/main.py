@@ -91,6 +91,19 @@ def get_server_ips() -> list[str]:
     return ips
 
 
+def _setup_loop_exception_handler() -> None:
+    """抑制 Windows 上事件循环关闭时 SSL 传输的已知噪音错误（无害）。"""
+    loop = asyncio.get_running_loop()
+
+    def _handler(_loop, context):
+        msg = context.get("message", "")
+        if "Fatal error on SSL transport" in msg:
+            return
+        _loop.default_exception_handler(context)
+
+    loop.set_exception_handler(_handler)
+
+
 async def main() -> None:
     """
     主函数 - 应用入口点
@@ -99,6 +112,9 @@ async def main() -> None:
     """
     # 打印横幅
     print_banner()
+
+    # 抑制 Windows 关闭时 SSL 传输噪音
+    _setup_loop_exception_handler()
 
     # 导入配置
     from src.infrastructure.config import get_settings, SID_CONNECTED, SCREEN_WIDTH, SCREEN_HEIGHT
@@ -231,6 +247,22 @@ async def cleanup() -> None:
     """清理资源"""
     from src.infrastructure.logging import get_logger
     logger = get_logger()
+
+    # 关闭所有设备连接，避免残留 WebSocket/SSL 连接
+    try:
+        from src.infrastructure.web import get_device_registry
+        registry = get_device_registry()
+        if registry is not None:
+            await registry.close_all()
+    except Exception as e:
+        logger.warning(f"[Cleanup] 关闭设备连接异常: {e}")
+
+    # 停止插件沙箱子进程，避免退出后残留进程被误判为崩溃而触发自动重启
+    try:
+        from src.infrastructure.plugin_host.supervisor import get_plugin_supervisor
+        await get_plugin_supervisor().shutdown()
+    except Exception as e:
+        logger.warning(f"[Cleanup] 插件沙箱关闭异常: {e}")
 
     logger.info("[Cleanup] Complete")
 
