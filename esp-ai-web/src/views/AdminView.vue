@@ -32,6 +32,38 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
           <span>系统运维</span>
         </button>
+        <button class="nav-item" :class="{ active: section === 'llm_configs' }" @click="section = 'llm_configs'">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 0 1 10 10c0 2.5-1 4.7-2.5 6.3l1.5 3.7-4-1.5A10 10 0 1 1 12 2z"/><path d="M12 6v6l4 2"/></svg>
+          <span>LLM 配置</span>
+        </button>
+        <button class="nav-item" :class="{ active: section === 'conversations' }" @click="section = 'conversations'">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          <span>对话记录</span>
+        </button>
+        <button class="nav-item" :class="{ active: section === 'ws_monitor' }" @click="section = 'ws_monitor'">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
+          <span>连接监控</span>
+        </button>
+        <button class="nav-item" :class="{ active: section === 'health' }" @click="section = 'health'">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          <span>健康检查</span>
+        </button>
+        <button class="nav-item" :class="{ active: section === 'oplogs' }" @click="section = 'oplogs'">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          <span>操作日志</span>
+        </button>
+        <button class="nav-item" :class="{ active: section === 'emojis' }" @click="section = 'emojis'">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+          <span>表情包</span>
+        </button>
+        <button class="nav-item" :class="{ active: section === 'tasks' }" @click="section = 'tasks'">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+          <span>定时任务</span>
+        </button>
+        <button class="nav-item" :class="{ active: section === 'export' }" @click="section = 'export'">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span>数据导出</span>
+        </button>
       </nav>
 
       <div class="sidebar-footer">
@@ -285,6 +317,8 @@
                           <button class="btn btn-mint btn-xs" :disabled="savingDevice" @click="saveDevice(d)">保存</button>
                           <button class="btn btn-ghost btn-xs" :disabled="savingDevice" @click="cancelEditDevice">取消</button>
                         </template>
+                        <button v-if="!d.is_banned" class="btn btn-ghost btn-xs" style="color:var(--danger)" @click="banDevice(d)">封禁</button>
+                        <button v-if="d.is_banned" class="btn btn-ghost btn-xs" style="color:#16a34a" @click="unbanDevice(d)">解封</button>
                         <button class="btn btn-danger btn-xs" :disabled="savingDevice" @click="unbindDevice(d)">解绑</button>
                         <button v-if="!d.user_id" class="btn btn-danger btn-xs" :disabled="savingDevice" @click="deleteDevice(d)">删除</button>
                       </div>
@@ -541,6 +575,307 @@
             <pre class="log-view">{{ logLines.join('\n') || '暂无日志' }}</pre>
           </div>
         </section>
+
+        <!-- LLM 配置 -->
+        <section v-else-if="section === 'llm_configs'" class="admin-section">
+          <div class="action-bar">
+            <div class="action-info">
+              <p class="action-title">设备 LLM 配置</p>
+              <p class="action-sub">查看和编辑各设备的 LLM/ASR/TTS 参数，不配置则使用环境变量默认值</p>
+            </div>
+            <div class="row-actions">
+              <button class="btn btn-ghost" :disabled="loadingLlmConfigs" @click="loadLlmConfigs()">刷新</button>
+            </div>
+          </div>
+          <div class="table-card">
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>设备</th><th>LLM 类型</th><th>模型</th><th>ASR</th><th>TTS</th><th>记忆</th><th>操作</th></tr></thead>
+                <tbody>
+                  <tr v-for="c in llmConfigs" :key="c.device_id">
+                    <td data-label="设备"><strong>{{ c.name || c.device_id.slice(0,16) }}</strong></td>
+                    <td data-label="LLM 类型">{{ c.llm_type || '—' }}</td>
+                    <td data-label="模型">{{ c.llm_model || '—' }}</td>
+                    <td data-label="ASR">{{ c.asr_provider || '—' }}</td>
+                    <td data-label="TTS">{{ c.tts_type || '—' }}</td>
+                    <td data-label="记忆">{{ c.llm_memory_enabled ? '开' : '关' }}</td>
+                    <td data-label="操作"><button class="btn btn-ghost btn-xs" @click="editLlmConfig(c)">编辑</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-if="!llmConfigs.length" class="table-empty" style="padding:40px;text-align:center">
+              <p style="font-size:14px;font-weight:600;margin-bottom:8px">暂无设备 LLM 配置</p>
+              <p style="font-size:12px;color:var(--text-dim)">设备连接后，可在此查看和编辑各设备的 LLM/ASR/TTS 参数<br>不配置的设备会使用环境变量中的默认值</p>
+            </div>
+          </div>
+          <!-- 编辑弹窗 -->
+          <div v-if="llmEditVisible" class="modal-mask" @click.self="llmEditVisible = false">
+            <div class="modal-card">
+              <h3 class="modal-title">编辑 LLM 配置 - {{ llmEditTarget?.name || llmEditTarget?.device_id?.slice(0,16) }}</h3>
+              <div class="modal-body">
+                <label class="form-label">LLM 类型</label>
+                <input class="form-input" v-model="llmEditForm.llm_type" placeholder="如 openai / deepseek" />
+                <span class="form-hint">选择大模型提供商，如 openai、deepseek、qwen 等</span>
+                <label class="form-label">API Key</label>
+                <input class="form-input" v-model="llmEditForm.llm_api_key" placeholder="留空则不修改" />
+                <span class="form-hint">大模型 API 的密钥，留空保持原有值</span>
+                <label class="form-label">Base URL</label>
+                <input class="form-input" v-model="llmEditForm.llm_base_url" placeholder="如 https://api.openai.com/v1" />
+                <span class="form-hint">API 地址，兼容 OpenAI 格式的接口地址</span>
+                <label class="form-label">模型</label>
+                <input class="form-input" v-model="llmEditForm.llm_model" placeholder="如 gpt-4o / deepseek-chat" />
+                <span class="form-hint">使用的模型名称，需与 LLM 提供商匹配</span>
+                <label class="form-label">ASR 提供商</label>
+                <input class="form-input" v-model="llmEditForm.asr_provider" placeholder="如 volc / tencent" />
+                <span class="form-hint">语音识别服务商，如火山引擎(volc)、腾讯云(tencent)</span>
+                <label class="form-label">TTS 类型</label>
+                <input class="form-input" v-model="llmEditForm.tts_type" placeholder="如 volc_tts" />
+                <span class="form-hint">语音合成类型，如火山引擎TTS(volc_tts)</span>
+                <label class="form-checkbox"><input type="checkbox" v-model="llmEditForm.llm_memory_enabled" /> 开启记忆</label>
+                <span class="form-hint" style="margin-left:24px;margin-top:0">开启后设备会记住之前的对话内容</span>
+              </div>
+              <div class="modal-actions">
+                <button class="btn btn-mint" :disabled="savingLlmConfig" @click="saveLlmConfig()">{{ savingLlmConfig ? '保存中…' : '保存' }}</button>
+                <button class="btn btn-ghost" @click="llmEditVisible = false">取消</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 对话记录 -->
+        <section v-else-if="section === 'conversations'" class="admin-section">
+          <div class="action-bar">
+            <div class="action-info">
+              <p class="action-title">对话记录</p>
+              <p class="action-sub">浏览各设备的对话历史</p>
+            </div>
+            <div class="row-actions">
+              <select class="form-input" style="width:200px" v-model="convDeviceFilter" @change="loadConversations()">
+                <option value="">全部设备</option>
+                <option v-for="d in allDevices" :key="d.device_id" :value="d.device_id">{{ d.name || d.device_id.slice(0,16) }}</option>
+              </select>
+              <button class="btn btn-ghost" :disabled="loadingConvs" @click="loadConversations()">刷新</button>
+            </div>
+          </div>
+          <div v-for="conv in conversations" :key="conv.device_id" class="table-card" style="margin-bottom:14px">
+            <div class="table-head">
+              <h3 class="table-title">{{ conv.device_name || conv.device_id.slice(0,16) }}</h3>
+              <span class="table-sub">{{ conv.messages?.length || 0 }} 条消息</span>
+            </div>
+            <div v-if="!conv.messages?.length" class="table-empty">暂无对话</div>
+            <div v-else class="conv-list">
+              <div v-for="(m, i) in conv.messages" :key="i" class="conv-item" :class="m.role">
+                <span class="conv-role">{{ m.role === 'user' ? '👤' : '🤖' }}</span>
+                <span class="conv-text">{{ m.content }}</span>
+                <span class="conv-time">{{ formatDate(m.timestamp) }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-if="!conversations.length" class="table-empty" style="padding:40px;text-align:center">
+            <p style="font-size:14px;font-weight:600;margin-bottom:8px">暂无对话记录</p>
+            <p style="font-size:12px;color:var(--text-dim)">设备与用户对话后，对话记录会自动出现在这里</p>
+          </div>
+        </section>
+
+        <!-- 连接监控 -->
+        <section v-else-if="section === 'ws_monitor'" class="admin-section">
+          <div class="stat-grid">
+            <div class="stat-card card-in">
+              <span class="stat-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0"/></svg></span>
+              <div class="stat-info"><p class="stat-value">{{ wsConnections.length }}</p><p class="stat-label">总连接数</p></div>
+            </div>
+            <div class="stat-card card-in">
+              <span class="stat-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
+              <div class="stat-info"><p class="stat-value">{{ wsConnections.filter(c=>c.connected).length }}</p><p class="stat-label">在线</p></div>
+            </div>
+            <div class="stat-card card-in">
+              <span class="stat-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>
+              <div class="stat-info"><p class="stat-value">{{ wsConnections.filter(c=>!c.connected).length }}</p><p class="stat-label">离线</p></div>
+            </div>
+          </div>
+          <div class="action-bar">
+            <div class="action-info"><p class="action-title">连接详情</p></div>
+            <button class="btn btn-ghost" :disabled="loadingWs" @click="loadWsStatus()">刷新</button>
+          </div>
+          <div class="table-card">
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>设备 ID</th><th>MAC</th><th>状态</th><th>会话 ID</th><th>最后活跃</th></tr></thead>
+                <tbody>
+                  <tr v-for="c in wsConnections" :key="c.device_id">
+                    <td data-label="设备 ID">{{ c.device_id.slice(0,20) }}</td>
+                    <td data-label="MAC">{{ c.mac || '—' }}</td>
+                    <td data-label="状态"><span class="status-badge" :class="c.connected ? 'online' : 'offline'">{{ c.connected ? '在线' : '离线' }}</span></td>
+                    <td data-label="会话 ID">{{ c.session_id?.slice(0,16) || '—' }}</td>
+                    <td data-label="最后活跃">{{ formatDate(c.last_seen) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-if="!wsConnections.length" class="table-empty" style="padding:40px;text-align:center">
+              <p style="font-size:14px;font-weight:600;margin-bottom:8px">暂无活跃连接</p>
+              <p style="font-size:12px;color:var(--text-dim)">设备在线时会显示在这里，包含会话 ID 和最后活跃时间</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- 健康检查 -->
+        <section v-else-if="section === 'health'" class="admin-section">
+          <div class="action-bar">
+            <div class="action-info"><p class="action-title">系统健康检查</p><p class="action-sub">一键检测各组件运行状态</p></div>
+            <button class="btn btn-mint" :disabled="checkingHealth" @click="runHealthCheck()">{{ checkingHealth ? '检查中…' : '开始检查' }}</button>
+          </div>
+          <div v-if="healthResult" class="table-card">
+            <div class="table-head">
+              <h3 class="table-title">检查结果</h3>
+              <span class="status-badge" :class="healthResult.overall === 'ok' ? 'online' : 'offline'">{{ healthResult.overall === 'ok' ? '正常' : '异常' }}</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>检查项</th><th>状态</th><th>详情</th></tr></thead>
+                <tbody>
+                  <tr v-for="(check, name) in healthResult.checks" :key="name">
+                    <td data-label="检查项"><strong>{{ name }}</strong></td>
+                    <td data-label="状态"><span class="status-badge" :class="check.status === 'ok' ? 'online' : 'offline'">{{ check.status === 'ok' ? '正常' : '异常' }}</span></td>
+                    <td data-label="详情" class="cell-muted">{{ formatHealthDetail(check) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- 操作日志 -->
+        <section v-else-if="section === 'oplogs'" class="admin-section">
+          <div class="action-bar">
+            <div class="action-info"><p class="action-title">操作日志</p><p class="action-sub">管理员操作审计记录</p></div>
+            <button class="btn btn-ghost" :disabled="loadingOplogs" @click="loadOpLogs()">刷新</button>
+          </div>
+          <div class="table-card">
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>时间</th><th>管理员</th><th>操作</th><th>详情</th></tr></thead>
+                <tbody>
+                  <tr v-for="(log, i) in opLogs" :key="i">
+                    <td data-label="时间" class="cell-muted">{{ formatDate(log.time) }}</td>
+                    <td data-label="管理员">{{ log.admin }}</td>
+                    <td data-label="操作">{{ log.action }}</td>
+                    <td data-label="详情" class="cell-muted">{{ log.detail || '—' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-if="!opLogs.length" class="table-empty" style="padding:40px;text-align:center">
+            <p style="font-size:14px;font-weight:600;margin-bottom:8px">暂无操作日志</p>
+            <p style="font-size:12px;color:var(--text-dim)">执行封禁/解封设备、更新系统设置等管理操作后，日志会自动记录在这里</p>
+          </div>
+          </div>
+        </section>
+
+        <!-- 表情包 -->
+<section v-else-if="section === 'emojis'" class="admin-section">
+  <div class="action-bar">
+    <div class="action-info"><p class="action-title">表情包管理</p><p class="action-sub">管理全局表情包库</p></div>
+    <button class="btn btn-ghost" :disabled="loadingEmojis" @click="loadEmojis()">刷新</button>
+  </div>
+  <div class="emo-grid">
+    <div v-for="p in emojiPacks" :key="p.name" class="emo-card">
+      <div class="emo-card-header">
+        <span class="emo-pack-name">{{ p.display_name || p.name }}</span>
+        <span class="emo-pack-count">{{ p.count }} 个</span>
+      </div>
+      <div class="emo-previews">
+        <div v-for="emo in (p.emos || [])" :key="emo.filename" class="emo-item-wrap">
+          <img :src="emo.url" :alt="emo.name" class="emo-thumb" @error="$event.target.style.display='none'" />
+          <button class="emo-del-btn" title="删除此表情" @click="deleteEmojiFile(p.name, emo.filename)">×</button>
+          <span class="emo-name-label">{{ emo.name }}</span>
+        </div>
+        <div v-if="!p.emos || !p.emos.length" class="emo-empty">无预览图</div>
+      </div>
+      <div class="emo-card-actions">
+        <button class="btn btn-ghost btn-xs" style="color:var(--danger)" @click="deleteEmoji(p.name)">删除整个包</button>
+      </div>
+    </div>
+  </div>
+  <div v-if="!emojiPacks.length" class="table-empty">暂无表情包</div>
+</section>
+
+        <!-- 定时任务 -->
+<section v-else-if="section === 'tasks'" class="admin-section">
+  <div class="action-bar">
+    <div class="action-info"><p class="action-title">定时任务</p><p class="action-sub">管理服务端定时任务（如定时播报、定时提醒）</p></div>
+    <div class="row-actions">
+      <button class="btn btn-mint btn-sm" @click="showTaskModal = true">创建任务</button>
+      <button class="btn btn-ghost" :disabled="loadingTasks" @click="loadScheduledTasks()">刷新</button>
+    </div>
+  </div>
+  <div class="table-card">
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>名称</th><th>类型</th><th>执行时间</th><th>创建时间</th><th>操作</th></tr></thead>
+        <tbody>
+          <tr v-for="t in scheduledTasks" :key="t.id">
+            <td data-label="名称">{{ t.name || '—' }}</td>
+            <td data-label="类型">{{ t.type || t.action || '手动' }}</td>
+            <td data-label="执行时间">{{ t.cron || t.schedule || '—' }}</td>
+            <td data-label="创建时间" class="cell-muted">{{ formatDate(t.created_at) }}</td>
+            <td data-label="操作"><button class="btn btn-ghost btn-xs" style="color:var(--danger)" @click="deleteScheduledTask(t.id)">删除</button></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div v-if="!scheduledTasks.length" class="table-empty">暂无定时任务</div>
+  </div>
+</section>
+
+<!-- 创建定时任务弹窗 -->
+<div v-if="showTaskModal" class="modal-overlay" @click.self="showTaskModal = false">
+  <div class="modal-card">
+    <div class="modal-title">创建定时任务</div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div>
+        <label class="form-label">任务名称</label>
+        <input class="form-input" v-model="taskForm.name" placeholder="如：早安播报" />
+      </div>
+      <div>
+        <label class="form-label">任务类型</label>
+        <select class="form-input" v-model="taskForm.type">
+          <option value="cron">Cron 定时</option>
+          <option value="interval">间隔执行</option>
+        </select>
+      </div>
+      <div>
+        <label class="form-label">执行计划</label>
+        <input class="form-input" v-model="taskForm.schedule" placeholder="cron: 0 8 * * * 或 间隔: 3600" />
+        <div style="font-size:11px;color:var(--text-dim);margin-top:4px">cron 格式：分 时 日 月 周，如 0 8 * * * 表示每天早上8点</div>
+      </div>
+      <div>
+        <label class="form-label">执行内容</label>
+        <input class="form-input" v-model="taskForm.action" placeholder="如：say 早安" />
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" @click="showTaskModal = false">取消</button>
+      <button class="btn btn-mint" :disabled="savingTask" @click="createScheduledTask()">{{ savingTask ? '创建中…' : '创建' }}</button>
+    </div>
+  </div>
+</div>
+
+        <!-- 数据导出 -->
+        <section v-else-if="section === 'export'" class="admin-section">
+          <div class="stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr))">
+            <div class="stat-card card-in" style="cursor:pointer" @click="exportData('users')">
+              <span class="stat-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg></span>
+              <div class="stat-info"><p class="stat-value">导出用户</p><p class="stat-label">用户列表 CSV</p></div>
+            </div>
+            <div class="stat-card card-in" style="cursor:pointer" @click="exportData('devices')">
+              <span class="stat-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/></svg></span>
+              <div class="stat-info"><p class="stat-value">导出设备</p><p class="stat-label">设备列表 CSV</p></div>
+            </div>
+          </div>
+        </section>
+
           </div>
         </transition>
       </div>
@@ -628,15 +963,23 @@ const editDeviceForm = ref({})
 const savingDevice = ref(false)
 
 const currentUserId = computed(() => getUser()?.user_id || '')
-const sectionTitle = computed(() => ({ stats: '仪表盘', users: '用户管理', devices: '设备管理', plugins: '插件管理', market: '市场管理', system: '系统运维' }[section.value] || ''))
-const sectionSub = computed(() => ({
-  stats: '系统总览与服务性能',
-  users: '管理角色、设备上限与账号状态',
-  devices: '查看全部设备与归属，支持重命名和解绑',
-  plugins: '上传 zip 安装插件、更新、卸载、热加载',
-  market: '管理插件上下架与推荐状态',
-  system: '数据库备份与服务日志',
-}[section.value] || ''))
+const sectionTitle = computed(() => ({ stats: '仪表盘', users: '用户管理', devices: '设备管理', plugins: '插件管理', market: '市场管理', system: '系统运维', llm_configs: '全局配置', conversations: '对话记录', ws_monitor: '连接监控', health: '健康检查', oplogs: '操作日志', emojis: '表情包', tasks: '定时任务', export: '数据导出' }[section.value] || ''))
+	const sectionSub = computed(() => ({
+	  stats: '系统总览与服务性能',
+	  users: '管理角色、设备上限与账号状态',
+	  devices: '查看全部设备与归属，支持重命名、解绑、封禁',
+	  plugins: '上传 zip 安装插件、更新、卸载、热加载',
+	  market: '管理插件上下架与推荐状态',
+	  system: '数据库备份与服务日志',
+	  llm_configs: '查看和编辑各设备的 LLM/ASR/TTS 配置',
+	  conversations: '浏览所有设备的对话历史记录',
+  ws_monitor: '实时查看 WebSocket 连接状态',
+	  health: '一键检测系统各组件运行状态',
+	  oplogs: '管理员操作审计日志',
+	  emojis: '管理全局表情包库',
+	  tasks: '管理服务端定时任务',
+	  export: '导出用户/设备数据为 CSV',
+	}[section.value] || ''))
 
 const deviceModalVisible = ref(false)
 const deviceModalTitle = ref('')
@@ -674,6 +1017,31 @@ const backups = ref([])
 const loadingBackups = ref(false)
 const backingUp = ref(false)
 const broadcastText = ref('')
+
+// 新增板块状态
+const llmConfigs = ref([])
+const loadingLlmConfigs = ref(false)
+const llmEditVisible = ref(false)
+const llmEditTarget = ref(null)
+const llmEditForm = ref({})
+const savingLlmConfig = ref(false)
+const conversations = ref([])
+const loadingConvs = ref(false)
+const convDeviceFilter = ref('')
+const allDevices = ref([])
+const wsConnections = ref([])
+const loadingWs = ref(false)
+const healthResult = ref(null)
+const checkingHealth = ref(false)
+const opLogs = ref([])
+const loadingOplogs = ref(false)
+const emojiPacks = ref([])
+const loadingEmojis = ref(false)
+const scheduledTasks = ref([])
+	const loadingTasks = ref(false)
+	const showTaskModal = ref(false)
+	const savingTask = ref(false)
+	const taskForm = ref({ name: '', type: 'cron', schedule: '', action: '' })
 
 async function loadStats() {
   try {
@@ -985,6 +1353,207 @@ async function deleteBackup(name) {
   } catch (e) { emit('toast', '删除失败') }
 }
 
+// 设备封禁/解封
+async function banDevice(d) {
+  const reason = prompt('请输入封禁原因（可选）:', '')
+  if (reason === null) return
+  try {
+    const res = await api.adminBanDevice(d.device_id, reason)
+    if (res.status === 200 && res.data?.code === 0) { emit('toast', '设备已封禁'); loadDevices() }
+    else emit('toast', res.data?.message || res.data?.detail || '封禁失败')
+  } catch { emit('toast', '封禁失败') }
+}
+
+async function unbanDevice(d) {
+  const ok = await showConfirm({ title: '解封设备', message: `确定解封设备「${d.name || d.device_id}」吗？`, confirmText: '确认解封', danger: false })
+  if (!ok) return
+  try {
+    const res = await api.adminUnbanDevice(d.device_id)
+    if (res.status === 200 && res.data?.code === 0) { emit('toast', '设备已解封'); loadDevices() }
+    else emit('toast', res.data?.message || res.data?.detail || '解封失败')
+  } catch { emit('toast', '解封失败') }
+}
+
+// LLM 配置
+async function loadLlmConfigs() {
+  loadingLlmConfigs.value = true
+  try {
+    const res = await api.adminLlmConfigs()
+    if (res.status === 200 && res.data?.code === 0) llmConfigs.value = res.data.data?.configs || []
+    else emit('toast', '加载设备 LLM 配置失败')
+  } catch { emit('toast', '加载设备 LLM 配置失败') }
+  loadingLlmConfigs.value = false
+}
+
+function editLlmConfig(c) {
+  llmEditTarget.value = c
+  llmEditForm.value = { 
+    llm_type: c.llm_type || '', llm_api_key: '', llm_base_url: c.llm_base_url || '', 
+    llm_model: c.llm_model || '', asr_provider: c.asr_provider || '', tts_type: c.tts_type || '',
+    llm_memory_enabled: c.llm_memory_enabled !== false
+  }
+  llmEditVisible.value = true
+}
+
+async function saveLlmConfig() {
+  savingLlmConfig.value = true
+  try {
+    const data = { ...llmEditForm.value }
+    if (!data.llm_api_key) delete data.llm_api_key
+    const res = await api.adminUpdateLlmConfig(llmEditTarget.value.device_id, data)
+    if (res.status === 200 && res.data?.code === 0) { emit('toast', 'LLM 配置已更新'); llmEditVisible.value = false; loadLlmConfigs() }
+    else emit('toast', res.data?.message || res.data?.detail || '保存失败')
+  } catch { emit('toast', '保存失败') }
+  savingLlmConfig.value = false
+}
+
+// 对话记录
+async function loadConversations() {
+  loadingConvs.value = true
+  try {
+    const params = convDeviceFilter.value ? { device_id: convDeviceFilter.value } : {}
+    const res = await api.adminConversations(params)
+    if (res.status === 200 && res.data?.code === 0) conversations.value = res.data.data?.conversations || []
+    else emit('toast', '加载对话记录失败')
+  } catch { emit('toast', '加载对话记录失败') }
+  loadingConvs.value = false
+}
+
+// WebSocket 状态
+async function loadWsStatus() {
+  loadingWs.value = true
+  try {
+    const res = await api.adminWsStatus()
+    if (res.status === 200 && res.data?.code === 0) wsConnections.value = res.data.data?.connections || []
+    else emit('toast', '加载连接状态失败')
+  } catch { emit('toast', '加载连接状态失败') }
+  loadingWs.value = false
+}
+
+// 健康检查
+async function runHealthCheck() {
+  checkingHealth.value = true
+  try {
+    const res = await api.adminHealth()
+    if (res.status === 200 && res.data?.code === 0) healthResult.value = res.data.data
+    else emit('toast', '健康检查失败')
+  } catch { emit('toast', '健康检查失败') }
+  checkingHealth.value = false
+}
+
+function formatHealthDetail(check) {
+  if (check.status === 'ok') {
+    if (check.latency_ms !== undefined) return `延迟 ${check.latency_ms}ms`
+    if (check.free_gb !== undefined) return `总量 ${check.total_gb}GB, 剩余 ${check.free_gb}GB, 使用 ${check.usage_pct}%`
+    if (check.device_count !== undefined) return `${check.device_count} 个设备`
+    if (check.asr_configured !== undefined) return `ASR ${check.asr_configured} / LLM ${check.llm_configured} / TTS ${check.tts_configured}`
+    return '正常'
+  }
+  return check.message || '异常'
+}
+
+// 操作日志
+async function loadOpLogs() {
+  loadingOplogs.value = true
+  try {
+    const res = await api.adminOpLogs()
+    if (res.status === 200 && res.data?.code === 0) opLogs.value = res.data.data?.logs || []
+    else emit('toast', '加载操作日志失败')
+  } catch { emit('toast', '加载操作日志失败') }
+  loadingOplogs.value = false
+}
+
+// 表情包
+async function loadEmojis() {
+  loadingEmojis.value = true
+  try {
+    const res = await api.adminEmojis()
+    if (res.status === 200 && res.data?.code === 0) emojiPacks.value = res.data.data?.packs || []
+    else emit('toast', '加载表情包失败')
+  } catch { emit('toast', '加载表情包失败') }
+  loadingEmojis.value = false
+}
+
+async function deleteEmoji(name) {
+  const ok = await showConfirm({ title: '删除表情包', message: `确定删除表情包「${name}」吗？`, confirmText: '确认删除', danger: true })
+  if (!ok) return
+  try {
+    const res = await api.adminDeleteEmoji(name)
+    if (res.status === 200 && res.data?.code === 0) { emit('toast', '表情包已删除'); loadEmojis() }
+    else emit('toast', '删除失败')
+  } catch { emit('toast', '删除失败') }
+}
+
+async function deleteEmojiFile(packName, filename) {
+  const ok = await showConfirm({ title: '删除表情', message: `确定删除「${filename}」吗？`, confirmText: '确认删除', danger: true })
+  if (!ok) return
+  try {
+    const res = await api.adminDeleteEmojiFile(packName, filename)
+    if (res.status === 200 && res.data?.code === 0) { emit('toast', '表情已删除'); loadEmojis() }
+    else emit('toast', '删除失败')
+  } catch { emit('toast', '删除失败') }
+}
+
+// 定时任务
+async function loadScheduledTasks() {
+  loadingTasks.value = true
+  try {
+    const res = await api.adminScheduledTasks()
+    if (res.status === 200 && res.data?.code === 0) scheduledTasks.value = res.data.data?.tasks || []
+    else emit('toast', '加载定时任务失败')
+  } catch { emit('toast', '加载定时任务失败') }
+  loadingTasks.value = false
+}
+
+async function deleteScheduledTask(id) {
+  const ok = await showConfirm({ title: '删除定时任务', message: '确定删除此定时任务吗？', confirmText: '确认删除', danger: true })
+  if (!ok) return
+  try {
+    const res = await api.adminDeleteScheduledTask(id)
+    if (res.status === 200 && res.data?.code === 0) { emit('toast', '定时任务已删除'); loadScheduledTasks() }
+    else emit('toast', '删除失败')
+  } catch { emit('toast', '删除失败') }
+}
+
+async function createScheduledTask() {
+  if (!taskForm.value.name) { emit('toast', '请输入任务名称'); return }
+  if (!taskForm.value.schedule) { emit('toast', '请输入执行计划'); return }
+  savingTask.value = true
+  try {
+    const res = await api.adminCreateScheduledTask({ ...taskForm.value })
+    if (res.status === 200 && res.data?.code === 0) {
+      emit('toast', '定时任务已创建')
+      showTaskModal.value = false
+      taskForm.value = { name: '', type: 'cron', schedule: '', action: '' }
+      loadScheduledTasks()
+    } else emit('toast', res.data?.message || '创建失败')
+  } catch { emit('toast', '创建失败') }
+  savingTask.value = false
+}
+
+// 数据导出
+function exportData(type) {
+  const token = getToken()
+  fetch(`/api/v1/admin/export/${type}`, {
+    headers: { Authorization: 'Bearer ' + token }
+  })
+  .then(r => { if (!r.ok) throw new Error(); return r.blob() })
+  .then(blob => {
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob); a.download = type + '.csv'; a.click()
+    URL.revokeObjectURL(a.href)
+  })
+  .catch(() => emit('toast', '导出失败'))
+}
+
+// 加载所有设备（用于过滤器）
+async function loadAllDevices() {
+  try {
+    const res = await api.adminDevices()
+    if (res.status === 200 && res.data?.code === 0) allDevices.value = res.data.data?.devices || []
+  } catch {}
+}
+
 function formatDate(ts) {
   if (!ts) return '—'
   const d = new Date(ts * 1000)
@@ -997,6 +1566,12 @@ watch(section, (val) => {
   if (val === 'plugins') loadInstalledPlugins()
   else if (val === 'market') { loadMarketplacePlugins(); loadMarketplaceReviews() }
   else if (val === 'system') { loadSystemInfo(); loadBackups(); loadLogs() }
+  else if (val === 'llm_configs') loadLlmConfigs()
+  else if (val === 'conversations') { loadAllDevices(); loadConversations() }
+  else if (val === 'ws_monitor') loadWsStatus()
+  else if (val === 'oplogs') loadOpLogs()
+  else if (val === 'emojis') loadEmojis()
+  else if (val === 'tasks') loadScheduledTasks()
 })
 </script>
 
@@ -1403,6 +1978,12 @@ tbody tr:hover { background: var(--mint-softer); }
   border-top: 1px solid var(--glass-border-soft);
   background: var(--glass-bg-strong);
 }
+.modal-actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--glass-border-soft);
+  background: var(--glass-bg-strong);
+}
 .device-modal-list { display: flex; flex-direction: column; gap: 8px; }
 .device-modal-item {
   display: flex; align-items: center; gap: 10px;
@@ -1543,4 +2124,160 @@ tbody tr:hover { background: var(--mint-softer); }
   table { min-width: 900px; }
   th, td { padding: 16px 22px; font-size: 14px; }
 }
-</style>
+/* ===== 新增板块样式 ===== */
+.conv-list { padding: 0; margin: 0; }
+.conv-item { display: flex; align-items: flex-start; gap: 10px; padding: 10px 20px; border-bottom: 1px solid var(--glass-border-soft); font-size: 13px; }
+.conv-item:last-child { border-bottom: none; }
+.conv-item.user { background: rgba(16,185,129,0.03); }
+.conv-item.assistant { background: transparent; }
+.conv-role { font-size: 16px; flex-shrink: 0; width: 28px; text-align: center; }
+.conv-text { flex: 1; min-width: 0; word-break: break-all; line-height: 1.5; }
+.conv-time { font-size: 11px; color: var(--text-dim); flex-shrink: 0; white-space: nowrap; }
+.status-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+.status-badge.online { background: rgba(34,197,94,0.12); color: #16a34a; }
+.status-badge.offline { background: rgba(239,68,68,0.1); color: #dc2626; }
+.form-label { font-size: 12px; font-weight: 600; color: var(--text-sub); margin-top: 8px; }
+.form-label:first-child { margin-top: 0; }
+.form-input { width: 100%; padding: 8px 12px; border: 1px solid var(--glass-border); border-radius: 8px; font-size: 13px; background: rgba(255,255,255,0.6); color: var(--text-main); outline: none; transition: border .2s; box-sizing: border-box; }
+.form-input:focus { border-color: var(--mint); }
+.form-checkbox { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-top: 10px; cursor: pointer; }
+.form-hint { display: block; font-size: 11px; color: var(--text-dim); margin: 2px 0 8px 0; line-height: 1.4; }
+.card-body { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+
+/* ===== 表情包网格 ===== */
+.emo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
+}
+.emo-card {
+  background: var(--grad-card);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--shadow), var(--glass-hi);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  transition: all 0.2s var(--ease);
+}
+.emo-card:hover {
+  box-shadow: var(--shadow-mint), var(--glass-hi);
+  transform: translateY(-2px);
+}
+.emo-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 8px;
+}
+.emo-pack-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+.emo-pack-count {
+  font-size: 12px;
+  color: var(--text-sub);
+}
+.emo-previews {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  padding: 8px 12px;
+}
+.emo-item-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.emo-thumb {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 6px;
+  background: var(--glass-bg-strong);
+  transition: transform 0.2s var(--ease);
+}
+.emo-thumb:hover {
+  transform: scale(1.08);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+}
+.emo-del-btn {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: #e74c3c;
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+  z-index: 2;
+}
+.emo-item-wrap:hover .emo-del-btn {
+  display: flex;
+}
+.emo-name-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-align: center;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.emo-empty {
+  grid-column: 1 / -1;
+  padding: 20px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.emo-card-actions {
+  padding: 8px 16px 14px;
+  display: flex;
+  gap: 8px;
+}
+
+/* ===== 创建定时任务弹窗 ===== */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.3);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal-card {
+  background: rgba(255,255,255,0.95);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+  padding: 28px;
+  width: 90%;
+  max-width: 480px;
+}
+.modal-title {
+  font-size: 17px;
+  font-weight: 700;
+  margin-bottom: 20px;
+}
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+        </style>

@@ -96,6 +96,10 @@ class DeviceModel(Base, TimestampMixin):
     # 运行时状态
     is_online: Mapped[bool] = mapped_column(Boolean, default=False)
     last_seen: Mapped[float] = mapped_column(Float, default=0.0)
+    # 封禁状态
+    is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
+    banned_at: Mapped[float | None] = mapped_column(nullable=True, default=None)
+    ban_reason: Mapped[str] = mapped_column(String(256), default="")
 
     __table_args__ = (
         Index("idx_devices_mac", "mac_address"),

@@ -241,6 +241,31 @@ async def handle_websocket(websocket: WebSocket):
         await websocket.close(code=4003, reason="Authentication failed")
         return
 
+    # 检查设备是否被封禁
+    if device:
+        if device.is_banned:
+            reason = device.ban_reason or "设备已被管理员封禁"
+            logger.warning(f"[WS] Banned device rejected: {device.device_id}, reason: {reason}")
+            await websocket.close(code=4003, reason=f"Device banned: {reason}")
+            return
+    else:
+        # 尝试从 DB 查设备封禁状态
+        from src.infrastructure.db.compat.sync_session import get_sync_session
+        def _ban_check():
+            with get_sync_session() as sess:
+                r = sess.execute(select(DeviceModel).where(
+                    (DeviceModel.device_key == device_key) |
+                    (DeviceModel.mac_address == device_mac) |
+                    (DeviceModel.device_id == device_mac)
+                ))
+                return r.scalar_one_or_none()
+        banned_device = await asyncio.to_thread(_ban_check)
+        if banned_device and banned_device.is_banned:
+            reason = banned_device.ban_reason or "设备已被管理员封禁"
+            logger.warning(f"[WS] Banned device rejected: {banned_device.device_id}, reason: {reason}")
+            await websocket.close(code=4003, reason=f"Device banned: {reason}")
+            return
+
     acquired = await try_acquire_global_slot(timeout=_WS_GLOBAL_SLOT_ACQUIRE_TIMEOUT)
     if not acquired:
         logger.warning(f"[WS] Server overloaded, rejecting connection: device_id={device_mac or 'unknown'}")

@@ -203,6 +203,26 @@ getActiveEmoPack: (deviceId) => request('/api/v1/emos/active/' + encodeURICompon
     adminMarketplaceReviews: () => request('/api/v1/admin/marketplace/reviews'),
     adminDeleteMarketplaceReview: (reviewId) => request('/api/v1/admin/marketplace/reviews/' + encodeURIComponent(reviewId), 'DELETE'),
     adminMetrics: () => request('/api/v1/system/metrics'),
+    adminBanDevice: (deviceId, reason) => request('/api/v1/admin/devices/' + encodeURIComponent(deviceId) + '/ban', 'POST', { reason }),
+    adminUnbanDevice: (deviceId) => request('/api/v1/admin/devices/' + encodeURIComponent(deviceId) + '/unban', 'POST'),
+    adminLlmConfigs: (params = {}) => {
+      const qs = new URLSearchParams(params).toString()
+      return request('/api/v1/admin/llm-configs' + (qs ? '?' + qs : ''))
+    },
+    adminUpdateLlmConfig: (deviceId, data) => request('/api/v1/admin/llm-configs/' + encodeURIComponent(deviceId), 'PUT', data),
+    adminConversations: (params = {}) => {
+      const qs = new URLSearchParams(params).toString()
+      return request('/api/v1/admin/conversations' + (qs ? '?' + qs : ''))
+    },
+    adminWsStatus: () => request('/api/v1/admin/ws-status'),
+    adminHealth: () => request('/api/v1/admin/health'),
+    adminOpLogs: () => request('/api/v1/admin/operation-logs'),
+    adminEmojis: () => request('/api/v1/admin/emojis'),
+    adminDeleteEmoji: (name) => request('/api/v1/admin/emojis/' + encodeURIComponent(name), 'DELETE'),
+    adminScheduledTasks: () => request('/api/v1/admin/scheduled-tasks'),
+    adminCreateScheduledTask: (data) => request('/api/v1/admin/scheduled-tasks', 'POST', data),
+    adminDeleteScheduledTask: (taskId) => request('/api/v1/admin/scheduled-tasks/' + encodeURIComponent(taskId), 'DELETE'),
+    adminDeleteEmojiFile: (packName, filename) => request('/api/v1/admin/emojis/' + encodeURIComponent(packName) + '/emoji/' + encodeURIComponent(filename), 'DELETE'),
     // 微信绑定
     wechatQrStart: () => request('/api/v1/wechat/qr-start', 'POST'),
     wechatQrStatus: () => request('/api/v1/wechat/qr-status'),

@@ -18,7 +18,13 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import csv
+import io
+import logging
+import re
+import shutil
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select, update
@@ -64,6 +70,22 @@ class ResetPasswordReq(BaseModel):
 class MarketplaceUpdateReq(BaseModel):
     is_active: Optional[bool] = None
     is_featured: Optional[bool] = None
+
+
+class BanDeviceReq(BaseModel):
+    reason: str = Field(default="", max_length=256)
+
+
+class LLMConfigUpdateReq(BaseModel):
+    llm_type: Optional[str] = None
+    llm_api_key: Optional[str] = None
+    llm_base_url: Optional[str] = None
+    llm_model: Optional[str] = None
+    llm_system_prompt: Optional[str] = None
+    llm_memory_enabled: Optional[bool] = None
+    llm_memory_max_messages: Optional[int] = None
+    asr_provider: Optional[str] = None
+    tts_type: Optional[str] = None
 
 
 # ==================== 序列化/工具函数 ====================
@@ -112,6 +134,9 @@ def _serialize_device(device: DeviceModel, owner_email: str = "") -> dict:
         "last_seen": device.last_seen,
         "created_at": device.created_at,
         "updated_at": device.updated_at,
+        "is_banned": device.is_banned,
+        "ban_reason": device.ban_reason,
+        "banned_at": device.banned_at,
     }
 
 
@@ -592,6 +617,433 @@ async def admin_delete_backup(filename: str, _: UserModel = Depends(require_admi
     file_path.unlink()
     logger.info(f"[Admin] 删除备份文件: {filename}")
     return {"code": 0, "message": "备份文件已删除"}
+
+
+# ==================== 设备封禁/解封 ====================
+
+@router.post("/devices/{device_id}/ban")
+async def admin_ban_device(device_id: str, req: BanDeviceReq, _: UserModel = Depends(require_admin)):
+    """封禁设备（被封禁的设备无法连接服务端）"""
+    async with get_session_ctx() as session:
+        device = await session.get(DeviceModel, device_id)
+        if not device:
+            raise HTTPException(404, "设备不存在")
+        device.is_banned = True
+        device.banned_at = time.time()
+        device.ban_reason = req.reason
+        # 踢下线
+        from src.infrastructure.web import get_device_registry
+        registry = get_device_registry()
+        if registry:
+            session_data = registry.resolve(device_id)
+            if session_data and session_data.get('channel'):
+                try:
+                    session_data['channel'].send_queue.put_nowait({"kind": "close", "data": {"reason": "banned"}})
+                except Exception:
+                    pass
+        await session.commit()
+        _add_oplog(_.email, "封禁设备", f"device_id={device_id}, reason={req.reason}")
+        logger.info(f"[Admin] 封禁设备: {device_id}, 原因: {req.reason}")
+        return {"code": 0, "message": "设备已封禁"}
+
+
+@router.post("/devices/{device_id}/unban")
+async def admin_unban_device(device_id: str, _: UserModel = Depends(require_admin)):
+    """解封设备"""
+    async with get_session_ctx() as session:
+        device = await session.get(DeviceModel, device_id)
+        if not device:
+            raise HTTPException(404, "设备不存在")
+        device.is_banned = False
+        device.banned_at = None
+        device.ban_reason = ""
+        await session.commit()
+        _add_oplog(_.email, "解封设备", f"device_id={device_id}")
+        logger.info(f"[Admin] 解封设备: {device_id}")
+        return {"code": 0, "message": "设备已解封"}
+
+
+# ==================== LLM 配置管理 ====================
+
+@router.get("/llm-configs")
+async def admin_llm_configs(device_id: Optional[str] = Query(None), _: UserModel = Depends(require_admin)):
+    """查看所有设备的 LLM 配置"""
+    async with get_session_ctx() as session:
+        stmt = select(DeviceModel)
+        if device_id:
+            stmt = stmt.where(DeviceModel.device_id == device_id)
+        rows = (await session.execute(stmt)).scalars().all()
+        items = []
+        for d in rows:
+            items.append({
+                "device_id": d.device_id,
+                "name": d.name,
+                "llm_type": d.llm_type,
+                "llm_api_key": "***" + d.llm_api_key[-4:] if d.llm_api_key else "",
+                "llm_base_url": d.llm_base_url,
+                "llm_model": d.llm_model,
+                "llm_system_prompt": d.llm_system_prompt[:200] if d.llm_system_prompt else "",
+                "llm_memory_enabled": d.llm_memory_enabled,
+                "llm_memory_max_messages": d.llm_memory_max_messages,
+                "llm_memory_long_term_enabled": d.llm_memory_long_term_enabled,
+                "asr_provider": d.asr_provider,
+                "tts_type": d.tts_type,
+            })
+        return {"code": 0, "data": {"configs": items}}
+
+
+@router.put("/llm-configs/{device_id}")
+async def admin_update_llm_config(device_id: str, req: LLMConfigUpdateReq, _: UserModel = Depends(require_admin)):
+    """更新设备 LLM 配置"""
+    async with get_session_ctx() as session:
+        device = await session.get(DeviceModel, device_id)
+        if not device:
+            raise HTTPException(404, "设备不存在")
+        update_data = req.model_dump(exclude_none=True)
+        for key, val in update_data.items():
+            setattr(device, key, val)
+        await session.commit()
+        logger.info(f"[Admin] 更新 LLM 配置: {device_id}")
+        return {"code": 0, "message": "LLM 配置已更新"}
+
+
+# ==================== 对话历史 ====================
+
+@router.get("/conversations")
+async def admin_conversations(device_id: Optional[str] = Query(None), limit: int = Query(50, ge=1, le=200), _: UserModel = Depends(require_admin)):
+    """查看对话历史（从短期记忆表读取）"""
+    from src.infrastructure.db.repositories.short_term_memory_repo import SqlShortTermMemoryRepository
+    repo = SqlShortTermMemoryRepository()
+    if not device_id:
+        conversations = []
+        async with get_session_ctx() as session:
+            devices = (await session.execute(select(DeviceModel))).scalars().all()
+            for d in devices:
+                msgs = repo.load(d.device_id)
+                if msgs:
+                    conversations.append({"device_id": d.device_id, "device_name": d.name, "messages": msgs[-10:]})
+        return {"code": 0, "data": {"conversations": conversations}}
+    else:
+        msgs = repo.load(device_id)
+        async with get_session_ctx() as session:
+            device = await session.get(DeviceModel, device_id)
+            name = device.name if device else device_id
+        return {"code": 0, "data": {"device_id": device_id, "device_name": name, "messages": msgs[-limit:]}}
+
+
+# ==================== WebSocket 状态 ====================
+
+@router.get("/ws-status")
+async def admin_ws_status(_: UserModel = Depends(require_admin)):
+    """查看所有 WebSocket 连接状态"""
+    from src.infrastructure.web import get_device_registry
+    registry = get_device_registry()
+    if not registry:
+        return {"code": 0, "data": {"connections": []}}
+    ids = registry.get_all_ids()
+    connections = []
+    for did in ids:
+        info = registry.resolve(did)
+        if info:
+            channel = info.get("channel")
+            connections.append({
+                "device_id": did,
+                "mac": info.get("mac", ""),
+                "connected": bool(channel and getattr(channel, "connected", False)),
+                "session_id": info.get("session_id", ""),
+                "last_seen": info.get("last_seen", 0),
+            })
+    return {"code": 0, "data": {"connections": connections, "total": len(connections)}}
+
+
+# ==================== 系统健康检查 ====================
+
+@router.get("/health")
+async def admin_health_check(_: UserModel = Depends(require_admin)):
+    """系统健康检查"""
+    results = {}
+    # 1. 数据库
+    try:
+        async with get_session_ctx() as session:
+            await session.execute(select(func.count()).select_from(DeviceModel))
+        results["database"] = {"status": "ok", "latency_ms": 0}
+    except Exception as e:
+        results["database"] = {"status": "error", "message": str(e)}
+
+    # 2. 磁盘空间
+    try:
+        du = shutil.disk_usage(_project_root())
+        results["disk"] = {"status": "ok", "total_gb": round(du.total / (1024**3), 1), "free_gb": round(du.free / (1024**3), 1), "usage_pct": round(du.used / du.total * 100, 1)}
+    except Exception as e:
+        results["disk"] = {"status": "error", "message": str(e)}
+
+    # 3. 设备注册表
+    try:
+        registry = get_device_registry()
+        count = len(registry.get_all_ids()) if registry else 0
+        results["registry"] = {"status": "ok", "device_count": count}
+    except Exception as e:
+        results["registry"] = {"status": "error", "message": str(e)}
+
+    # 4. ASR/LLM/TTS 配置检查
+    async with get_session_ctx() as session:
+        devices = (await session.execute(select(DeviceModel))).scalars().all()
+        asr_configured = sum(1 for d in devices if d.asr_provider)
+        llm_configured = sum(1 for d in devices if d.llm_type)
+        tts_configured = sum(1 for d in devices if d.tts_type)
+        results["services"] = {"status": "ok", "asr_configured": asr_configured, "llm_configured": llm_configured, "tts_configured": tts_configured}
+
+    overall = "ok" if all(r.get("status") == "ok" for r in results.values()) else "degraded"
+    return {"code": 0, "data": {"overall": overall, "checks": results}}
+
+
+# ==================== 操作日志 ====================
+
+OPLOG_FILE = "data/admin_operation_logs.json"
+
+
+def _load_oplogs() -> list:
+    if not os.path.exists(OPLOG_FILE):
+        return []
+    try:
+        with open(OPLOG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _save_oplogs(logs: list) -> None:
+    os.makedirs(os.path.dirname(OPLOG_FILE), exist_ok=True)
+    with open(OPLOG_FILE, "w", encoding="utf-8") as f:
+        json.dump(logs, f, ensure_ascii=False, indent=2)
+
+
+def _add_oplog(admin_email: str, action: str, detail: str = "") -> None:
+    logs = _load_oplogs()
+    logs.insert(0, {"time": time.time(), "admin": admin_email, "action": action, "detail": detail})
+    if len(logs) > 1000:
+        logs = logs[:1000]
+    _save_oplogs(logs)
+
+
+@router.get("/operation-logs")
+async def admin_operation_logs(limit: int = Query(100, ge=1, le=500), _: UserModel = Depends(require_admin)):
+    """查看操作日志"""
+    logs = _load_oplogs()
+    return {"code": 0, "data": {"logs": logs[:limit]}}
+
+
+# ==================== 表情包管理 ====================
+
+@router.get("/emojis")
+async def admin_list_emojis(request: Request, _: UserModel = Depends(require_admin)):
+    """查看所有表情包（含预览图）"""
+    from src.infrastructure.emo_pack import list_packs as _list_packs, list_pack_emos
+    packs = await _list_packs()
+    host = request.headers.get("host", "localhost:8088")
+    scheme = request.headers.get("x-forwarded-proto", "http")
+    result = []
+    for p in packs:
+        emos = list_pack_emos(p["name"], scheme, host)
+        result.append({**p, "emos": emos})  # 返回所有预览
+    return {"code": 0, "data": {"packs": result}}
+
+
+@router.post("/emojis/upload")
+async def admin_upload_emoji(file: bytes, name: str = Query(...), _: UserModel = Depends(require_admin)):
+    """上传表情包（保存到 src/emos/packs/）"""
+    from src.infrastructure.emo_pack import get_or_create_pack_dir
+    target_dir = get_or_create_pack_dir(name)
+    if not target_dir:
+        return {"code": 1, "message": "无效的表情包名称"}
+    zip_path = target_dir / "pack.zip"
+    with open(zip_path, "wb") as f:
+        f.write(file)
+    _add_oplog(_.email, "上传表情包", f"pack={name}")
+    logger.info(f"[Admin] 上传表情包: {name}")
+    return {"code": 0, "message": "表情包已上传"}
+
+
+@router.delete("/emojis/{name}")
+async def admin_delete_emoji(name: str, _: UserModel = Depends(require_admin)):
+    """删除表情包"""
+    from src.infrastructure.emo_pack import delete_pack as _delete_pack
+    result = await _delete_pack(name)
+    _add_oplog(_.email, "删除表情包", f"pack={name}")
+    logger.info(f"[Admin] 删除表情包: {name}")
+    return {"code": 0, "message": result.get("message", "表情包已删除")}
+
+
+@router.delete("/emojis/{pack_name}/emoji/{filename}")
+async def admin_delete_emoji_file(pack_name: str, filename: str, request: Request, _: UserModel = Depends(require_admin)):
+    """删除表情包中的单个表情"""
+    from src.infrastructure.emo_pack import get_pack_dir, _validate_pack_name
+    if not _validate_pack_name(pack_name):
+        raise HTTPException(400, "无效的表情包名称")
+    p = get_pack_dir(pack_name)
+    if not p:
+        raise HTTPException(404, "表情包不存在")
+    if ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(400, "无效的文件名")
+    fpath = p / filename
+    if not fpath.exists() or not fpath.is_file():
+        raise HTTPException(404, "文件不存在")
+    fpath.unlink()
+    _add_oplog(_.email, "删除表情", f"pack={pack_name}, file={filename}")
+    logger.info(f"[Admin] 删除表情: {pack_name}/{filename}")
+    return {"code": 0, "message": "表情已删除"}
+
+
+# ==================== 数据导出 ====================
+
+@router.get("/export/{data_type}")
+async def admin_export_data(data_type: str, _: UserModel = Depends(require_admin)):
+    """导出数据 (users/devices)"""
+    if data_type == "users":
+        async with get_session_ctx() as session:
+            rows = (await session.execute(select(UserModel))).scalars().all()
+            output = io.StringIO()
+            w = csv.writer(output)
+            w.writerow(["ID", "邮箱", "昵称", "角色", "状态", "最大设备数", "注册时间", "最后登录"])
+            for r in rows:
+                w.writerow([r.id, r.email, r.nickname, r.role, "启用" if r.is_active else "停用", r.max_devices, r.created_at, r.last_login or ""])
+            from starlette.responses import StreamingResponse
+            output.seek(0)
+            return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=users.csv"})
+    elif data_type == "devices":
+        async with get_session_ctx() as session:
+            rows = (await session.execute(select(DeviceModel))).scalars().all()
+            output = io.StringIO()
+            w = csv.writer(output)
+            w.writerow(["ID", "名称", "MAC", "设备Key", "用户ID", "在线", "封禁", "最后在线", "创建时间"])
+            for r in rows:
+                w.writerow([r.device_id, r.name, r.mac_address, r.device_key, r.user_id or "", "是" if r.is_online else "否", "是" if r.is_banned else "否", r.last_seen or "", r.created_at or ""])
+            from starlette.responses import StreamingResponse
+            output.seek(0)
+            return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=devices.csv"})
+    raise HTTPException(400, "不支持的数据类型，仅支持 users/devices")
+
+
+# ==================== 定时任务 ====================
+
+@router.get("/scheduled-tasks")
+async def admin_scheduled_tasks(_: UserModel = Depends(require_admin)):
+    """查看定时任务"""
+    task_file = _project_root() / "data" / "scheduled_tasks.json"
+    tasks = []
+    if task_file.exists():
+        try:
+            tasks = json.loads(task_file.read_text(encoding="utf-8"))
+        except Exception:
+            tasks = []
+    return {"code": 0, "data": {"tasks": tasks}}
+
+
+@router.post("/scheduled-tasks")
+async def admin_create_scheduled_task(data: dict, _: UserModel = Depends(require_admin)):
+    """创建定时任务"""
+    # 记录到文件
+    task_file = _project_root() / "data" / "scheduled_tasks.json"
+    tasks = []
+    if task_file.exists():
+        try:
+            tasks = json.loads(task_file.read_text(encoding="utf-8"))
+        except Exception:
+            tasks = []
+    tasks.append({"id": str(int(time.time())), "created_at": time.time(), **data})
+    task_file.write_text(json.dumps(tasks, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info(f"[Admin] 创建定时任务: {data}")
+    return {"code": 0, "message": "定时任务已创建"}
+
+
+@router.delete("/scheduled-tasks/{task_id}")
+async def admin_delete_scheduled_task(task_id: str, _: UserModel = Depends(require_admin)):
+    """删除定时任务"""
+    task_file = _project_root() / "data" / "scheduled_tasks.json"
+    if task_file.exists():
+        try:
+            tasks = json.loads(task_file.read_text(encoding="utf-8"))
+            tasks = [t for t in tasks if t.get("id") != task_id]
+            task_file.write_text(json.dumps(tasks, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+    return {"code": 0, "message": "定时任务已删除"}
+
+
+# ==================== 全局配置 ====================
+
+# 全局配置中文标签与说明
+GLOBAL_CONFIG_LABELS = {
+    "app_name": ("应用名称", "设备显示的应用名称"),
+    "deploy_mode": ("部署模式", "single=单用户, multi=多用户"),
+    "asr_provider": ("ASR 提供商", "语音识别服务商，如 volc(火山引擎)、tencent(腾讯云)"),
+    "asr_language": ("ASR 语言", "语音识别语言，如 zh(中文)、en(英文)"),
+    "llm_type": ("LLM 类型", "大模型提供商，如 openai、deepseek、qwen"),
+    "llm_base_url": ("LLM 地址", "API 地址，兼容 OpenAI 格式"),
+    "llm_model": ("LLM 模型", "使用的模型名称，如 gpt-4o、deepseek-chat"),
+    "tts_type": ("TTS 类型", "语音合成类型，如 volc_tts"),
+    "tts_voice": ("TTS 音色", "语音合成使用的音色标识"),
+    "wake_word": ("唤醒词", "设备唤醒的关键词"),
+    "max_connections": ("最大连接数", "服务端同时接受的最大 WebSocket 连接数"),
+}
+
+@router.get("/config/export")
+async def admin_export_config(_: UserModel = Depends(require_admin)):
+    """导出系统配置（.env 中的关键配置）"""
+    from src.infrastructure.config import get_settings
+    settings = get_settings()
+    config = {
+        "export_time": time.time(),
+        "app_name": settings.APP_NAME,
+        "deploy_mode": settings.DEPLOY_MODE,
+        "asr_provider": settings.ASR_PROVIDER,
+        "asr_language": settings.ASR_LANGUAGE,
+        "llm_type": settings.LLM_TYPE,
+        "llm_base_url": settings.LLM_BASE_URL,
+        "llm_model": settings.LLM_MODEL,
+        "tts_type": settings.TTS_TYPE,
+        "tts_voice": settings.TTS_VOICE,
+        "wake_word": settings.WAKE_WORD,
+        "max_connections": settings.MAX_CONNECTIONS,
+    }
+    items = []
+    for k, v in config.items():
+        if k == "export_time":
+            continue
+        label, desc = GLOBAL_CONFIG_LABELS.get(k, (k, ""))
+        items.append({"key": k, "label": label, "desc": desc, "value": v})
+    return {"code": 0, "data": {"items": items}}
+
+
+@router.post("/config/import")
+async def admin_import_config(data: dict, _: UserModel = Depends(require_admin)):
+    """导入系统配置"""
+    env_path = _project_root() / ".env"
+    if not env_path.exists():
+        raise HTTPException(400, ".env 文件不存在")
+    content = env_path.read_text(encoding="utf-8")
+    for key, val in data.items():
+        if val is not None:
+            if re.search(rf"^{key}=", content, re.MULTILINE):
+                content = re.sub(rf"^{key}=.*", f"{key}={val}", content, flags=re.MULTILINE)
+            else:
+                content += f"\n{key}={val}"
+    env_path.write_text(content, encoding="utf-8")
+    logger.info(f"[Admin] 导入系统配置: {list(data.keys())}")
+    return {"code": 0, "message": "配置已导入，重启后生效"}
+
+
+# ==================== 动态日志级别 ====================
+
+@router.put("/log-level")
+async def admin_set_log_level(level: str = Query(...), _: UserModel = Depends(require_admin)):
+    """动态设置日志级别 (debug/info/warning/error)"""
+    valid = {"debug", "info", "warning", "error"}
+    if level.lower() not in valid:
+        raise HTTPException(400, f"无效的日志级别，可选: {', '.join(valid)}")
+    logging.getLogger().setLevel(level.upper())
+    logger.info(f"[Admin] 日志级别已设置为: {level}")
+    return {"code": 0, "message": f"日志级别已设置为 {level}"}
 
 
 # ==================== 市场管理 ====================
