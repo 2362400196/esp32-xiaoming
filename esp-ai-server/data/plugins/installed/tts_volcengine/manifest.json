@@ -1,0 +1,21 @@
+{
+    "id": "tts_volcengine",
+    "name": "火山引擎 TTS 提供商",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "通过火山引擎 TTS WebSocket 接口提供语音合成服务",
+    "api_version": "1.0",
+    "optional": true,
+    "permissions": ["network"],
+    "provides": {
+        "tts": ["volcengine"]
+    },
+    "config_fields": [
+        {"key": "api_key", "label": "API Key", "type": "password"},
+        {"key": "resource_id", "label": "Resource ID", "type": "text"},
+        {"key": "voice_type", "label": "音色", "type": "text", "default": "BV001_streaming"},
+        {"key": "speed_ratio", "label": "语速", "type": "text", "default": "1.0"},
+        {"key": "volume_ratio", "label": "音量", "type": "text", "default": "1.0"},
+        {"key": "pitch_ratio", "label": "音调", "type": "text", "default": "1.0"}
+    ]
+}

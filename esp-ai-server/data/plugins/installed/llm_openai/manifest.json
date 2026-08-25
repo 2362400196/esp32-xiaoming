@@ -1,0 +1,18 @@
+{
+    "id": "llm_openai",
+    "name": "OpenAI 兼容 LLM 提供商",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "通过 OpenAI 兼容接口（SSE 流式）提供大语言模型对话服务",
+    "api_version": "1.0",
+    "optional": true,
+    "permissions": ["network"],
+    "provides": {
+        "llm": ["openai"]
+    },
+    "config_fields": [
+        {"key": "api_key", "label": "API Key", "type": "password"},
+        {"key": "base_url", "label": "Base URL", "type": "text", "default": "https://api.openai.com/v1"},
+        {"key": "model", "label": "模型", "type": "text", "default": "gpt-4o"}
+    ]
+}

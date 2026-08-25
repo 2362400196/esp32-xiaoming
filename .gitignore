@@ -38,7 +38,13 @@ wheels/
 .pytest_cache/
 .env
 users.json
-data/
+**/data/*
+!**/data/plugins/
+**/data/plugins/alarm/
+**/data/plugins/backup/
+**/data/plugins/cache/
+**/data/plugins/kv/
+**/data/plugins/state/
 *.db
 *.db-shm
 *.db-wal

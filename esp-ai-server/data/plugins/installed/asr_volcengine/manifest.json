@@ -1,0 +1,18 @@
+{
+    "id": "asr_volcengine",
+    "name": "火山引擎 ASR 提供商",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "通过火山引擎 ASR WebSocket 接口提供实时语音识别服务",
+    "api_version": "1.0",
+    "optional": true,
+    "permissions": ["network"],
+    "provides": {
+        "asr": ["volcengine"]
+    },
+    "config_fields": [
+        {"key": "api_key", "label": "API Key", "type": "password"},
+        {"key": "resource_id", "label": "Resource ID", "type": "text"},
+        {"key": "model", "label": "模型", "type": "text", "default": "volc.asr.222222222"}
+    ]
+}
