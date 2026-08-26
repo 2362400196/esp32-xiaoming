@@ -1,8 +1,8 @@
 {
-  "id": "my_plugin",
-  "name": "我的插件",
+  "id": "bilibili",
+  "name": "b站热榜",
   "version": "1.0.0",
-  "description": "插件描述",
+  "description": "b站热榜",
   "api_version": "1.0",
   "category": "general",
   "tags": [],

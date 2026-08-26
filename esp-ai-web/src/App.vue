@@ -51,7 +51,7 @@ import ProfileView from './views/ProfileView.vue'
 import PluginPageView from './views/PluginPageView.vue'
 import DeviceSettings from './components/DeviceSettings.vue'
 import AdminView from './views/AdminView.vue'
-import { api, getUser, isLoggedIn, setAuth } from './api'
+import { api, getUser, isLoggedIn, setAuth, getToken } from './api'
 
 const tab = ref('devices')
 const pluginPages = ref([])
@@ -166,6 +166,51 @@ function onDeviceBound() {
 }
 
 function requireLogin() { toast('请先登录'); tab.value = 'profile' }
+
+// ===== 设备状态实时推送（WebSocket） =====
+let ws = null
+let wsReconnectTimer = null
+
+function wsUrl() {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${proto}//${window.location.host}/ws/web?token=${encodeURIComponent(getToken())}`
+}
+
+function onWsMessage(evt) {
+  let msg = null
+  try { msg = JSON.parse(evt.data) } catch { return }
+  if (msg?.type !== 'device_state') return
+  const { device_id, online, state, emotion } = msg
+  if (!device_id) return
+  const dev = devices.value.find(d => (d.device_id || d.mac || d.device_key) === device_id)
+  if (!dev) return
+  if (typeof online === 'boolean') dev.online = online
+  if (state) dev.state = state
+  if (emotion) dev.emotion = emotion
+  // 触发响应式更新（设备卡片屏幕实时切换图标）
+  devices.value = [...devices.value]
+}
+
+function connectWs() {
+  if (!isLoggedIn()) return
+  try { if (ws) ws.close() } catch {}
+  try {
+    ws = new WebSocket(wsUrl())
+  } catch { return }
+  ws.onmessage = onWsMessage
+  ws.onclose = () => {
+    ws = null
+    clearTimeout(wsReconnectTimer)
+    if (isLoggedIn()) wsReconnectTimer = setTimeout(connectWs, 5000)
+  }
+  ws.onerror = () => { try { ws.close() } catch {} }
+}
+
+function disconnectWs() {
+  clearTimeout(wsReconnectTimer)
+  try { if (ws) ws.close() } catch {}
+  ws = null
+}
 
 // 同一设备：只更新字段（如 online），不替换对象引用 → 避免触发子组件 watch 导致历史重载
 function _upsertCurrent(found) {
@@ -314,6 +359,7 @@ async function onLogin() {
     await syncPluginNav()
     tab.value = 'devices'   // 登录成功 → 跳设备页
     refreshDevices()
+    connectWs()
   }
 }
 
@@ -323,9 +369,10 @@ onMounted(async () => {
     syncAdminNav()
   refreshDevices()
   await syncPluginNav()
+  connectWs()
   pollTimer = setInterval(() => { if (isLoggedIn()) refreshDevices() }, 20000)
 })
-onBeforeUnmount(() => { clearInterval(pollTimer); clearTimeout(editorCloseTimer) })
+onBeforeUnmount(() => { clearInterval(pollTimer); clearTimeout(editorCloseTimer); disconnectWs() })
 </script>
 
 <style scoped>

@@ -927,6 +927,12 @@ class Session:
             if text:
                 self.runtime.asr_full_text = text
                 self.runtime.asr_last_result_time = time.time()
+                # 实时下发 ASR 中间结果，屏幕边听边显示（VAD 结束后不再发，避免覆盖 LLM 字幕）
+                if not self.runtime.asr_processed:
+                    try:
+                        asyncio.create_task(self._send_iat_partial(text))
+                    except Exception:
+                        pass
 
         async def _on_vad_end_auto():
             if self.runtime.asr_processed:
@@ -977,6 +983,12 @@ class Session:
             if text:
                 self.runtime.asr_full_text = text
                 self.runtime.asr_last_result_time = time.time()
+                # 实时下发 ASR 中间结果，屏幕边听边显示（VAD 结束后不再发，避免覆盖 LLM 字幕）
+                if not self.runtime.asr_processed:
+                    try:
+                        asyncio.create_task(self._send_iat_partial(text))
+                    except Exception:
+                        pass
 
         async def _on_vad_end_cycle():
             if self.runtime.asr_processed:
@@ -1014,6 +1026,13 @@ class Session:
         await self.channel.send_json({"type": "session_status", "status": "iat_start"})
         logger.info(f"[Session:{self.session_id}] 下一轮 ASR 已启动")
         await self.start_watchdog(_on_vad_end_cycle)
+
+    async def _send_iat_partial(self, text: str) -> None:
+        """实时下发 ASR 中间结果，让屏幕边听边显示"""
+        try:
+            await self.channel.send_json({"type": "instruct", "command_id": "on_iat_cb", "data": text})
+        except Exception as e:
+            logger.debug(f"[Session:{self.session_id}] 发送 ASR 中间结果失败: {e}")
 
     async def start_watchdog(self, on_vad_end):
         if self._watchdog_task and not self._watchdog_task.done():

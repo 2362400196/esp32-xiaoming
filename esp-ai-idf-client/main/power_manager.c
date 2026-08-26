@@ -306,24 +306,26 @@ void power_manager_set_active(bool active)
     ESP_LOGI(TAG, "会话状态: %s", active ? "活跃" : "待机");
 }
 
-void power_manager_set_screensaver_config(bool enabled, int timeout_sec)
+void power_manager_set_screensaver_config(int enabled, int timeout_sec)
 {
-    s_screensaver_enabled = enabled;
+    if (enabled >= 0) {
+        s_screensaver_enabled = (enabled == 1);
+        // 如果用户关闭了屏保，立即尝试退出。
+        // 不依赖 s_screensaver_shown 标志（该标志可能在会话结束时被误置为 false，
+        // 导致屏保 UI 仍在显示但软件无法退出）。
+        // eeui_port_screensaver_set(false) 内部幂等，屏保已退出时立即返回 true。
+        if (!s_screensaver_enabled) {
+            if (eeui_port_screensaver_set(false)) {
+                s_screensaver_shown = false;
+                ESP_LOGI(TAG, "屏保已退出（用户关闭屏保）");
+            } else {
+                ESP_LOGW(TAG, "立即退出屏保失败（LVGL 锁竞争），将在定时器中重试");
+            }
+        }
+    }
     if (timeout_sec > 0) {
         s_screensaver_timeout_sec = timeout_sec;
     }
-    // 如果用户关闭了屏保，立即尝试退出。
-    // 不依赖 s_screensaver_shown 标志（该标志可能在会话结束时被误置为 false，
-    // 导致屏保 UI 仍在显示但软件无法退出）。
-    // eeui_port_screensaver_set(false) 内部幂等，屏保已退出时立即返回 true。
-    if (!enabled) {
-        if (eeui_port_screensaver_set(false)) {
-            s_screensaver_shown = false;
-            ESP_LOGI(TAG, "屏保已退出（用户关闭屏保）");
-        } else {
-            ESP_LOGW(TAG, "立即退出屏保失败（LVGL 锁竞争），将在定时器中重试");
-        }
-    }
     ESP_LOGI(TAG, "屏保配置已更新: %s, 超时=%ds",
-             enabled ? "开启" : "关闭", s_screensaver_timeout_sec);
+             s_screensaver_enabled ? "开启" : "关闭", s_screensaver_timeout_sec);
 }

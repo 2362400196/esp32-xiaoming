@@ -407,6 +407,61 @@ async def get_weather(city: str = "", tool_manager=None) -> str:
 - **即时生效**：保存后热重载在线设备，无需重启
 - **前端保存**：通过 `save_config` 工具，前端调用通用工具接口写入
 
+### 设备级配置（plugin_configs，数据库存储）
+
+ASR / LLM / TTS 服务插件（以及任何声明了 `config` 参数的插件工具）使用**设备级配置**：配置保存在 `devices` 表的 `plugin_configs` JSON 字段中，按插件名分组。框架自动完成存储、加载、合并三个环节，**插件开发者无需编写任何数据库代码**。
+
+#### 存储结构
+
+```json
+{
+  "plugin_configs": {
+    "weather":        {"amap_key": "xxx"},
+    "asr_volcengine": {"api_key": "yyy", "resource_id": "zzz"},
+    "llm_openai":     {"api_key": "yyy", "base_url": "https://api.openai.com/v1", "model": "gpt-4o"}
+  }
+}
+```
+
+#### 保存配置
+
+通过标准接口保存（无需插件代码）：
+
+```
+PUT /api/v1/devices/{device_id}/plugins/{plugin_name}/config
+{"config": {"api_key": "xxx", "model": "gpt-4o"}}
+```
+
+框架处理流程：校验插件存在 → 合并进 `plugin_configs[插件名]`（保留其他插件的配置）→ 写入数据库 → 热重载在线设备立即生效。
+
+#### 运行时读取
+
+设备连接时框架把 `plugin_configs` 加载进 `tool_mgr.plugin_configs`；调用插件工具时，若工具函数声明了 `config` 参数，框架自动把该插件的配置合并进 `config`（非空值覆盖默认值）。插件只需在工具函数中读取：
+
+```python
+@tool()
+async def asr_volcengine_start_session(config: dict | None = None, ...):
+    cfg = config or {}
+    api_key = cfg.get("api_key", "")    # 从设备配置读取
+    resource_id = cfg.get("resource_id", "volc.bigasr.sauc.duration")  # 带默认值兜底
+    if not api_key:
+        return {"session_id": "", "error": "api_key 未配置"}
+```
+
+::: tip 关于 config_fields
+设备级配置**不需要**在 manifest 中声明 `config_fields`。声明它仅有两个作用：① 配置保存接口的键名白名单校验（防止拼错键名）；② 前端配置表单的字段元数据（标签/类型/默认值）。对服务插件而言这两者都不是必需的，因此可以省略，配置保存接口会接受任意键。
+:::
+
+#### 与 KV 存储的区别
+
+| 维度 | 设备级配置（plugin_configs） | KV 存储 |
+|------|------------------------------|---------|
+| 存储位置 | `devices` 表 `plugin_configs` JSON 字段 | `data/plugins/kv/{mac}/xxx.json` 文件 |
+| 注入方式 | 自动合并进 `config` 参数 | 工具内 `kv_get` / `kv_set` 手动读写 |
+| 适用场景 | 服务插件（ASR/LLM/TTS）等需要框架注入配置的场景 | 普通功能插件的自有状态 / 配置 |
+| 配置入口 | 设备配置接口 / 前端表单 | `save_config` 工具 / 前端 |
+| 默认值 | `config.get("key", "默认值")` 兜底 | `kv_get("key", default="默认值")` 兜底 |
+
 ## 语音服务插件开发（ASR / LLM / TTS）
 
 ASR（语音识别）、LLM（大模型对话）、TTS（语音合成）三类插件是系统的 **AI 服务提供商**。与天气、闹钟这类普通工具插件不同，它们**不直接控制设备**，而是把外部 AI 服务接入系统，供核心语音交互流程调用。

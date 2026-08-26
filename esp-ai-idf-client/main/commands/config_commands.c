@@ -45,14 +45,14 @@ static void apply_config_immediate(const char *key, const char *value)
     // 屏保开关：立即生效
     if (strcmp(key, "screensaver_enabled") == 0) {
         bool enabled = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
-        power_manager_set_screensaver_config(enabled, -1);
+        power_manager_set_screensaver_config(enabled ? 1 : 0, -1);
         ESP_LOGI(TAG, "屏保开关已即时调整: %s", enabled ? "开启" : "关闭");
     }
-    // 屏保超时秒数：立即生效
+    // 屏保超时秒数：立即生效（只改超时，不修改开关状态）
     if (strcmp(key, "screensaver_timeout") == 0) {
         int sec = atoi(value);
         if (sec >= 5 && sec <= 600) {
-            power_manager_set_screensaver_config(true, sec);
+            power_manager_set_screensaver_config(-1, sec);
             ESP_LOGI(TAG, "屏保超时已即时调整为: %d秒", sec);
         } else {
             ESP_LOGW(TAG, "屏保超时值 %s 超出范围 [5, 600]，跳过", value);

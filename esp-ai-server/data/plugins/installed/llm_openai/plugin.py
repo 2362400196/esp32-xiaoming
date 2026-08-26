@@ -43,8 +43,8 @@ async def llm_openai_start_chat(messages: list, config: dict | None = None,
     """
     cfg = config or {}
     api_key = cfg.get("api_key", "")
-    base_url = cfg.get("base_url", "https://api.openai.com/v1")
-    model = cfg.get("model", "gpt-4o")
+    base_url = cfg.get("base_url", "https://api.deepseek.com/v1")
+    model = cfg.get("model", "deepseek-v4-flash")
 
     if not api_key:
         return {"chat_id": "", "error": "api_key 未配置"}

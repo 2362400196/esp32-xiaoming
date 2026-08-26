@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from typing import Callable, Optional
 
 from src.domain.entities import SessionState
 from src.infrastructure.logging import get_logger
@@ -27,9 +28,10 @@ VALID_TRANSITIONS = {
 class SessionFSM:
     """会话状态机：带 transition guard"""
 
-    def __init__(self):
+    def __init__(self, on_change: Optional[Callable[[SessionState], None]] = None):
         self.state = SessionState.IDLE
         self.lock = asyncio.Lock()
+        self._on_change = on_change
 
     async def set(self, new_state: SessionState):
         async with self.lock:
@@ -39,6 +41,11 @@ class SessionFSM:
                 logger.error(f"[FSM] 非法状态转换: {self.state.value} -> {new_state.value}，已忽略")
                 return
             self.state = new_state
+            if self._on_change:
+                try:
+                    self._on_change(new_state)
+                except Exception as e:
+                    logger.debug(f"[FSM] 状态变化回调异常: {e}")
 
     def get(self) -> SessionState:
         return self.state

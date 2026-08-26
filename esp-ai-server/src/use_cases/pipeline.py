@@ -145,7 +145,7 @@ class ConversationPipeline:
         device_id: str = "",
         ltm_service: Optional["LongTermMemoryServiceImpl"] = None,
         precomputed_skill_catalog: Optional[str] = None,
-        max_sentences: int = 2,
+        max_sentences: int = 100,
     ) -> None:
         self.llm_processor = llm_processor
         self.tts_processor = tts_processor
@@ -190,10 +190,11 @@ class ConversationPipeline:
         self._ltm_catalog_ttl: float = 60.0  # 缓存 60 秒
         self._reply_style = (
             "\n\n[回复要求]\n"
-            "- 回复必须控制在 1 句、25 字以内，一句话说完，像真人聊天一样简短自然\n"
+            "- 日常闲聊时回复要简短自然，像真人聊天一样，一般 1-2 句话说完，不要长篇大论\n"
             "- 用口语化的方式说话，像朋友聊天\n"
             "- 不要每次都加表情符号\n"
             "- 不要说'好的'、'没问题'这种废话，直接回答\n"
+            "- 如果用户明确要求讲故事、详细说明或长内容（如'讲个故事''说详细点'），可以生成完整的长内容，不要截断\n"
             "[/回复要求]\n"
             "\n[工具调用规则]\n"
             "- 你拥有可用的工具函数（tool functions）。当用户请求**操作类任务**（如调整音量/开关灯/播放音乐/查询信息/执行代码等）时，**必须通过调用对应的工具函数来完成**，不能只口头回复。\n"
@@ -698,7 +699,7 @@ class ConversationPipeline:
             logger.error(f"[Pipeline] Splitter 任务异常: {e}")
 
     MERGE_THRESHOLD = 40  # 短句合并长度阈值（字符），减少 TTS 请求数
-    MAX_CHARS = 30  # 回复合成字符上限（兜底，防止单个超长句）
+    MAX_CHARS = 2000  # 回复合成字符上限（兜底，防止单个超长句）
 
     EMOTION_KEYWORDS: dict = {
         "快乐": ["哈哈", "开心", "高兴", "太好了", "棒", "妙", "不错", "喜欢", "爱", "谢谢", "恭喜", "nice", "good", "很好", "太棒了", "真不错", "赞"],
@@ -766,6 +767,14 @@ class ConversationPipeline:
                 "data": emotion
             })
             logger.info(f"[Pipeline] 已发送表情: {emotion}")
+            # 同步推送情绪到 Web 前端（设备屏幕实时显示情绪表情）
+            try:
+                from src.infrastructure.web import get_web_state_hub
+                hub = get_web_state_hub()
+                if hub and self.device_id:
+                    await hub.broadcast_device_state(self.device_id, True, "idle", emotion)
+            except Exception:
+                pass
         except Exception as e:
             logger.debug(f"[Pipeline] 发送表情失败: {e}")
 

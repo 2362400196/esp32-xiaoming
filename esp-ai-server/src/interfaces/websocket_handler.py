@@ -325,6 +325,9 @@ async def handle_websocket(websocket: WebSocket):
                     enabled_plugins=list(model.enabled_plugins or []),
                     plugin_configs=dict(model.plugin_configs or {}),
                     has_display=model.has_display,
+                    robot_mode=model.robot_mode or "false",
+                    screensaver_enabled=model.screensaver_enabled or "true",
+                    screensaver_timeout=model.screensaver_timeout or "30",
                 )
                 logger.info(f"[WS] 设备 {device_mac} 配置已从 DB 加载")
 

@@ -61,6 +61,10 @@ class DeviceConfig:
     # 设备屏幕能力（None = 未知，回退固件上报/默认有屏）
     has_display: bool | None = None
     wakeup_config: dict | None = None
+    # 显示配置（机器人模式 / 屏保），字符串形式与 DB 列一致
+    robot_mode: str = "false"
+    screensaver_enabled: str = "true"
+    screensaver_timeout: str = "30"
 
     def get_asr_config(self, provider: str) -> dict:
         if self.asr_config and provider in self.asr_config:
@@ -166,6 +170,9 @@ def load_devices() -> DeviceManager:
             plugin_configs=raw.get("plugin_configs") or {},
             has_display=raw.get("has_display"),
             wakeup_config=raw.get("wakeup") or raw.get("wakeup_config"),
+            robot_mode=raw.get("robot_mode", "false"),
+            screensaver_enabled=raw.get("screensaver_enabled", "true"),
+            screensaver_timeout=raw.get("screensaver_timeout", "30"),
         )
 
     if devices:

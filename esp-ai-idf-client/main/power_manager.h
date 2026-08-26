@@ -81,10 +81,10 @@ void power_manager_set_active(bool active);
  * @brief 设置屏保配置（开关 + 超时秒数）
  * 
  * 由 config_commands 的 apply_config_immediate 调用，收到 update_config 后即时生效。
- * @param enabled  true=启用屏保，false=禁用
- * @param timeout_sec  进入屏保前的空闲秒数（默认 30）
+ * @param enabled  -1=不修改开关；0=禁用屏保；1=启用屏保
+ * @param timeout_sec  进入屏保前的空闲秒数（<=0 表示不修改，默认 30）
  */
-void power_manager_set_screensaver_config(bool enabled, int timeout_sec);
+void power_manager_set_screensaver_config(int enabled, int timeout_sec);
 
 #ifdef __cplusplus
 }

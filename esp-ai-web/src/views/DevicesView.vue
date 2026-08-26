@@ -75,7 +75,7 @@
 
             <!-- 屏幕内容 -->
             <div class="screen-content" v-if="isOnline(d)">
-              <img v-if="sleepGifUrl(d)" :src="sleepGifUrl(d)" alt="sleep" class="screen-gif"
+              <img v-if="screenGifUrl(d)" :src="screenGifUrl(d)" alt="screen" class="screen-gif"
                 draggable="false" @error="onGifError(d)" loading="lazy" />
               <div v-else class="screen-emoji"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></div>
             </div>
@@ -251,11 +251,19 @@ const dragStartPoint = { x: 0, y: 0 }
 const hasMoved = ref(false)
 
 // ===== GIF 加载 =====
-const defaultSleepGif = ref('')
-const devicePackGifs = ref({})  // deviceId -> sleep gif url
+const defaultPackGifs = ref({})  // 默认表情包: { sleep: url, listen: url, tts_ing: url, ... }
+const devicePackGifs = ref({})  // deviceId -> { slot: url }
 const gifErrorSet = ref(new Set())
-// GIF 缓存刷新版本号：重新加载 sleep 表情后自增，URL 追加 ?v= 强制浏览器拉取最新文件
+// GIF 缓存刷新版本号：重新加载表情后自增，URL 追加 ?v= 强制浏览器拉取最新文件
 const sleepGifVersion = ref(0)
+
+// 状态 → 表情槽位（与设备端 s_emotions[] / gif_downloader 对齐）
+const STATE_SLOTS = { asr: 'listen', llm: 'tts_ing', tts: 'tts_ing', idle: 'sleep' }
+const EMOTION_SLOTS = {
+  '快乐': 'happy', '伤心': 'sad', '愤怒': 'angry',
+  '意外': 'accident', '否定': 'no', '无情绪': 'tts_ing',
+}
+const GIF_SLOTS = ['sleep', 'listen', 'tts_ing', 'happy', 'sad', 'angry', 'accident', 'no', 'wifi', 'error', 'music']
 
 function devKey(d) {
   return d.device_id || d.id || d.mac || ''
@@ -271,14 +279,18 @@ function isActive(d) {
   return !!(sid && did && sid === did)
 }
 
-// 获取设备的 sleep gif URL
-function sleepGifUrl(d) {
+// 根据设备实时状态/情绪返回对应 GIF URL
+function screenGifUrl(d) {
   const key = devKey(d)
   if (gifErrorSet.value.has(key)) return ''
-  // 优先使用设备专属表情包
-  let url = devicePackGifs.value[key]
-  // 回退到默认表情包
-  if (!url) url = defaultSleepGif.value
+  let slot = ''
+  if (d.emotion && EMOTION_SLOTS[d.emotion]) {
+    slot = EMOTION_SLOTS[d.emotion]
+  } else {
+    slot = STATE_SLOTS[d.state] || 'sleep'
+  }
+  let url = devicePackGifs.value[key]?.[slot]
+  if (!url) url = defaultPackGifs.value[slot]
   return url ? `${url}?v=${sleepGifVersion.value}` : ''
 }
 
@@ -398,21 +410,23 @@ function resetLayout() {
   emit('toast', '已重置布局')
 }
 
-// ===== 加载默认表情包的 sleep.gif =====
-async function loadDefaultSleepGif() {
+// ===== 加载默认表情包（全部槽位） =====
+async function loadDefaultPack() {
   try {
     const res = await api.emoPackDetail('default')
     if (res?.data?.code === 0 && Array.isArray(res.data.data)) {
-      const sleep = res.data.data.find(e => e.name === 'sleep' || e.filename === 'sleep.gif')
-      if (sleep) {
-        defaultSleepGif.value = sleep.url
-        sleepGifVersion.value++
+      const map = {}
+      for (const e of res.data.data) {
+        const slot = e.name || (e.filename || '').replace(/\.gif$/, '')
+        if (slot) map[slot] = e.url
       }
+      defaultPackGifs.value = map
+      sleepGifVersion.value++
     }
   } catch {}
 }
 
-// ===== 为选中设备加载其活跃表情包 =====
+// ===== 为选中设备加载其活跃表情包（全部槽位） =====
 async function loadDevicePack(device) {
   const key = devKey(device)
   if (!key) return
@@ -421,16 +435,18 @@ async function loadDevicePack(device) {
     if (activeRes?.data?.code === 0 && activeRes.data.data?.pack) {
       const packName = activeRes.data.data.pack
       if (packName === 'default') {
-        devicePackGifs.value[key] = ''
+        delete devicePackGifs.value[key]
         return
       }
       const packRes = await api.emoPackDetail(packName)
       if (packRes?.data?.code === 0 && Array.isArray(packRes.data.data)) {
-        const sleep = packRes.data.data.find(e => e.name === 'sleep' || e.filename === 'sleep.gif')
-        if (sleep) {
-          devicePackGifs.value[key] = sleep.url
-          sleepGifVersion.value++
+        const map = {}
+        for (const e of packRes.data.data) {
+          const slot = e.name || (e.filename || '').replace(/\.gif$/, '')
+          if (slot) map[slot] = e.url
         }
+        devicePackGifs.value[key] = map
+        sleepGifVersion.value++
       }
     }
   } catch {}
@@ -486,7 +502,7 @@ function updateBoardHeight() {
 
 onMounted(() => {
   loadPositions()
-  loadDefaultSleepGif()
+  loadDefaultPack()
   nextTick(updateBoardHeight)
 })
 

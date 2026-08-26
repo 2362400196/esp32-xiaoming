@@ -424,7 +424,7 @@ void app_main(void)
             if (nvs_get_str(h, "ss_enabled", buf, &sz) == ESP_OK) {
                 ss_enabled = (strcmp(buf, "true") == 0 || strcmp(buf, "1") == 0);
                 ss_enabled_found = true;
-                power_manager_set_screensaver_config(ss_enabled, -1);
+                power_manager_set_screensaver_config(ss_enabled ? 1 : 0, -1);
                 ESP_LOGI(TAG, "从 NVS 恢复屏保开关: %s", ss_enabled ? "开启" : "关闭");
             }
 
@@ -436,7 +436,7 @@ void app_main(void)
                 if (sec >= 5 && sec <= 600) {
                     // 使用已恢复的开关值，不硬编码为 true！
                     // 若 ss_enabled 未找到（NVS 无记录），则默认启用屏保
-                    power_manager_set_screensaver_config(ss_enabled_found ? ss_enabled : true, sec);
+                    power_manager_set_screensaver_config(ss_enabled_found ? (ss_enabled ? 1 : 0) : 1, sec);
                     ESP_LOGI(TAG, "从 NVS 恢复屏保超时: %d秒（开关=%s）", sec, ss_enabled ? "开" : "关");
                 }
             }

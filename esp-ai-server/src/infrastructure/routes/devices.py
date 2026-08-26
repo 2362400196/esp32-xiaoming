@@ -443,6 +443,7 @@ async def api_get_devices(user: UserModel = Depends(get_current_user)):
     device_list = []
     for d in devices:
         online = False
+        state = "idle"
         if registry:
             # 依次尝试 device_id / mac_address / device_key 查找在线状态
             info = registry.resolve(d.device_id)
@@ -453,12 +454,16 @@ async def api_get_devices(user: UserModel = Depends(get_current_user)):
             if info:
                 channel = info.get("channel")
                 online = getattr(channel, "connected", False) if channel else False
+                fsm = info.get("fsm")
+                if fsm and hasattr(fsm, "get"):
+                    state = fsm.get().value
         device_list.append({
             "device_id": d.device_id,
             "name": d.name,
             "mac": d.mac_address,
             "device_key": d.device_key,
             "online": online,
+            "state": state,
             "bound_at": d.bound_at,
         })
     return {"code": 0, "message": "ok", "data": {"devices": device_list}}

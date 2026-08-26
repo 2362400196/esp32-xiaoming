@@ -59,7 +59,7 @@ static SemaphoreHandle_t s_ws_mutex = NULL;  // websocket 互斥锁（保护重�
 // 因此 stop+start 都放在本独立任务中执行。
 static void reconnect_task(void *arg)
 {
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    vTaskDelay(pdMS_TO_TICKS(500));
     if (s_client) {
         esp_websocket_client_stop(s_client);
         vTaskDelay(pdMS_TO_TICKS(100));  // 等状态稳定

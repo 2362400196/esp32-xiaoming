@@ -194,7 +194,7 @@ class WebSocketSessionHandler:
         logger.info(f"[WS] Connection accepted for device: {device_key[:16]}")
 
         channel = WSChannel()
-        fsm = SessionFSM()
+        fsm = SessionFSM(on_change=lambda s: self._broadcast_device_state(True, s.value))
         channel.bind(websocket)
         self.channel = channel
         self.fsm = fsm
@@ -228,6 +228,22 @@ class WebSocketSessionHandler:
             logger.info(f"[WS] 设备屏幕能力: has_display={tool_mgr.device_has_display}")
             if getattr(user_config, "skills", None):
                 tool_mgr.active_skills = set(user_config.skills)
+
+        # 设备连接/重连时同步显示配置（机器人模式/屏保）。
+        # 若设备在离线期间被改过这些配置，指令无法下发，重连后需按服务端 DB 状态重新同步，
+        # 否则设备会一直停留在旧的机器人模式状态。
+        if user_config:
+            display_sync = {
+                "robot_mode": "true" if str(getattr(user_config, "robot_mode", "false")) in ("true", "1") else "false",
+                "screensaver_enabled": "true" if str(getattr(user_config, "screensaver_enabled", "true")) in ("true", "1") else "false",
+                "screensaver_timeout": str(getattr(user_config, "screensaver_timeout", "30") or "30"),
+            }
+            try:
+                from src.use_cases.sdk.device import send_device_command
+                await send_device_command(tool_mgr, "update_config", display_sync)
+                logger.info(f"[WS] 已同步显示配置到设备: {display_sync}")
+            except Exception as e:
+                logger.warning(f"[WS] 同步显示配置失败: {e}")
 
         user_mcp_servers = user_config.mcp_servers if user_config and user_config.mcp_servers else None
         _disabled_mcp_servers = getattr(user_config, 'disabled_mcp_servers', None) if user_config else None
@@ -565,6 +581,9 @@ class WebSocketSessionHandler:
                 firmware_version=device_firmware_version,
             )
 
+        # 设备上线 → 推送 Web 前端
+        self._broadcast_device_state(True, "idle")
+
         if asr_client:
             _t = asyncio.create_task(session.pre_connect_asr())
             self._bg_tasks.add(_t)
@@ -582,6 +601,19 @@ class WebSocketSessionHandler:
         await channel.send_json({"type": "play_audio_ws_conntceed"})
         logger.info(f"[WS] Sent play_audio_ws_conntceed, waiting for device response...")
 
+    def _broadcast_device_state(self, online: bool, state: str = "idle") -> None:
+        """推送设备状态到 Web 前端（实时更新设备屏幕图标）"""
+        try:
+            from src.infrastructure.web import get_web_state_hub
+            hub = get_web_state_hub()
+            if hub:
+                device_id = self.device_mac or self.device_key
+                asyncio.get_running_loop().create_task(
+                    hub.broadcast_device_state(device_id, online, state)
+                )
+        except Exception:
+            pass
+
     def on_asr_text(self, text: str) -> None:
         """ASR 文本回调"""
         # 注意：空文本（ASR 流结束/静音帧）不覆盖已有识别结果！
@@ -590,6 +622,18 @@ class WebSocketSessionHandler:
         if text:
             self.session.runtime.asr_full_text = text
             self.session.runtime.asr_last_result_time = time.time()
+            # 实时下发 ASR 中间结果，屏幕边听边显示（VAD 结束后不再发，避免覆盖 LLM 字幕）
+            if not self.session.runtime.asr_processed:
+                try:
+                    asyncio.get_running_loop().create_task(self._send_iat_partial(text))
+                except RuntimeError:
+                    pass
+
+    async def _send_iat_partial(self, text: str) -> None:
+        try:
+            await self.channel.send_json({"type": "instruct", "command_id": "on_iat_cb", "data": text})
+        except Exception as e:
+            logger.debug(f"[VAD] 发送 ASR 中间结果失败: {e}")
 
     async def on_vad_end(self) -> None:
         """VAD 结束回调"""
@@ -1353,6 +1397,9 @@ class WebSocketSessionHandler:
                 await registry.unregister(self.device_key)
         except Exception as e:
             logger.warning(f"[WS] 设备注销失败: {e}")
+
+        # 设备离线 → 推送 Web 前端
+        self._broadcast_device_state(False, "idle")
 
         # 设备断连 → 推送微信通知
         try:

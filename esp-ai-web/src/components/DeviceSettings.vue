@@ -599,7 +599,7 @@ async function saveScreensaver() {
   const timeout = Math.max(5, Math.min(600, screensaverTimeout.value || 30))
   screensaverTimeout.value = timeout
   const res = await api.setDisplayConfig(mac, {
-    screensaver_enabled: true,
+    screensaver_enabled: screensaverEnabled.value,
     screensaver_timeout: timeout,
   })
   if (res.status !== 200 || res.data?.code !== 0) {

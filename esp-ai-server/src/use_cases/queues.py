@@ -119,10 +119,10 @@ class BackpressureQueue:
 
 
 class TextQueue(BackpressureQueue):
-    """文本队列：LLM输出 → Splitter，满时丢弃最旧"""
+    """文本队列：LLM输出 → Splitter，满时阻塞（保证长回复不丢句）"""
 
-    def __init__(self, maxsize: int = 50):
-        super().__init__(maxsize=maxsize, name="text_queue", on_full="drop_oldest")
+    def __init__(self, maxsize: int = 100):
+        super().__init__(maxsize=maxsize, name="text_queue", on_full="block")
 
 
 class AudioQueue(BackpressureQueue):
@@ -149,7 +149,7 @@ class BackpressureQueues:
     """
 
     def __init__(self):
-        self.text = TextQueue(maxsize=10)
+        self.text = TextQueue(maxsize=100)
         self.audio = AudioQueue(maxsize=20)
         self.send = SendQueue(maxsize=256)
 

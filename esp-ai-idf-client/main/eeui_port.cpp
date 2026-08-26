@@ -631,8 +631,6 @@ void eeui_port_clear_ota_progress(void)
         }
         if (s_vol_ui.icon != NULL && lv_obj_is_valid(s_vol_ui.icon)) {
             lv_obj_remove_flag(s_vol_ui.icon, LV_OBJ_FLAG_HIDDEN);
-            if (s_vol_ui.bar) lv_obj_remove_flag(s_vol_ui.bar, LV_OBJ_FLAG_HIDDEN);
-            if (s_vol_ui.label) lv_obj_remove_flag(s_vol_ui.label, LV_OBJ_FLAG_HIDDEN);
         }
         if (s_sig_ui.canvas != NULL && lv_obj_is_valid(s_sig_ui.canvas)) {
             lv_obj_remove_flag(s_sig_ui.canvas, LV_OBJ_FLAG_HIDDEN);
@@ -892,15 +890,20 @@ static void canvas_draw_px(lv_obj_t *canvas, int x, int y, lv_color_t color, lv_
 
 static void volume_hide_cb(void *arg)
 {
-    if (lvgl_lock(50)) {
-        if (s_vol_ui.bar && lv_obj_is_valid(s_vol_ui.bar)) {
-            lv_obj_add_flag(s_vol_ui.bar, LV_OBJ_FLAG_HIDDEN);
+    // LVGL 忙（开机/重连期间 GIF 解码等）时锁可能超时；失败则重新排程，确保最终隐藏
+    if (!lvgl_lock(200)) {
+        if (s_vol_ui.hide_timer) {
+            esp_timer_start_once(s_vol_ui.hide_timer, 200000);
         }
-        if (s_vol_ui.label && lv_obj_is_valid(s_vol_ui.label)) {
-            lv_obj_add_flag(s_vol_ui.label, LV_OBJ_FLAG_HIDDEN);
-        }
-        lvgl_unlock();
+        return;
     }
+    if (s_vol_ui.bar && lv_obj_is_valid(s_vol_ui.bar)) {
+        lv_obj_add_flag(s_vol_ui.bar, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_vol_ui.label && lv_obj_is_valid(s_vol_ui.label)) {
+        lv_obj_add_flag(s_vol_ui.label, LV_OBJ_FLAG_HIDDEN);
+    }
+    lvgl_unlock();
 }
 
 void eeui_port_render_volume(float volume)
@@ -1839,8 +1842,6 @@ void eeui_port_set_robot_mode(bool enabled)
         }
         if (s_vol_ui.icon && lv_obj_is_valid(s_vol_ui.icon)) {
             lv_obj_remove_flag(s_vol_ui.icon, LV_OBJ_FLAG_HIDDEN);
-            if (s_vol_ui.bar) lv_obj_remove_flag(s_vol_ui.bar, LV_OBJ_FLAG_HIDDEN);
-            if (s_vol_ui.label) lv_obj_remove_flag(s_vol_ui.label, LV_OBJ_FLAG_HIDDEN);
         }
         if (s_sig_ui.canvas && lv_obj_is_valid(s_sig_ui.canvas)) {
             lv_obj_remove_flag(s_sig_ui.canvas, LV_OBJ_FLAG_HIDDEN);

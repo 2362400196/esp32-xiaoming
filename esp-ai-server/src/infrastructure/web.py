@@ -25,7 +25,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -175,6 +175,11 @@ async def lifespan(app: FastAPI):
         app.state.wake_audio_manager = _wake_audio_manager
         app.state.speaker = create_speaker(_device_registry, _wake_audio_manager)
         app.state.auth_service = create_auth_service()
+
+        # Web 前端设备状态实时推送中心
+        from src.use_cases.web_state_hub import WebStateHub
+        app.state.web_state_hub = WebStateHub()
+        logger.info("[WebState] Web 前端设备状态推送中心已初始化")
 
         # 启动闹钟/提醒管理器
         try:
@@ -633,6 +638,12 @@ def get_device_registry():
     return app.state.device_registry if app and hasattr(app.state, 'device_registry') else None
 
 
+def get_web_state_hub():
+    """获取 WebStateHub 实例（模块级，供 interfaces/ 使用）"""
+    app = get_app()
+    return app.state.web_state_hub if app and hasattr(app.state, 'web_state_hub') else None
+
+
 def get_auth_service():
     """获取 AuthService 实例（模块级，供 interfaces/ 使用）"""
     app = get_app()
@@ -990,6 +1001,44 @@ def _register_routes(app: FastAPI) -> None:
     app.websocket("/")(handle_websocket)
     app.websocket("/connect_espai_node")(handle_websocket)
 
+    # Web 前端设备状态实时推送端点（JWT 认证，?token=<access_token>）
+    @app.websocket("/ws/web")
+    async def web_state_ws(websocket: WebSocket):
+        token = websocket.query_params.get("token", "")
+        user = None
+        if token:
+            try:
+                from src.infrastructure.security_jwt import decode_token
+                payload = decode_token(token)
+                if payload.get("type") == "access" and payload.get("sub"):
+                    from src.infrastructure.db.session import get_session_ctx
+                    from src.infrastructure.db.models import UserModel
+                    from sqlalchemy import select
+                    async with get_session_ctx() as session:
+                        result = await session.execute(select(UserModel).where(UserModel.id == payload["sub"]))
+                        user = result.scalar_one_or_none()
+            except Exception:
+                user = None
+        if user is None:
+            await websocket.close(code=4401)
+            return
+
+        await websocket.accept()
+        hub = get_web_state_hub()
+        if hub:
+            await hub.register(websocket)
+        try:
+            while True:
+                # 持续接收以检测断开；客户端不发消息时阻塞等待
+                await websocket.receive_text()
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+        finally:
+            if hub:
+                await hub.unregister(websocket)
+
     # 按业务域拆分的路由模块（统一使用 app.include_router）
     from src.infrastructure.routes.system import router as system_router
     app.include_router(system_router)
@@ -1053,6 +1102,7 @@ __all__ = [
     "get_server_ips",
     # 供路由模块使用的辅助函数
     "get_device_registry",
+    "get_web_state_hub",
     "get_speaker",
     "get_auth_service",
     "_add_skill_to_device",
