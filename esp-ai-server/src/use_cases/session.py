@@ -652,6 +652,7 @@ class Session:
                 if not success:
                     logger.error("[PluginASR] 创建插件 ASR 会话失败")
                     return
+                logger.info(f"[Session:{self.session_id}] 插件 ASR 会话已就绪，开始监听")
 
             async def send_audio():
                 nonlocal send_done

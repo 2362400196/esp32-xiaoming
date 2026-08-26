@@ -94,6 +94,15 @@ export default defineUserConfig({
           ],
         },
         {
+          text: '语音服务插件',
+          collapsed: false,
+          items: [
+            { text: 'ASR 插件教程', link: '/plugin/asr-plugin' },
+            { text: 'TTS 插件教程', link: '/plugin/tts-plugin' },
+            { text: 'LLM 插件教程', link: '/plugin/llm-plugin' },
+          ],
+        },
+        {
           text: '插件 SDK',
           collapsed: false,
           items: [

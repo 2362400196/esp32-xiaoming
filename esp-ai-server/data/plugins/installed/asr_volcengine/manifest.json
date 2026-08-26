@@ -9,10 +9,5 @@
     "permissions": ["network"],
     "provides": {
         "asr": ["volcengine"]
-    },
-    "config_fields": [
-        {"key": "api_key", "label": "API Key", "type": "password"},
-        {"key": "resource_id", "label": "Resource ID", "type": "text"},
-        {"key": "model", "label": "模型", "type": "text", "default": "volc.asr.222222222"}
-    ]
+    }
 }

@@ -89,8 +89,6 @@ def _log_perf_report(session, result, pipeline, asr_text: str) -> None:
         ]
         if asr_ms is not None:
             lines.append(f"  ASR 识别 : {_fmt(asr_ms)}")
-        if resp_ms is not None:
-            lines.append(f"  首响延迟 : {_fmt(resp_ms)}   (ASR完成→首帧音频)")
         lines.append(
             f"  LLM 生成 : {_fmt(llm_ms)}   (首token {_fmt(llm_ttft_ms)}, "
             f"输出 {perf.get('llm_chars', 0)}字/{perf.get('llm_sentences', 0)}句)"
@@ -98,6 +96,8 @@ def _log_perf_report(session, result, pipeline, asr_text: str) -> None:
         lines.append(
             f"  TTS 合成 : {_fmt(tts_ms)}   ({perf.get('tts_chunks', 0)}块, 共{audio_ms:.0f}ms音频)"
         )
+        if resp_ms is not None:
+            lines.append(f"  首响延迟 : {_fmt(resp_ms)}   (ASR完成→首帧音频)")
         lines.append(f"  Pipeline : {_fmt(pipeline_ms)}   (总耗时)")
         if e2e_ms is not None:
             lines.append(f"  端到端   : {_fmt(e2e_ms)}   (ASR开始→播放完成)")

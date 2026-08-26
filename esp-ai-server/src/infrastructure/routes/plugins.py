@@ -157,7 +157,9 @@ async def set_plugin_config(
             return {"code": 1, "message": f"未知插件: {plugin_name}", "data": None}
         declared = {f["key"] for f in plugins[plugin_name].get("config_fields", [])}
         unknown = [k for k in body.config.keys() if k not in declared]
-        if unknown:
+        # 仅当插件声明了 config_fields 才做白名单校验；
+        # 未声明的插件接受任意键，避免开发者漏配 config_fields 后配置存不进去
+        if declared and unknown:
             return {"code": 1, "message": f"未知配置项: {unknown}（本插件支持: {sorted(declared)}）", "data": None}
 
         from src.infrastructure.db.repositories.device_repository import DeviceRepository

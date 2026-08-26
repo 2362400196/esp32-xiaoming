@@ -9,10 +9,5 @@
     "permissions": ["network"],
     "provides": {
         "llm": ["openai"]
-    },
-    "config_fields": [
-        {"key": "api_key", "label": "API Key", "type": "password"},
-        {"key": "base_url", "label": "Base URL", "type": "text", "default": "https://api.openai.com/v1"},
-        {"key": "model", "label": "模型", "type": "text", "default": "gpt-4o"}
-    ]
+    }
 }
