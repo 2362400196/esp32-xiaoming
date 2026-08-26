@@ -145,6 +145,7 @@ class ConversationPipeline:
         device_id: str = "",
         ltm_service: Optional["LongTermMemoryServiceImpl"] = None,
         precomputed_skill_catalog: Optional[str] = None,
+        max_sentences: int = 2,
     ) -> None:
         self.llm_processor = llm_processor
         self.tts_processor = tts_processor
@@ -169,12 +170,14 @@ class ConversationPipeline:
         self._last_emotion = None
         self._device_buffer = self.config.client_max_buffer
         self._buffer_lock = asyncio.Lock()
+        self.max_sentences = max_sentences
 
         self.state = PipelineState.IDLE
         self._tasks: list[asyncio.Task] = []
         # 后台任务引用（防止被 GC 回收导致协程中途取消且无告警）
         self._bg_tasks: set = set()
         self._total_duration_ms = 0.0  # 累计TTS音频总时长
+        self._perf: dict = {}  # 性能分析计时数据（LLM/TTS 各环节耗时）
 
         # system prompt 缓存：skill 目录和回复要求基本不变，避免每次 run() 都重新拼接
         # 优先使用外部预计算的 catalog（从 Session 传入，避免首轮 2.3s 阻塞）
@@ -187,7 +190,7 @@ class ConversationPipeline:
         self._ltm_catalog_ttl: float = 60.0  # 缓存 60 秒
         self._reply_style = (
             "\n\n[回复要求]\n"
-            "- 回复要简短精炼，不要啰嗦\n"
+            "- 回复必须控制在 1 句、25 字以内，一句话说完，像真人聊天一样简短自然\n"
             "- 用口语化的方式说话，像朋友聊天\n"
             "- 不要每次都加表情符号\n"
             "- 不要说'好的'、'没问题'这种废话，直接回答\n"
@@ -249,8 +252,9 @@ class ConversationPipeline:
         await self.fsm.set(SessionState.LLM)
 
         llm = self.llm_processor
+        self._tool_manager = getattr(llm, "tool_manager", None)
         memory_enabled = True
-        memory_max = 20
+        memory_max = 10
         if self.user_config:
             if getattr(self.user_config, "llm_memory_enabled", None) is not None:
                 memory_enabled = self.user_config.llm_memory_enabled
@@ -408,7 +412,7 @@ class ConversationPipeline:
 
         volc_tts = self.tts_processor
         # 并行启动 TTS 建连和 LLM（减少 150-400ms 串行延迟）
-        tts_session_fut = asyncio.create_task(volc_tts.create_session(cancel_event=self.cancel_event))
+        tts_session_fut = asyncio.create_task(volc_tts.create_session(cancel_event=self.cancel_event, tool_manager=self._tool_manager))
         # LLM 可以立即开始，不需要等 TTS 建连
         t_llm = asyncio.create_task(self._llm_task(llm, messages))
         t_splitter = asyncio.create_task(self._splitter_task())
@@ -534,6 +538,11 @@ class ConversationPipeline:
         """LLM Worker：流式生成 → 分句 → text_queue"""
         seq_id = 0
         full_text = ""
+        self._hard_sentence_count = 0
+        fed_chars = 0
+        _perf = self._perf
+        _perf["llm_start"] = time.time()
+        _perf["llm_first_token"] = 0.0
         from src.use_cases.tools_system import StopPipeline
         try:
             async for token in llm.stream_chat(messages):
@@ -549,18 +558,30 @@ class ConversationPipeline:
                     logger.error(f"[Pipeline] LLM 错误: {token}")
                     break
 
+                if not _perf["llm_first_token"]:
+                    _perf["llm_first_token"] = time.time()
+
                 full_text += token
                 sentences = self.splitter.feed(token)
                 for sentence in sentences:
                     if self.cancel_event.is_set():
                         break
+                    # 上限按完整句子（句号/感叹号/问号结尾）计数，而非逗号软切分片段，
+                    # 避免"哈哈，"这类称呼片段浪费句数预算导致回复被截断。
+                    # fed_chars>0 保证首句始终送入 TTS，避免单句超长时整轮静音
+                    if self._hard_sentence_count >= self.max_sentences or (fed_chars > 0 and fed_chars + len(sentence) > self.MAX_CHARS):
+                        logger.debug(f"[Pipeline] 超过回复上限，丢弃后续片段: {sentence[:30]}...")
+                        continue
                     await self.queues.text.put((seq_id, sentence))
                     logger.debug(f"[Pipeline] 句子 #{seq_id} 入 text_queue: {sentence[:50]}...")
                     seq_id += 1
+                    fed_chars += len(sentence)
+                    if sentence[-1] in "。！？.!?":
+                        self._hard_sentence_count += 1
 
             if not self.cancel_event.is_set():
                 remaining = self.splitter.flush()
-                if remaining:
+                if remaining and self._hard_sentence_count < self.max_sentences and (fed_chars == 0 or fed_chars + len(remaining) <= self.MAX_CHARS):
                     await self.queues.text.put((seq_id, remaining))
                     seq_id += 1
 
@@ -570,6 +591,9 @@ class ConversationPipeline:
             logger.error(f"[Pipeline] LLM 任务异常: {e}")
         finally:
             self.queues.text.put_nowait((-1, None))
+            _perf["llm_end"] = time.time()
+            _perf["llm_chars"] = len(full_text)
+            _perf["llm_sentences"] = seq_id
             logger.info(f"[Pipeline] LLM 结束，共 {seq_id} 句，full_text={len(full_text)}字符")
 
         memory_enabled = True
@@ -629,7 +653,14 @@ class ConversationPipeline:
         return full_text
 
     async def _splitter_task(self):
-        """Splitter Worker：text_queue → audio_queue"""
+        """Splitter Worker：text_queue → audio_queue（合并短块，减少 TTS 请求数）
+
+        首句立即发出保证首响延迟；后续软切分短句累积合并，
+        遇到硬切分（。！？）或达到长度阈值时一次性发出。
+        """
+        pending = ""
+        pending_seq = -1
+        first_emitted = False
         try:
             while True:
                 if self.cancel_event.is_set():
@@ -638,19 +669,36 @@ class ConversationPipeline:
                 seq_id, sentence = await self.queues.text.get()
                 try:
                     if seq_id == -1 or sentence is None:
+                        if pending:
+                            await self.queues.audio.put((pending_seq, pending, pending))
+                            pending = ""
                         await self.queues.audio.put((-1, None, None))
                         return
 
                     if not sentence.strip() or len(sentence.strip()) <= 1:
                         continue
 
-                    await self.queues.audio.put((seq_id, sentence, sentence))
+                    if not first_emitted:
+                        await self.queues.audio.put((seq_id, sentence, sentence))
+                        first_emitted = True
+                        continue
+
+                    if not pending:
+                        pending_seq = seq_id
+                    pending += sentence
+                    is_hard_stop = sentence[-1] in "。！？.!?"
+                    if is_hard_stop or len(pending) >= self.MERGE_THRESHOLD:
+                        await self.queues.audio.put((pending_seq, pending, pending))
+                        pending = ""
                 finally:
                     self.queues.text.task_done()
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.error(f"[Pipeline] Splitter 任务异常: {e}")
+
+    MERGE_THRESHOLD = 40  # 短句合并长度阈值（字符），减少 TTS 请求数
+    MAX_CHARS = 30  # 回复合成字符上限（兜底，防止单个超长句）
 
     EMOTION_KEYWORDS: dict = {
         "快乐": ["哈哈", "开心", "高兴", "太好了", "棒", "妙", "不错", "喜欢", "爱", "谢谢", "恭喜", "nice", "good", "很好", "太棒了", "真不错", "赞"],
@@ -723,10 +771,14 @@ class ConversationPipeline:
 
     async def _tts_task(self, volc_tts, session):
         """TTS Worker：audio_queue → TTS合成 → send_queue"""
+        _perf = self._perf
+        _perf["tts_start"] = time.time()
+        _tts_chunks = 0
+        _tts_bytes = 0
         own_session = session is None
         if own_session:
             try:
-                session = await volc_tts.create_session(cancel_event=self.cancel_event)
+                session = await volc_tts.create_session(cancel_event=self.cancel_event, tool_manager=self._tool_manager)
             except Exception as e:
                 logger.error(f"[Pipeline] TTS 创建 session 失败: {e}")
                 await self.queues.send.put((-1, None, None))
@@ -784,6 +836,8 @@ class ConversationPipeline:
                             break
                         if audio_chunk:
                             total_audio_bytes += len(audio_chunk)
+                            _tts_chunks += 1
+                            _tts_bytes += len(audio_chunk)
                             frame = self.voice_generator.make_tts_frame(
                                 self.config.tts_session_id, audio_chunk, "00"
                             )
@@ -818,6 +872,9 @@ class ConversationPipeline:
         except Exception as e:
             logger.error(f"[Pipeline] TTS 任务异常: {e}")
         finally:
+            _perf["tts_end"] = time.time()
+            _perf["tts_chunks"] = _tts_chunks
+            _perf["tts_audio_bytes"] = _tts_bytes
             if own_session and session:
                 try:
                     await session.close()
@@ -864,6 +921,7 @@ class ConversationPipeline:
                     # 第一帧实际音频数据到达时，发送 play_audio 和 tts_chunk_start
                     if not self._play_audio_sent:
                         self._play_audio_sent = True
+                        self._perf["first_audio_sent"] = time.time()
                         await self.channel.send_json({"type": "play_audio", "tts_task_id": self.config.tts_session_id})
                         # 等待客户端处理 play_audio 并上报缓冲区状态，最多 50ms
                         wait_start = time.time()

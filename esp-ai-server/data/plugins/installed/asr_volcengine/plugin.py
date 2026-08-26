@@ -17,12 +17,13 @@ SAUC 协议帧格式：
 
 from __future__ import annotations
 
+import asyncio
 import json
 import struct
 import uuid
 
 from src.use_cases.tools_system import tool
-from src.use_cases._plugin_helpers import ws_connect, ws_send, ws_recv, ws_close
+from src.use_cases._plugin_helpers import ws_connect, ws_send, ws_recv, ws_close, ws_prewarm
 
 # 火山引擎 ASR SAUC 地址
 ASR_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel"
@@ -94,6 +95,37 @@ def _is_final(result: dict) -> bool:
 
 
 @tool(cache=False)
+async def asr_volcengine_prewarm(config: dict | None = None,
+                                 tool_manager=None) -> dict:
+    """预热 ASR WebSocket 连接池（设备连接时调用，确保首次语音输入免建连）。
+
+    Args:
+        config: 配置，包含 api_key, resource_id
+
+    Returns:
+        {"created": int, "error": str|null}
+    """
+    cfg = config or {}
+    api_key = cfg.get("api_key", "")
+    resource_id = cfg.get("resource_id", "volc.bigasr.sauc.duration")
+
+    if not api_key:
+        return {"created": 0, "error": "api_key 未配置"}
+
+    headers = {
+        "X-Api-Key": api_key,
+        "X-Api-Resource-Id": resource_id,
+        "X-Api-Connect-Id": str(uuid.uuid4()),
+    }
+    try:
+        created = await ws_prewarm(ASR_URL, headers, count=2,
+                                   pool_headers=["X-Api-Key", "X-Api-Resource-Id"])
+        return {"created": created, "error": None}
+    except Exception as e:
+        return {"created": 0, "error": f"预热失败: {e}"}
+
+
+@tool(cache=False)
 async def asr_volcengine_start_session(config: dict | None = None,
                                        tool_manager=None) -> dict:
     """开始 ASR 识别会话，返回 session_id。
@@ -118,8 +150,19 @@ async def asr_volcengine_start_session(config: dict | None = None,
         "X-Api-Connect-Id": str(uuid.uuid4()),
     }
 
+    # 先触发后台预取（为下次会话提前建连，预取 2 个保证池中有备用），再取当前连接
     try:
-        ws_id = await ws_connect(ASR_URL, headers)
+        asyncio.get_running_loop().create_task(
+            ws_prewarm(ASR_URL, headers, count=2,
+                       pool_headers=["X-Api-Key", "X-Api-Resource-Id"])
+        )
+    except Exception:
+        pass
+
+    # 从框架预热池取连接（prewarm 模式：取预热连接，会话结束真正关闭）
+    try:
+        ws_id = await ws_connect(ASR_URL, headers, pool="prewarm",
+                                 pool_headers=["X-Api-Key", "X-Api-Resource-Id"])
     except Exception as e:
         return {"session_id": "", "error": f"WebSocket 连接失败: {e}"}
 

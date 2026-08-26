@@ -91,6 +91,15 @@ _tool_owner: dict[str, str] = {}
 _service_registry: dict[str, dict[str, str]] = {}
 
 
+# 服务插件必需的工具后缀（service_type → [suffixes]）
+# 插件声明 provides 时必须提供这些工具，否则该服务不会被注册
+_SERVICE_REQUIRED_TOOLS: dict[str, list[str]] = {
+    "llm": ["start_chat", "get_next", "end_chat"],
+    "tts": ["start_synthesis", "get_audio", "end_synthesis"],
+    "asr": ["start_session", "send_audio", "get_result", "end_session"],
+}
+
+
 def register_service(service_type: str, provider_name: str, plugin_name: str) -> None:
     """注册服务插件到全局注册表。"""
     if service_type not in _service_registry:
@@ -130,11 +139,27 @@ def has_service_plugin(service_type: str) -> bool:
 
 
 def _register_plugin_services(plugin_name: str, manifest: object) -> None:
-    """从 manifest 的 provides 字段注册服务。"""
+    """从 manifest 的 provides 字段注册服务。
+
+    注册前校验该服务类型必需的约定工具是否存在（如 TTS 需要
+    start_synthesis / get_audio / end_synthesis），缺失则跳过注册并给出明确报错，
+    避免开发者写错工具名后静默失败。
+    """
     provides = getattr(manifest, "provides", None) or {}
     if not provides:
         return
+    loaded_tools = set(_loaded_tools.get(plugin_name, []))
     for service_type, providers in provides.items():
+        required = _SERVICE_REQUIRED_TOOLS.get(service_type)
+        if required:
+            expected = [f"{plugin_name}_{s}" for s in required]
+            missing = [t for t in expected if t not in loaded_tools]
+            if missing:
+                logger.error(
+                    f"[插件] {plugin_name} 声明提供 {service_type} 服务，但缺少必需工具 "
+                    f"{missing}。请按约定实现 {expected}，该服务未注册。"
+                )
+                continue
         for provider_name in providers:
             register_service(service_type, provider_name, plugin_name)
             logger.info(
@@ -435,12 +460,33 @@ def is_optional_plugin(plugin_name: str) -> bool:
     return _plugin_optional.get(plugin_name, False)
 
 
+def is_system_plugin(plugin_name: str) -> bool:
+    """判断插件是否为系统核心服务插件。
+
+    仅当插件同时满足以下条件才算系统插件（随服务器分发的核心语音服务）：
+      1. manifest.json 声明 author=system（随服务器分发）
+      2. 提供 asr / llm / tts 核心服务
+
+    这样只有 asr_volcengine / llm_openai / tts_volcengine 三个核心插件
+    免安装、不可卸载；其他插件（闹钟、天气、模板 cs、第三方 ASR/LLM/TTS
+    提供商等）均由用户自行安装/卸载。
+    """
+    manifest = _plugin_manifest.get(plugin_name)
+    if manifest is None:
+        return False
+    if (getattr(manifest, "author", "") or "").lower() != "system":
+        return False
+    provides = getattr(manifest, "provides", None) or {}
+    return any(s in provides for s in ("asr", "llm", "tts"))
+
+
 def get_optional_plugins_info() -> list[dict]:
     """返回所有可选插件的信息（含元数据）。"""
     out = []
     for name in sorted(_plugin_optional.keys()):
         if _plugin_optional.get(name):
             meta = _plugin_meta.get(name, {})
+            manifest = _plugin_manifest.get(name)
             out.append({
                 "name": name,
                 "version": _plugin_version.get(name, "1.0.0"),
@@ -449,6 +495,8 @@ def get_optional_plugins_info() -> list[dict]:
                 "description": meta.get("description", ""),
                 "requires": meta.get("requires", []),
                 "config_fields": meta.get("config_fields", []),
+                "author": getattr(manifest, "author", "") if manifest else "",
+                "system": is_system_plugin(name),
             })
     return out
 

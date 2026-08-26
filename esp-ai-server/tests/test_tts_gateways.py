@@ -46,6 +46,7 @@ def make_mock_tts_settings(enable_pool=True, api_key="default-tts-key"):
     settings.tts.speed_ratio = 1.0
     settings.tts.volume_ratio = 1.0
     settings.tts.pitch_ratio = 1.0
+    settings.tts.explicit_dialect = ""
     settings.tts.provider = "volcengine"
     settings.tts.enable_pool = enable_pool
     settings.tts.pool_max_size = 10
@@ -382,7 +383,10 @@ class TestCreateSession:
 
     async def test_create_session_success(self, patched_tts):
         gw = VolcEngineTTSGateway(config={"api_key": "k"})
-        session = await gw.create_session()
+        # 池的 acquire 会创建后台心跳任务，patch 掉避免测试后残留挂起
+        with patch("src.interfaces.tts_gateways.asyncio.create_task",
+                   side_effect=_close_coro_side_effect):
+            session = await gw.create_session()
         assert isinstance(session, TTSSession)
         assert session.websocket is patched_tts["fake_ws"]
         # websocket 已加入活跃列表
@@ -392,8 +396,10 @@ class TestCreateSession:
         gw = VolcEngineTTSGateway(config={"api_key": "k"})
         cancel_event = MagicMock()
         cancel_event.is_set.return_value = True
-        with pytest.raises(asyncio_cancelled_error_or_runtime()):
-            await gw.create_session(cancel_event=cancel_event)
+        with patch("src.interfaces.tts_gateways.asyncio.create_task",
+                   side_effect=_close_coro_side_effect):
+            with pytest.raises(asyncio_cancelled_error_or_runtime()):
+                await gw.create_session(cancel_event=cancel_event)
 
     async def test_create_session_retry_then_fail(self, patched_tts):
         # 连接持续失败，重试后抛出异常

@@ -391,9 +391,39 @@ def plugin_log(message: str, level: str = "info") -> None:
 # ════════════════════════════════════════════════════════════
 
 
-async def ws_connect(url: str, headers: dict | None = None) -> str:
-    """创建 WebSocket 连接，返回 session_id。"""
-    return await client.send_async("ws_connect", {"url": url, "headers": headers or {}})
+async def ws_connect(url: str, headers: dict | None = None, pool: str = "normal",
+                     pool_headers: list | None = None) -> str:
+    """创建 WebSocket 连接，返回 session_id。
+
+    pool 参数：
+      - "reuse"：复用池中空闲连接，close 时归还（请求型连接，如 TTS）
+      - "prewarm"：取预热连接，close 时真正关闭（会话型连接，如 ASR）
+      - "normal"（默认）：不池化
+
+    pool_headers：声明哪些 header 参与连接池分组（如自定义鉴权头）。
+    未提供时回退到框架内置白名单（x-api-key / x-api-resource-id / authorization / host）。
+    使用自定义鉴权 header（如 X-NLS-Token）时务必传入，避免不同凭据的连接混池。
+    """
+    return await client.send_async(
+        "ws_connect", {
+            "url": url, "headers": headers or {}, "pool": pool,
+            "pool_headers": pool_headers or [],
+        }
+    )
+
+
+async def ws_prewarm(url: str, headers: dict | None = None, count: int = 1,
+                     pool_headers: list | None = None) -> int:
+    """预热 WebSocket 连接放入连接池，返回成功创建数量。
+
+    pool_headers 语义同 ws_connect。
+    """
+    return await client.send_async(
+        "ws_prewarm", {
+            "url": url, "headers": headers or {}, "count": count,
+            "pool_headers": pool_headers or [],
+        }
+    )
 
 
 async def ws_send(session_id: str, data: bytes) -> None:
@@ -588,6 +618,7 @@ def build_helpers_shim() -> types.ModuleType:
         "ws_send": ws_send,
         "ws_recv": ws_recv,
         "ws_close": ws_close,
+        "ws_prewarm": ws_prewarm,
     })
     return mod
 

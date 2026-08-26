@@ -384,12 +384,15 @@ class VolcEngineTTSConnectionPool(ConnectionPoolBase):
 
 class TTSSession:
 
-    def __init__(self, gateway: VolcEngineTTSGateway, websocket, session_id: str):
+    def __init__(self, gateway: VolcEngineTTSGateway, websocket, session_id: str, pool_wrapper=None):
         self._gateway = gateway
         self._websocket = websocket
         self._session_id = session_id
+        self._pool_wrapper = pool_wrapper
         self._seq = 0
         self._closed = False
+        self._released = False
+        self._close_on_release = False
         self._created_at = time.time()
 
     @property
@@ -411,6 +414,24 @@ class TTSSession:
             logger.debug(f"[TTS] 关闭旧 websocket 异常: {e}")
         with suppress(ValueError):
             self._gateway._active_websockets.remove(old_ws)
+        if self._pool_wrapper:
+            pool = self._gateway.get_pool(self._gateway._get_pool_config())
+            if pool:
+                try:
+                    await pool.release(self._pool_wrapper)
+                except Exception as e:
+                    logger.debug(f"[TTS] 重连归还旧连接异常: {e}")
+                try:
+                    self._pool_wrapper = await pool.acquire(timeout=10.0)
+                    self._websocket = self._pool_wrapper.connection
+                    self._gateway._active_websockets.append(self._websocket)
+                    self._created_at = time.time()
+                    self._seq = 0
+                    logger.info("[TTS] Session WS 已从连接池重连")
+                    return
+                except Exception as e:
+                    logger.error(f"[TTS] 重连从池取连接失败: {e}")
+            self._pool_wrapper = None
         self._websocket = await self._gateway._create_connection()
         self._gateway._active_websockets.append(self._websocket)
         self._created_at = time.time()
@@ -455,21 +476,25 @@ class TTSSession:
                 except Exception as e2:
                     logger.error(f"[TTS] 重连后发送仍失败 #{seq}: {e2}")
                     self._closed = True
+                    self._close_on_release = True
                     return
             else:
                 logger.error(f"[TTS] 发送请求失败 #{seq}: {e}")
                 self._closed = True
+                self._close_on_release = True
                 return
 
         try:
             while True:
                 if cancel_event and cancel_event.is_set():
                     logger.info(f"[TTS] 合成 #{seq} 被取消信号中断")
+                    self._close_on_release = True
                     return
                 try:
                     msg = await asyncio.wait_for(receive_message(self._websocket), timeout=self._gateway._message_timeout)
                 except asyncio.TimeoutError:
                     logger.error(f"[TTS] 接收消息超时 #{seq}")
+                    self._close_on_release = True
                     return
 
                 if msg.type == MsgType.AudioOnlyServer:
@@ -482,20 +507,46 @@ class TTSSession:
                     elif msg.event == EventType.SessionFailed:
                         payload_str = msg.payload.decode("utf-8", "ignore") if msg.payload else "Unknown"
                         logger.error(f"[TTS] 合成失败 #{seq}: {payload_str}")
+                        self._close_on_release = True
                         return
                 elif msg.type == MsgType.Error:
                     payload_str = msg.payload.decode("utf-8", "ignore") if msg.payload else "Unknown"
                     logger.error(f"[TTS] 合成错误 #{seq}: {payload_str}")
+                    self._close_on_release = True
                     return
 
         except (websockets.exceptions.ConnectionClosed, OSError, ConnectionError) as e:
             logger.error(f"[TTS] WS 连接异常 #{seq}: {e}")
             self._closed = True
+            self._close_on_release = True
+        except asyncio.CancelledError:
+            self._close_on_release = True
+            raise
 
     async def close(self):
-        if self._closed:
+        if self._released:
             return
+        self._released = True
         self._closed = True
+        if self._pool_wrapper:
+            # 连接池模式：不发送 FinishConnection、不关闭 WS，直接归还池供跨轮复用
+            pool = self._gateway.get_pool(self._gateway._get_pool_config())
+            if pool:
+                if self._close_on_release:
+                    # 合成异常/中断：连接状态不确定，先关闭再归还（池会检测不健康并清理）
+                    try:
+                        await self._websocket.close()
+                    except Exception as e:
+                        logger.debug(f"[TTS] 关闭异常 WS 异常: {e}")
+                try:
+                    await pool.release(self._pool_wrapper)
+                except Exception as e:
+                    logger.debug(f"[TTS] 归还连接池异常: {e}")
+            self._pool_wrapper = None
+            with suppress(ValueError):
+                self._gateway._active_websockets.remove(self._websocket)
+            logger.info(f"[TTS] Session {self._session_id} 已归还连接池")
+            return
         try:
             await finish_connection(self._websocket)
         except Exception as e:
@@ -638,7 +689,44 @@ class VolcEngineTTSGateway(TTSRepository):
         )
         return websocket
 
-    async def create_session(self, cancel_event=None) -> TTSSession:
+    def _get_pool_config(self) -> dict:
+        return {
+            "api_key": self.api_key,
+            "resource_id": self.resource_id,
+            "voice_type": self.voice_type,
+            "speed_ratio": self.speed_ratio,
+            "volume_ratio": self.volume_ratio,
+            "pitch_ratio": self.pitch_ratio,
+            "enable_pool": self._enable_pool,
+            "pool_max_size": self._pool_max_size,
+            "pool_min_size": self._pool_min_size,
+            "pool_heartbeat_interval": self._pool_heartbeat_interval,
+            "pool_idle_timeout": self._pool_idle_timeout,
+            "pool_connection_timeout": self._pool_connection_timeout,
+        }
+
+    async def create_session(self, cancel_event=None, tool_manager=None) -> TTSSession:
+        # 连接池模式：从池中取 WS，实现跨轮次复用
+        if self._enable_pool:
+            pool = self.get_pool(self._get_pool_config())
+            if pool is not None:
+                try:
+                    wrapped = await pool.acquire(timeout=10.0)
+                    if cancel_event and cancel_event.is_set():
+                        await pool.release(wrapped)
+                        raise asyncio.CancelledError("Session creation cancelled")
+                    websocket = wrapped.connection
+                    self._active_websockets.append(websocket)
+                    session_id = str(uuid.uuid4())
+                    logger.info(f"[TTS] Session 已建立 (连接池复用): {session_id}")
+                    return TTSSession(self, websocket, session_id, pool_wrapper=wrapped)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"[TTS] 从连接池获取 WS 失败，回退普通建连: {e}")
+            else:
+                logger.warning("[TTS] 连接池不可用，回退普通模式")
+
         last_error = None
 
         for attempt in range(self._max_retries):
@@ -795,20 +883,7 @@ class VolcEngineTTSGateway(TTSRepository):
                 yield chunk
             return
 
-        pool = self.get_pool({
-            "api_key": self.api_key,
-            "resource_id": self.resource_id,
-            "voice_type": self.voice_type,
-            "speed_ratio": self.speed_ratio,
-            "volume_ratio": self.volume_ratio,
-            "pitch_ratio": self.pitch_ratio,
-            "enable_pool": self._enable_pool,
-            "pool_max_size": self._pool_max_size,
-            "pool_min_size": self._pool_min_size,
-            "pool_heartbeat_interval": self._pool_heartbeat_interval,
-            "pool_idle_timeout": self._pool_idle_timeout,
-            "pool_connection_timeout": self._pool_connection_timeout,
-        })
+        pool = self.get_pool(self._get_pool_config())
         if pool is None:
             logger.warning("[TTS] 连接池不可用，回退到普通模式")
             async for chunk in self.synthesize_stream(text, cancel_event):

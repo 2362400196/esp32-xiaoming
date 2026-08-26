@@ -242,8 +242,8 @@ async function loadPlugins() {
       ...p,
       config: configs[p.name] || {},
       configDone: Object.keys(configs[p.name] || {}).length > 0,
-      // 全部启用模式 || 内置插件默认启用 || 在白名单中
-      enabled: allEnabled || p.source === 'built-in' || installed.has(p.name),
+      // 全部启用模式 || 内置插件默认启用 || 系统核心插件始终启用 || 在白名单中
+      enabled: allEnabled || p.source === 'built-in' || p.system || installed.has(p.name),
       saving: false,
     }))
   }

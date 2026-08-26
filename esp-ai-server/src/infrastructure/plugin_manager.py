@@ -606,6 +606,7 @@ class PluginManager:
             _loaded_tools,
             _plugin_source,
             _plugin_version,
+            is_system_plugin,
         )
         from src.infrastructure.plugin_manifest import load_manifest_from_dir
 
@@ -632,6 +633,7 @@ class PluginManager:
                     "requires": list(manifest.requires),
                     "tools": _loaded_tools.get(name, []),
                     "loaded": name in _loaded_tools,
+                    "system": is_system_plugin(name),
                 })
             else:
                 # 无 manifest，从加载状态获取版本
@@ -646,6 +648,7 @@ class PluginManager:
                     "requires": [],
                     "tools": _loaded_tools.get(name, []),
                     "loaded": name in _loaded_tools,
+                    "system": is_system_plugin(name),
                 })
 
         return out

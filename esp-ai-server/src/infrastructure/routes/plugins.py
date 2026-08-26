@@ -47,6 +47,7 @@ def _available_plugins() -> list[dict]:
         get_plugin_requires,
         get_plugin_source,
         get_plugin_version,
+        is_system_plugin,
         _loaded_tools,
         _plugin_meta,
     )
@@ -70,6 +71,7 @@ def _available_plugins() -> list[dict]:
             "config_fields": meta.get("config_fields") or [],  # 需用户配置的字段声明
             "source": get_plugin_source(name),   # built-in / installed
             "version": get_plugin_version(name),  # 插件版本号
+            "system": is_system_plugin(name),     # 系统核心插件（始终可用，不可卸载）
         })
     return out
 
@@ -785,10 +787,12 @@ async def install_optional_plugin(
     可选参数 device_id 指定目标设备，默认使用用户第一个设备。
     """
     try:
-        from src.infrastructure.plugin_loader import is_optional_plugin
+        from src.infrastructure.plugin_loader import is_optional_plugin, is_system_plugin
 
         if not is_optional_plugin(name):
             return {"code": 1, "message": f"插件「{name}」不是可选插件", "data": None}
+        if is_system_plugin(name):
+            return {"code": 1, "message": f"「{name}」是系统核心插件，随服务器提供，无需安装", "data": None}
 
         enabled = await _update_device_plugins(user, name, install=True, device_id=device_id)
         return {"code": 0, "message": f"「{name}」已安装", "data": {"enabled_plugins": sorted(enabled)}}
@@ -863,31 +867,47 @@ async def uninstall_optional_plugin(
 ):
     """卸载可选插件。
 
-    内置插件 → 仅禁用（从设备 enabled_plugins 移除，不删文件）。
-    用户安装的插件 → 卸载（禁用 + 删除插件目录）。
+    系统插件（author=system 或提供 asr/llm/tts 核心服务）→ 拒绝卸载（核心服务，随服务器提供）。
+    用户安装的插件 → 禁用 + 停止子进程 + 删除插件目录。
     """
     try:
-        from src.infrastructure.plugin_loader import is_optional_plugin, get_plugin_source
+        from src.infrastructure.plugin_loader import (
+            is_optional_plugin,
+            is_system_plugin,
+            get_plugin_source,
+            _unload_plugin,
+        )
         from src.infrastructure.plugin_loader import INSTALLED_PLUGINS_DIR
         import shutil
 
         if not is_optional_plugin(name):
             return {"code": 1, "message": f"插件「{name}」不是可选插件", "data": None}
+        if is_system_plugin(name):
+            return {"code": 1, "message": f"「{name}」是系统核心插件，不可卸载", "data": None}
 
         # 先从设备禁用
         enabled = await _update_device_plugins(user, name, install=False, device_id=device_id)
 
-        # 清空插件配置数据（KV + 数据目录）
-        _clear_plugin_data(name)
-
-        # 如果是用户安装的插件（source=installed），删除插件目录
+        # 用户安装的插件：禁用 + 停止子进程 + 删除插件目录
         source = get_plugin_source(name)
         deleted = False
         if source == "installed":
+            # 先停止插件子进程，避免 Windows 文件占用（WinError 32）
+            await _unload_plugin(name)
+            # 清空插件配置数据（KV + 数据目录）
+            _clear_plugin_data(name)
             plugin_dir = INSTALLED_PLUGINS_DIR / name
             if plugin_dir.is_dir():
-                shutil.rmtree(plugin_dir)
-                deleted = True
+                # Windows 下文件句柄释放可能有延迟，重试删除
+                for _attempt in range(5):
+                    try:
+                        shutil.rmtree(plugin_dir)
+                        deleted = True
+                        break
+                    except OSError:
+                        await asyncio.sleep(0.3)
+                if not deleted:
+                    logger.warning(f"[卸载] 插件目录删除失败（文件占用）: {plugin_dir}")
 
         msg = f"「{name}」已卸载"
         if deleted:

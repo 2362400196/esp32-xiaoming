@@ -8,6 +8,34 @@ import httpx
 
 from src.infrastructure.plugin_security import require_permission
 
+# 共享 HTTP 客户端：跨请求复用连接（keep-alive），避免每次请求重新 TCP+TLS 握手。
+# 连接池按 host:port 分组，不同目标自动隔离；空闲连接 60s 后自动回收。
+_shared_client: "httpx.AsyncClient | None" = None
+_shared_client_lock: asyncio.Lock | None = None
+
+
+def _get_shared_client_lock() -> asyncio.Lock:
+    global _shared_client_lock
+    if _shared_client_lock is None:
+        _shared_client_lock = asyncio.Lock()
+    return _shared_client_lock
+
+
+async def _get_shared_client() -> "httpx.AsyncClient":
+    global _shared_client
+    if _shared_client is None:
+        async with _get_shared_client_lock():
+            if _shared_client is None:
+                _shared_client = httpx.AsyncClient(
+                    timeout=30.0,
+                    limits=httpx.Limits(
+                        max_connections=20,
+                        max_keepalive_connections=10,
+                        keepalive_expiry=60.0,
+                    ),
+                )
+    return _shared_client
+
 
 async def http_request(method: str, url: str, *, params: dict | None = None, headers: dict | None = None,
                        content=None, timeout: float = 10.0, pin_ip: str | None = None):
@@ -31,14 +59,15 @@ async def http_request(method: str, url: str, *, params: dict | None = None, hea
                     parsed.path, parsed.params, parsed.query, parsed.fragment
                 ))
                 req_headers.setdefault("Host", host)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            # 用 asyncio.wait_for 兜底，防止 httpx 在某些网络环境下超时不生效
-            resp = await asyncio.wait_for(
-                client.request(method, url, params=params, headers=req_headers, content=content),
-                timeout=timeout + 2,
-            )
-            resp.raise_for_status()
-            return resp, None
+        client = await _get_shared_client()
+        req = client.build_request(method, url, params=params, headers=req_headers, content=content, timeout=timeout)
+        # 用 asyncio.wait_for 兜底，防止 httpx 在某些网络环境下超时不生效
+        resp = await asyncio.wait_for(
+            client.send(req),
+            timeout=timeout + 2,
+        )
+        resp.raise_for_status()
+        return resp, None
     except asyncio.TimeoutError:
         return None, TimeoutError(f"请求超时 ({timeout}s)")
     except Exception as e:
@@ -100,13 +129,12 @@ async def http_stream_open(method: str, url: str, *, headers: dict | None = None
                     parsed.path, parsed.params, parsed.query, parsed.fragment
                 ))
                 req_headers.setdefault("Host", host)
-        client = httpx.AsyncClient(timeout=timeout)
-        req = client.build_request(method, url, headers=req_headers, content=content)
+        client = await _get_shared_client()
+        req = client.build_request(method, url, headers=req_headers, content=content, timeout=timeout)
         response = await asyncio.wait_for(client.send(req, stream=True), timeout=timeout + 2)
         if response.status_code >= 400:
             body = (await response.aread()).decode("utf-8", "replace")[:500]
             await response.aclose()
-            await client.aclose()
             return None, RuntimeError(f"HTTP {response.status_code}: {body}")
         stream_id = uuid.uuid4().hex[:12]
         entry = {
@@ -145,7 +173,7 @@ async def http_stream_read(stream_id: str, timeout: float = 0.5):
 
 
 async def http_stream_close(stream_id: str) -> None:
-    """关闭流式响应并清理资源。"""
+    """关闭流式响应并清理资源。共享客户端不关闭，连接归还连接池供复用。"""
     entry = _http_streams.pop(stream_id, None)
     if not entry:
         return
@@ -154,9 +182,5 @@ async def http_stream_close(stream_id: str) -> None:
         task.cancel()
     try:
         await entry["response"].aclose()
-    except Exception:
-        pass
-    try:
-        await entry["client"].aclose()
     except Exception:
         pass

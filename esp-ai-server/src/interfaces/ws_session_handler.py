@@ -43,6 +43,71 @@ def _get_wake_enable_audio(settings, user_config=None) -> bool:
     return default
 
 
+def _log_perf_report(session, result, pipeline, asr_text: str) -> None:
+    """打印一轮对话的性能分析报告到终端（调试用）"""
+    try:
+        now = time.time()
+        rt = session.runtime
+
+        asr_ms = None
+        if rt.asr_start_time and rt.asr_last_result_time:
+            asr_ms = (rt.asr_last_result_time - rt.asr_start_time) * 1000
+
+        perf = getattr(pipeline, "_perf", {}) if pipeline else {}
+
+        # 首响延迟 = ASR 识别完成 → 第一段回复音频发送到设备（真正的响应性能）
+        resp_ms = None
+        first_audio_sent = perf.get("first_audio_sent")
+        if first_audio_sent and rt.asr_last_result_time:
+            resp_ms = (first_audio_sent - rt.asr_last_result_time) * 1000
+
+        llm_ms = llm_ttft_ms = None
+        if perf.get("llm_start") and perf.get("llm_end"):
+            llm_ms = (perf["llm_end"] - perf["llm_start"]) * 1000
+            if perf.get("llm_first_token"):
+                llm_ttft_ms = (perf["llm_first_token"] - perf["llm_start"]) * 1000
+
+        tts_ms = None
+        if perf.get("tts_start") and perf.get("tts_end"):
+            tts_ms = (perf["tts_end"] - perf["tts_start"]) * 1000
+
+        pipeline_ms = (result.duration * 1000) if result else None
+        audio_ms = (result.total_duration_ms) if result else 0
+        full_text = (result.full_text or "") if result else ""
+
+        e2e_ms = None
+        if rt.asr_start_time:
+            e2e_ms = (now - rt.asr_start_time) * 1000
+
+        def _fmt(ms):
+            return f"{ms:.0f}ms" if ms is not None else "n/a"
+
+        lines = [
+            "═" * 64,
+            f"[Perf] 对话性能报告  session={session.session_id}  device={session.device_id[:16]}",
+            f"  用户输入 : \"{asr_text[:40]}\"",
+        ]
+        if asr_ms is not None:
+            lines.append(f"  ASR 识别 : {_fmt(asr_ms)}")
+        if resp_ms is not None:
+            lines.append(f"  首响延迟 : {_fmt(resp_ms)}   (ASR完成→首帧音频)")
+        lines.append(
+            f"  LLM 生成 : {_fmt(llm_ms)}   (首token {_fmt(llm_ttft_ms)}, "
+            f"输出 {perf.get('llm_chars', 0)}字/{perf.get('llm_sentences', 0)}句)"
+        )
+        lines.append(
+            f"  TTS 合成 : {_fmt(tts_ms)}   ({perf.get('tts_chunks', 0)}块, 共{audio_ms:.0f}ms音频)"
+        )
+        lines.append(f"  Pipeline : {_fmt(pipeline_ms)}   (总耗时)")
+        if e2e_ms is not None:
+            lines.append(f"  端到端   : {_fmt(e2e_ms)}   (ASR开始→播放完成)")
+        lines.append(f"  回复     : \"{full_text[:60]}\"")
+        lines.append("═" * 64)
+        logger.info("\n" + "\n".join(lines))
+    except Exception as e:
+        logger.debug(f"[Perf] 报告生成失败: {e}")
+
+
 class WebSocketSessionHandler:
     """处理单个设备 WebSocket 会话的完整生命周期
 
@@ -659,6 +724,7 @@ class WebSocketSessionHandler:
             # 如果 Pipeline 被取消或未产生任何音频，跳过 TTS 播放等待（设备不会回 client_out_audio_over）
             if not result or total_duration_ms == 0:
                 logger.info(f"[Session:{session.session_id}] Pipeline 无音频输出 (cancelled={result is None}), 跳过 TTS 播放等待")
+                _log_perf_report(session, result, _pipeline, session.runtime.asr_full_text)
                 session.tts_playback_done.set()
                 self._trigger_growth()
                 if not session._closed and fsm.get() != SessionState.IDLE:
@@ -691,6 +757,7 @@ class WebSocketSessionHandler:
             except asyncio.TimeoutError:
                 logger.warning(f"[Session:{session.session_id}] TTS playback done timeout ({dynamic_timeout:.1f}s), proceeding anyway")
             logger.info(f"[Session:{session.session_id}] TTS playback done, fsm={fsm.get()}, closed={session._closed}")
+            _log_perf_report(session, result, _pipeline, session.runtime.asr_full_text)
 
             # 检查是否有 WeChat 回复待发送
             if result and result.full_text:

@@ -21,6 +21,7 @@ from src.interfaces.service_plugin_adapter import (
     call_llm_chat,
     call_tts_synthesize,
     create_asr_session,
+    prewarm_asr,
     ASRPluginSession,
     has_llm_plugin,
     has_tts_plugin,
@@ -245,6 +246,22 @@ class PluginASRGateway:
         return None, None
 
     async def pre_connect(self):
+        """设备连接时预热 ASR 连接池，确保首次语音输入免建连。
+
+        预热在后台异步执行，不阻塞设备连接流程；连接由框架连接池统一管理。
+        """
+        async def _warm():
+            try:
+                created = await prewarm_asr(self.config, self._tool_manager)
+                if created:
+                    logger.info(f"[PluginASR] 设备连接预热 {created} 个 ASR 连接")
+            except Exception as e:
+                logger.debug(f"[PluginASR] 预热连接失败: {e}")
+
+        try:
+            asyncio.get_running_loop().create_task(_warm())
+        except Exception:
+            pass
         return None
 
     # ── 插件专有方法 ───────────────────────────────────────────

@@ -1225,13 +1225,19 @@ class PerUserToolManager:
                     return False
             return True
         # 延迟导入避免与 plugin_loader 循环依赖（plugin_loader 依赖本模块）
-        from src.infrastructure.plugin_loader import get_plugin_of_tool, get_plugin_requires, is_optional_plugin
+        from src.infrastructure.plugin_loader import (
+            get_plugin_of_tool,
+            get_plugin_requires,
+            is_optional_plugin,
+            is_system_plugin,
+        )
         plugin = get_plugin_of_tool(tool_name)
         if plugin:
             # 商店语义：enabled_plugins 白名单仅控制可选插件
+            # - 系统插件（核心服务）：始终可用，不受白名单影响（等同内置插件）
             # - 非可选插件：始终可用（不受白名单影响）
             # - 可选插件：需在白名单中才可用
-            if is_optional_plugin(plugin):
+            if is_optional_plugin(plugin) and not is_system_plugin(plugin):
                 if self._enabled_plugins is None or plugin not in self._enabled_plugins:
                     logger.info(f"[ToolManager] 可选插件「{plugin}」未安装，隐藏工具 {tool_name}")
                     return False

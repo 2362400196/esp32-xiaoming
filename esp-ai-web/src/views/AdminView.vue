@@ -382,8 +382,9 @@
                     <td data-label="工具" class="cell-muted">{{ (p.tools || []).join(', ') || '—' }}</td>
                     <td data-label="操作">
                       <div class="row-actions">
-                        <button class="btn btn-ghost btn-xs" :disabled="updatingPlugin === p.name" @click="updatePlugin(p)">{{ updatingPlugin === p.name ? '更新中' : '更新' }}</button>
-                        <button v-if="p.source !== 'built-in'" class="btn btn-danger btn-xs" :disabled="uninstallingPlugin === p.name" @click="uninstallPlugin(p)">{{ uninstallingPlugin === p.name ? '卸载中' : '卸载' }}</button>
+                        <button v-if="!p.system" class="btn btn-ghost btn-xs" :disabled="updatingPlugin === p.name" @click="updatePlugin(p)">{{ updatingPlugin === p.name ? '更新中' : '更新' }}</button>
+                        <button v-if="!p.system && p.source !== 'built-in'" class="btn btn-danger btn-xs" :disabled="uninstallingPlugin === p.name" @click="uninstallPlugin(p)">{{ uninstallingPlugin === p.name ? '卸载中' : '卸载' }}</button>
+                        <span v-if="p.system" class="badge badge-mint">系统插件</span>
                       </div>
                     </td>
                   </tr>

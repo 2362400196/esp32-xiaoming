@@ -55,7 +55,8 @@
             <div class="market-info">
               <div class="market-title-row">
                 <p class="market-name">{{ p.name }}</p>
-                <span v-if="isInstalled(p)" class="installed-badge">已安装</span>
+                <span v-if="p.system" class="installed-badge system-badge">系统</span>
+                <span v-else-if="isInstalled(p)" class="installed-badge">已安装</span>
               </div>
               <p class="market-desc">{{ p.description }}</p>
             </div>
@@ -95,7 +96,8 @@
             <span class="rating-count">({{ p.review_count }})</span>
           </div>
           <div class="market-actions">
-            <button v-if="!isInstalled(p)" class="install-btn"
+            <span v-if="p.system" class="system-tag">系统插件 · 随服务器提供</span>
+            <button v-else-if="!isInstalled(p)" class="install-btn"
               :disabled="p.installing" @click.stop="installPlugin(p)">
               {{ p.installing ? '安装中…' : '安装' }}
             </button>
@@ -203,7 +205,13 @@
           </div>
 
           <div class="detail-footer">
-            <button v-if="!isInstalled(detailPlugin)" class="btn-mint detail-install"
+            <span v-if="detailPlugin.system" class="detail-installed system">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              </svg>
+              系统插件，不可卸载
+            </span>
+            <button v-else-if="!isInstalled(detailPlugin)" class="btn-mint detail-install"
               :disabled="detailPlugin.installing" @click="installPlugin(detailPlugin)">
               {{ detailPlugin.installing ? '安装中…' : '安装' }}
             </button>
@@ -308,9 +316,9 @@ async function installPlugin(p) {
   p.installing = false
 }
 
-/** 卸载可选插件 — 弹出确认对话框 */
+/** 卸载可选插件 — 弹出确认对话框（系统插件不可卸载） */
 function uninstallPlugin(p) {
-  if (!p.is_optional) return
+  if (!p.is_optional || p.system) return
   confirmUninstall.value = p
 }
 
@@ -347,6 +355,7 @@ async function loadOptionalPlugins() {
       review_count: 0,
       is_optional: true,
       installed: p.installed || false,
+      system: p.system || false,
       installing: false,
     }))
     // 标记已安装的可选插件
@@ -558,6 +567,10 @@ onMounted(() => {
   font-size: 10px; padding: 2px 8px; border-radius: 999px;
   background: var(--mint-soft); color: var(--mint); font-weight: 600;
 }
+.installed-badge.system-badge {
+  background: var(--glass-bg-strong); color: var(--text-sub);
+  border: 1px solid var(--glass-border);
+}
 .market-desc { 
   font-size: 13px; color: var(--text-sub); margin: 4px 0 0 0;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; 
@@ -689,13 +702,20 @@ onMounted(() => {
 .pop-enter-active, .pop-leave-active { transition: all 0.3s var(--ease); }
 .pop-enter-from, .pop-leave-to { opacity: 0; transform: scale(0.95) translateY(10px); }
 
-.uninstall-btn {
+.uninstall-btn { 
   padding: 6px 16px; border-radius: var(--radius-sm); border: 1px solid var(--danger-border);
   background: var(--danger-soft); color: var(--danger); font-size: 13px; font-weight: 600;
   cursor: pointer; transition: all 0.2s var(--ease);
 }
 .uninstall-btn:hover { background: var(--danger); color: #fff; }
 .uninstall-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.system-tag {
+  display: block; width: 100%; text-align: center;
+  padding: 10px; border-radius: var(--radius-sm);
+  background: var(--glass-bg-strong); color: var(--text-sub); font-size: 13px;
+  border: 1px dashed var(--glass-border);
+}
+.detail-installed.system { color: var(--text-sub); background: var(--glass-bg-strong); border-style: dashed; }
 
 /* ===== 卸载确认弹窗 ===== */
 .confirm-panel {

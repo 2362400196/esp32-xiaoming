@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
@@ -63,6 +65,7 @@ _OP_PERMS: dict[str, str] = {
     "ws_send": "network",
     "ws_recv": "network",
     "ws_close": "network",
+    "ws_prewarm": "network",
 }
 
 # 无需显式权限的只读 op（设备 key 解析 / 技能目录 / 插件配置）
@@ -201,6 +204,13 @@ class Adjudicator:
         self._ws_connections: dict[str, Any] = {}
         self._ws_recv_locks: dict[str, asyncio.Lock] = {}
         self._ws_counter = 0
+        # 连接池：pool_key → 空闲连接列表；session_id → 归属（归还时用）
+        self._ws_pool: dict[str, list[Any]] = {}
+        self._ws_pool_keys: dict[str, str] = {}
+        self._ws_pool_modes: dict[str, str] = {}
+        self._ws_pool_last_used: dict[str, float] = {}
+        self._ws_pool_max_idle = 4
+        self._ws_pool_idle_timeout = 300.0
 
     # ── 权限上下文 ──────────────────────────────────────────
 
@@ -384,30 +394,121 @@ class Adjudicator:
         await http_stream_close(str(params.get("stream_id", "")))
 
     # ═════════════════════════════════════════════════════════
-    # WebSocket 连接管理
+    # WebSocket 连接管理（含连接池）
     # ═════════════════════════════════════════════════════════
 
+    # 影响连接身份的 header（api_key / resource_id 等），connect_id 等随机值不参与分组
+    _POOL_HEADER_KEYS = ("x-api-key", "x-api-resource-id", "authorization", "host")
+
+    def _pool_key(self, url: str, headers: dict | None,
+                  pool_headers: list | None = None) -> str:
+        """计算连接池分组 key。
+
+        pool_headers 由插件声明哪些 header 参与分组（如自定义鉴权头），
+        未提供时回退到内置白名单 _POOL_HEADER_KEYS。
+        """
+        if pool_headers:
+            names = {str(h).lower() for h in pool_headers}
+        else:
+            names = set(self._POOL_HEADER_KEYS)
+        relevant = {}
+        for k, v in (headers or {}).items():
+            if str(k).lower() in names:
+                relevant[str(k)] = str(v)
+        return f"{url}|{json.dumps(relevant, sort_keys=True)}"
+
+    @staticmethod
+    def _ws_is_alive(ws) -> bool:
+        try:
+            state = getattr(ws, "state", None)
+            if state is not None:
+                return bool(state.name == "OPEN" or getattr(state, "value", 1) == 1)
+            return bool(getattr(ws, "open", True))
+        except Exception:
+            return False
+
+    async def _ws_close_safe(self, ws) -> None:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+    def _pool_acquire(self, key: str):
+        """从池中取一个健康连接；池空或全部失效返回 None。"""
+        conns = self._ws_pool.get(key)
+        if not conns:
+            return None
+        # 惰性清理：池闲置过久则整体丢弃
+        last = self._ws_pool_last_used.get(key, 0.0)
+        if time.time() - last > self._ws_pool_idle_timeout:
+            for c in conns:
+                asyncio.get_running_loop().create_task(self._ws_close_safe(c))
+            self._ws_pool.pop(key, None)
+            self._ws_pool_last_used.pop(key, None)
+            return None
+        while conns:
+            ws = conns.pop()
+            if self._ws_is_alive(ws):
+                return ws
+            asyncio.get_running_loop().create_task(self._ws_close_safe(ws))
+        return None
+
+    def _pool_release(self, key: str, ws) -> bool:
+        """归还连接到池；池满返回 False（调用方应真正关闭）。"""
+        conns = self._ws_pool.setdefault(key, [])
+        if len(conns) >= self._ws_pool_max_idle:
+            return False
+        conns.append(ws)
+        self._ws_pool_last_used[key] = time.time()
+        return True
+
+    async def _ws_connect_new(self, url: str, headers: dict | None) -> Any:
+        import websockets
+
+        extra_headers = [(k, str(v)) for k, v in (headers or {}).items()]
+        try:
+            return await websockets.connect(
+                url, additional_headers=extra_headers, open_timeout=15
+            )
+        except Exception as e:
+            raise RuntimeError(f"WebSocket 连接失败: {e}")
+
     async def _op_ws_connect(self, params, ctx) -> str:
-        """创建 WebSocket 连接，返回 session_id。"""
+        """创建 WebSocket 连接，返回 session_id。
+
+        pool 参数（可选）：
+          - "reuse"：优先复用池中空闲连接，close 时归还（请求型连接，如 TTS）
+          - "prewarm"：优先取预热连接，close 时真正关闭（会话型连接，如 ASR）
+          - "normal"（默认）：不池化，保持原行为
+        """
         url = str(params.get("url", ""))
         headers = params.get("headers") or {}
-        try:
-            import websockets
-        except ImportError:
-            raise RuntimeError("WebSocket 支持不可用（缺少 websockets 库）")
+        pool_mode = str(params.get("pool", "normal"))
+        if pool_mode not in ("reuse", "prewarm"):
+            pool_mode = "normal"
+        pool_headers = params.get("pool_headers") or None
+
         err, _ = await validate_url(url, self.url_allowlist)
         if err:
             raise PermissionDenied(f"WebSocket URL 被拦截: {err}")
-        extra_headers = [(k, str(v)) for k, v in headers.items()]
-        try:
-            ws = await websockets.connect(url, additional_headers=extra_headers, open_timeout=15)
-        except Exception as e:
-            raise RuntimeError(f"WebSocket 连接失败: {e}")
+
+        key = self._pool_key(url, headers, pool_headers) if pool_mode in ("reuse", "prewarm") else None
+        from_pool = key is not None and self._ws_pool.get(key)
+        ws = self._pool_acquire(key) if key is not None else None
+        if ws is None:
+            ws = await self._ws_connect_new(url, headers)
+
         self._ws_counter += 1
         session_id = f"ws_{self.plugin_id}_{self._ws_counter}"
         self._ws_connections[session_id] = ws
         self._ws_recv_locks[session_id] = asyncio.Lock()
-        logger.info(f"[插件沙箱] 插件 {self.plugin_id} 创建 WebSocket 连接: {session_id}")
+        if key is not None:
+            self._ws_pool_keys[session_id] = key
+            self._ws_pool_modes[session_id] = pool_mode
+        logger.info(
+            f"[插件沙箱] 插件 {self.plugin_id} 获取 WebSocket 连接: {session_id}"
+            f"{'（连接池复用）' if from_pool else ''}"
+        )
         return session_id
 
     async def _op_ws_send(self, params, ctx) -> None:
@@ -445,17 +546,44 @@ class Adjudicator:
             raise RuntimeError(f"WebSocket 接收失败: {e}")
 
     async def _op_ws_close(self, params, ctx) -> None:
-        """关闭 WebSocket 连接。"""
+        """关闭 WebSocket 连接；reuse 模式的连接归还连接池。"""
         session_id = str(params.get("session_id", ""))
         ws = self._ws_connections.pop(session_id, None)
         self._ws_recv_locks.pop(session_id, None)
+        mode = self._ws_pool_modes.pop(session_id, "normal")
+        key = self._ws_pool_keys.pop(session_id, "")
         if ws is None:
             return
-        try:
-            await ws.close()
-        except Exception:
-            pass
+        if mode == "reuse" and key and self._pool_release(key, ws):
+            logger.info(f"[插件沙箱] 插件 {self.plugin_id} 归还 WebSocket 到连接池: {session_id}")
+            return
+        await self._ws_close_safe(ws)
         logger.info(f"[插件沙箱] 插件 {self.plugin_id} 关闭 WebSocket 连接: {session_id}")
+
+    async def _op_ws_prewarm(self, params, ctx) -> int:
+        """预热 WebSocket 连接放入连接池，返回成功创建数量。"""
+        url = str(params.get("url", ""))
+        headers = params.get("headers") or {}
+        count = max(1, int(params.get("count", 1)))
+        pool_headers = params.get("pool_headers") or None
+        err, _ = await validate_url(url, self.url_allowlist)
+        if err:
+            raise PermissionDenied(f"WebSocket URL 被拦截: {err}")
+        key = self._pool_key(url, headers, pool_headers)
+        created = 0
+        for _ in range(count):
+            try:
+                ws = await self._ws_connect_new(url, headers)
+            except Exception as e:
+                logger.warning(f"[插件沙箱] 插件 {self.plugin_id} 预热连接失败: {e}")
+                break
+            if self._pool_release(key, ws):
+                created += 1
+            else:
+                await self._ws_close_safe(ws)
+        if created:
+            logger.info(f"[插件沙箱] 插件 {self.plugin_id} 预热 {created} 个 WebSocket 连接")
+        return created
 
     # ── 插件配置 / 环境变量 ─────────────────────────────────
 

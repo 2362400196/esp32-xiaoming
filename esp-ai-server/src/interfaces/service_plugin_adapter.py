@@ -59,6 +59,20 @@ async def _call_plugin_tool(
     - 沙箱插件：通过 supervisor RPC 调用
     - 内置插件：从工具注册表获取函数，进程内直接调用
     """
+    # 0. 将设备级插件配置（plugin_configs[插件名]）合并进 config，
+    #    使第三方服务插件能通过 config.get("app_key") 直接读取自己的参数。
+    #    仅当 args 含 config（服务插件工具）时合并，非空值覆盖框架默认值。
+    if tool_manager is not None and hasattr(tool_manager, "plugin_configs"):
+        _plugin_cfg = (getattr(tool_manager, "plugin_configs", None) or {}).get(plugin_name)
+        if _plugin_cfg and isinstance(args, dict) and "config" in args:
+            _cfg = args.get("config")
+            merged = dict(_cfg) if isinstance(_cfg, dict) else {}
+            for _k, _v in _plugin_cfg.items():
+                if _v not in (None, ""):
+                    merged[_k] = _v
+            args = dict(args)
+            args["config"] = merged
+
     # 1. 先尝试沙箱（第三方安装的插件 → 子进程）
     from src.infrastructure.plugin_host.supervisor import get_plugin_supervisor
     supervisor = get_plugin_supervisor()
@@ -510,3 +524,28 @@ async def create_asr_session(
     if not session_id:
         return None
     return ASRPluginSession(plugin_name, session_id)
+
+
+async def prewarm_asr(
+    config: dict | None = None,
+    tool_manager=None,
+    provider: str | None = None,
+) -> int:
+    """预热 ASR 连接池（设备连接时调用），返回成功创建连接数。"""
+    plugin_name = get_service_plugin("asr", provider)
+    if not plugin_name:
+        return 0
+    result = await _call_plugin_tool(
+        plugin_name, "prewarm",
+        {"config": config or {}},
+        tool_manager,
+    )
+    if result is None:
+        return 0
+    try:
+        parsed = json.loads(result) if isinstance(result, str) else result
+    except (json.JSONDecodeError, TypeError):
+        parsed = {}
+    if isinstance(parsed, dict):
+        return int(parsed.get("created", 0))
+    return 0

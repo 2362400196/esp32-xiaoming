@@ -37,10 +37,6 @@ TTS_URL = "wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream"
 # 会话缓存：syn_id → {"ws_id": str, "done": bool, "buffer": list}
 _sessions: dict[str, dict] = {}
 
-# 持久连接：跨多句合成复用同一 WebSocket，避免每句新建连接触发火山限流
-_conn: dict | None = None  # {"ws_id": str, "last_used": float}
-_CONN_IDLE_TIMEOUT = 60.0
-
 # ── 协议常量 ────────────────────────────────────────────────
 
 MSG_TYPE_FULL_CLIENT_REQUEST = 0b1
@@ -206,7 +202,6 @@ async def tts_volcengine_start_synthesis(text: str, config: dict | None = None,
     Returns:
         {"syn_id": str, "error": str|null}
     """
-    global _conn
     cfg = config or {}
     api_key = cfg.get("api_key", "")
     resource_id = cfg.get("resource_id", "")
@@ -220,26 +215,12 @@ async def tts_volcengine_start_synthesis(text: str, config: dict | None = None,
         "X-Api-Connect-Id": str(uuid.uuid4()),
     }
 
-    now = time.time()
-    ws_id = None
-
-    # 尝试复用持久连接；空闲超时则重建
-    if _conn is not None:
-        if now - _conn["last_used"] > _CONN_IDLE_TIMEOUT:
-            try:
-                await ws_close(_conn["ws_id"])
-            except Exception:
-                pass
-            _conn = None
-        else:
-            ws_id = _conn["ws_id"]
-
-    if ws_id is None:
-        try:
-            ws_id = await ws_connect(TTS_URL, headers)
-        except Exception as e:
-            return {"syn_id": "", "error": f"WebSocket 连接失败: {e}"}
-        _conn = {"ws_id": ws_id, "last_used": now}
+    # 从框架连接池取连接（reuse 模式：优先复用，close 时归还）
+    try:
+        ws_id = await ws_connect(TTS_URL, headers, pool="reuse",
+                                 pool_headers=["X-Api-Key", "X-Api-Resource-Id"])
+    except Exception as e:
+        return {"syn_id": "", "error": f"WebSocket 连接失败: {e}"}
 
     # 发送合成请求帧（FullClientRequest）
     payload = _build_request_payload(cfg, text)
@@ -256,12 +237,11 @@ async def tts_volcengine_start_synthesis(text: str, config: dict | None = None,
             await ws_close(ws_id)
         except Exception:
             pass
-        _conn = None
         try:
-            ws_id = await ws_connect(TTS_URL, headers)
+            ws_id = await ws_connect(TTS_URL, headers, pool="reuse",
+                                     pool_headers=["X-Api-Key", "X-Api-Resource-Id"])
         except Exception as e2:
             return {"syn_id": "", "error": f"WebSocket 连接失败: {e2}"}
-        _conn = {"ws_id": ws_id, "last_used": now}
         try:
             await ws_send(ws_id, request_frame)
         except Exception as e3:
@@ -284,8 +264,6 @@ async def tts_volcengine_get_audio(syn_id: str, tool_manager=None) -> dict:
     """
     import base64
 
-    global _conn
-
     session = _sessions.get(syn_id)
     if not session:
         return {"audio_base64": "", "done": True, "error": "session not found"}
@@ -301,9 +279,6 @@ async def tts_volcengine_get_audio(syn_id: str, tool_manager=None) -> dict:
     try:
         data = await ws_recv(session["ws_id"], timeout=0.5)
     except Exception as e:
-        # 连接异常，标记失效以便下次合成重建
-        if _conn and _conn["ws_id"] == session["ws_id"]:
-            _conn = None
         return {"audio_base64": "", "done": True, "error": f"接收失败: {e}"}
 
     if data is None:
@@ -356,10 +331,8 @@ async def tts_volcengine_get_audio(syn_id: str, tool_manager=None) -> dict:
             session["done"] = True
             return {"audio_base64": "", "done": True, "error": None}
         if msg_event == EVENT_CONNECTION_FINISHED:
-            # 服务端关闭连接，标记完成并让下次合成重建连接
+            # 服务端关闭连接，标记完成；连接归还池时由框架健康检查丢弃
             session["done"] = True
-            if _conn and _conn["ws_id"] == session["ws_id"]:
-                _conn = None
             return {"audio_base64": "", "done": True, "error": None}
 
     if msg_type == MSG_TYPE_FRONT_END_SERVER:
@@ -371,11 +344,11 @@ async def tts_volcengine_get_audio(syn_id: str, tool_manager=None) -> dict:
 
 @tool(cache=False)
 async def tts_volcengine_end_synthesis(syn_id: str, tool_manager=None) -> dict:
-    """清理 TTS 合成会话（保留持久连接供后续句子复用）。"""
-    global _conn
+    """清理 TTS 合成会话，将连接归还框架连接池供后续句子复用。"""
     session = _sessions.pop(syn_id, None)
     if session:
-        # 不发送 FinishConnection、不关闭连接，仅刷新最后使用时间
-        if _conn and _conn["ws_id"] == session["ws_id"]:
-            _conn["last_used"] = time.time()
+        try:
+            await ws_close(session["ws_id"])
+        except Exception:
+            pass
     return {}
