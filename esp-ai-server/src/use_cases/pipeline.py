@@ -87,6 +87,71 @@ def mp3_duration_ms(data: bytes) -> int:
     return total_ms
 
 
+_PUNCT_CHARS = set("，。！？、；：,.!?;:…—～·()（）《》<>「」【】\"'“”‘’")
+
+
+def _estimate_word_timestamps(text: str, total_ms: int) -> list[dict]:
+    """为无字级时间戳的 TTS 生成估算字级时间戳（句内相对毫秒）。
+
+    切分：汉字逐字；连续英文字母/数字按词；标点并入前词（不占权重）。
+    时间分配：按字符权重加权均分 total_ms，长词占更多时长，更贴近发音节奏。
+    返回与火山 TTS 相同的 words 结构：{word, start_ms, end_ms}。
+    """
+    if not text or total_ms <= 0:
+        return []
+
+    words: list[dict] = []
+    cur_word = ""
+    cur_weight = 0
+
+    def flush():
+        nonlocal cur_word, cur_weight
+        if cur_word:
+            words.append({"word": cur_word, "weight": cur_weight})
+            cur_word = ""
+            cur_weight = 0
+
+    for ch in text:
+        if "\u4e00" <= ch <= "\u9fff":
+            flush()
+            words.append({"word": ch, "weight": 1})
+        elif ch in _PUNCT_CHARS or ch.isspace():
+            # 标点/空白先落盘未决的英文词，再并入前词尾部（不占权重），保证拼接保真
+            if cur_word:
+                flush()
+            if words:
+                words[-1]["word"] += ch
+            else:
+                words.append({"word": ch, "weight": 0})
+        elif ch.isalnum() or ch in "-_":
+            cur_word += ch
+            cur_weight += 1
+        else:
+            flush()
+    flush()
+
+    if not words:
+        return []
+
+    total_weight = sum(w["weight"] for w in words)
+    if total_weight <= 0:
+        total_weight = len(words)
+        for w in words:
+            w["weight"] = 1
+
+    pos = 0
+    out = []
+    for w in words:
+        span = int(total_ms * w["weight"] / total_weight)
+        start_ms = pos
+        end_ms = pos + span
+        out.append({"word": w["word"], "start_ms": start_ms, "end_ms": end_ms})
+        pos = end_ms
+    if out:
+        out[-1]["end_ms"] = total_ms  # 消除整数除法累计误差，末字对齐句尾
+    return out
+
+
 class SentenceSplitter:
     """句子分割器：将流式token组装成完整句子"""
 
@@ -947,6 +1012,24 @@ class ConversationPipeline:
                 # TTS 合成完成，解析 MP3 帧头得到该句真实时长；
                 # 用字幕末字 endTime 兜底：音频收集不全或 MP3 解析失败时仍能给出准确时长
                 actual_ms = mp3_duration_ms(bytes(audio_data)) if audio_data else 0
+                if subtitle_end_ms == 0 and actual_ms > 0 and original_text:
+                    # 无字级时间戳的 TTS：按 MP3 真实时长生成估算字级时间戳，
+                    # 让设备端所有 TTS 统一走字级渲染路径（同一套滚动/匹配逻辑）
+                    est_words = _estimate_word_timestamps(original_text, actual_ms)
+                    if est_words:
+                        base = int(self._cumulative_duration_ms)
+                        abs_words = [{
+                            "word": w["word"],
+                            "start_ms": w["start_ms"] + base,
+                            "end_ms": w["end_ms"] + base,
+                        } for w in est_words]
+                        await self.channel.send_json({
+                            "type": "instruct",
+                            "command_id": "tts_subtitle",
+                            "data": json.dumps({"seq": seq_id, "words": abs_words}, ensure_ascii=False),
+                        })
+                        subtitle_end_ms = est_words[-1]["end_ms"]
+                        logger.info(f"[Pipeline] TTS #{seq_id} 无字幕事件, 按MP3时长生成估算时间戳 {len(abs_words)} 词")
                 if subtitle_end_ms > actual_ms:
                     actual_ms = subtitle_end_ms
                 if actual_ms > 0:
