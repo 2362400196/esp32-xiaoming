@@ -136,6 +136,24 @@ async def init_db() -> None:
         except Exception:
             logger.debug("[DB] 迁移: screensaver_timeout 列已存在，跳过")
 
+        # === Schema 迁移：市场插件 provides 能力列（商店分类 ASR/LLM/TTS/其他工具） ===
+        try:
+            await conn.execute(text(
+                "ALTER TABLE marketplace_plugins ADD COLUMN provides TEXT NOT NULL DEFAULT '[]'"
+            ))
+            logger.info("[DB] 迁移: marketplace_plugins 表增加 provides 列（商店分类）")
+        except Exception:
+            logger.debug("[DB] 迁移: provides 列已存在，跳过")
+
+        # === Schema 迁移：市场插件 icon 图标列（商店图标显示） ===
+        try:
+            await conn.execute(text(
+                "ALTER TABLE marketplace_plugins ADD COLUMN icon VARCHAR(256) NOT NULL DEFAULT ''"
+            ))
+            logger.info("[DB] 迁移: marketplace_plugins 表增加 icon 列（插件图标）")
+        except Exception:
+            logger.debug("[DB] 迁移: icon 列已存在，跳过")
+
         # === 权限引导：系统中没有管理员时，最早注册的用户自动提升为管理员 ===
         # （兼容已部署系统：首个用户注册时已是 admin 的逻辑只对新系统生效）
         try:

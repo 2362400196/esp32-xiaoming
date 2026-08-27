@@ -352,8 +352,8 @@ async def lifespan(app: FastAPI):
                                          "绝不可以用猜测、编造或历史经验回答，也不要假装执行了操作。")
                             wechat_prompt = (wechat_prompt + _cap_note) if wechat_prompt else _cap_note
 
-                    # Skill 目录
-                    skill_catalog = skill_system.render_skills_catalog(device_id=binding.device_key)
+                    # Skill 目录（按消息内容动态检索）
+                    skill_catalog = skill_system.render_skills_catalog(device_id=binding.device_key, query=text)
                     if skill_catalog:
                         wechat_prompt = wechat_prompt + "\n\n" + skill_catalog if wechat_prompt else skill_catalog
 
@@ -367,8 +367,7 @@ async def lifespan(app: FastAPI):
                         if _catalog:
                             _ltm_block = (
                                 "\n\n[Long-term Memory Summary Labels]\n"
-                                "以下是该用户的长期记忆标签列表。当用户提到与某个标签相关的话题时，\n"
-                                "你应该**主动调用 memory_recall 工具**来回忆相关记忆，并在对话中自然地提及。\n"
+                                "用户提到相关话题时，主动调用 memory_recall 回忆（标签见下）：\n"
                                 f"{_catalog}\n"
                                 "[/Long-term Memory]"
                             )

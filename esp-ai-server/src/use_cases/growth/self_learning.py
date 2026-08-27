@@ -8,17 +8,24 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Optional
 
 from src.infrastructure.db.repositories.growth_repositories import LearningLogRepository
 from src.infrastructure.logging import get_logger
 from .models import SkillCandidate
+from .similarity import text_similarity
 
 logger = get_logger(__name__)
 
 # 模块级仓储单例（延迟使用全局异步会话工厂，构造时不连接 DB）
 _learning_log_repo = LearningLogRepository()
+
+# 自学习技能文件大小上限（字符数），超限自动开新技能，避免单文件无限膨胀
+MAX_SKILL_SIZE = 8000
+# 合并前相似度阈值，超过则视为重复内容跳过
+MERGE_SIMILARITY_THRESHOLD = 0.8
 
 ANALYSIS_PROMPT = """你是一个对话分析器。只输出JSON，不要输出任何其他文字。
 
@@ -263,7 +270,7 @@ class SelfLearningService:
         candidate: dict,
         decision: dict,
     ) -> Optional[str]:
-        """合并到现有skill"""
+        """合并到现有skill（带内容去重 + 大小上限，超限自动开新技能）"""
         skill_name = decision.get("target_skill", "")
         if not skill_name:
             return None
@@ -282,7 +289,26 @@ class SelfLearningService:
         with open(skill_path, "r", encoding="utf-8") as f:
             existing_content = f.read()
 
-        new_section = f"\n\n## {candidate.get('title', '新知识')}\n\n{candidate.get('content', '')}"
+        new_title = candidate.get("title", "新知识")
+        new_content = candidate.get("content", "")
+
+        # 1) 去重：与已有内容重复则跳过，不再追加
+        if self._is_duplicate(existing_content, new_content):
+            logger.info(f"[Learning] 内容重复，跳过合并到 '{skill_name}': {new_title}")
+            await self._log_learning(device_id, "skip_duplicate", skill_name, candidate)
+            return None
+
+        new_section = f"\n\n## {new_title}\n\n{new_content}"
+
+        # 2) 大小上限：超限自动开新技能，避免单文件无限膨胀
+        if len(existing_content) + len(new_section) > MAX_SKILL_SIZE:
+            new_name = self._next_skill_name(device_id, skill_name)
+            logger.info(f"[Learning] skill '{skill_name}' 已达大小上限，开新技能: {new_name}")
+            return await self._create_new_skill(device_id, candidate, {
+                "action": "create_new",
+                "new_skill_name": new_name,
+                "category": decision.get("category", "general"),
+            })
 
         separator = "\n\n---\n"
         if separator in existing_content:
@@ -298,6 +324,35 @@ class SelfLearningService:
         logger.info(f"[Learning] 已合并到skill: {skill_name}")
 
         return skill_name
+
+    def _is_duplicate(self, existing_content: str, new_content: str) -> bool:
+        """判断新内容是否与已有内容重复（子串命中或逐段相似度过高）"""
+        if not new_content or not new_content.strip():
+            return True
+
+        norm_new = re.sub(r"\s+", "", new_content)
+        norm_existing = re.sub(r"\s+", "", existing_content)
+        if norm_new and norm_new in norm_existing:
+            return True
+
+        for section in re.split(r"\n\s*##\s+", existing_content):
+            section = section.strip()
+            if not section or len(section) < 20:
+                continue
+            if text_similarity(section, new_content) >= MERGE_SIMILARITY_THRESHOLD:
+                return True
+
+        return False
+
+    def _next_skill_name(self, device_id: str, base_name: str) -> str:
+        """生成递增的新技能名（如 xxx_2、xxx_3），用于大小超限时开新技能"""
+        skills_dir = self._get_skills_dir(device_id)
+        n = 2
+        while True:
+            candidate = f"{base_name}_{n}"
+            if not os.path.exists(os.path.join(skills_dir, candidate)):
+                return candidate
+            n += 1
 
     async def _generate_skill_content(self, candidate: dict) -> str:
         """生成skill内容"""

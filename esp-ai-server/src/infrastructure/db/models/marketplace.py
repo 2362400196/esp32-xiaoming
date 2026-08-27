@@ -36,6 +36,10 @@ class MarketplacePluginModel(Base, TimestampMixin):
     )
     # general / weather / tools / media 等
     category: Mapped[str] = mapped_column(String(64), default="general", nullable=False, index=True)
+    # 插件图标文件名（如 icon.png），空表示未上传图标（前端显示首字母）
+    icon: Mapped[str] = mapped_column(String(256), default="", nullable=False)
+    # JSON 数组字符串，如 '["asr"]'；商店按 provides 能力分类（ASR/LLM/TTS/其他工具）
+    provides: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     # JSON 数组字符串，如 '["weather","forecast"]'
     tags: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     latest_version: Mapped[str] = mapped_column(String(64), default="0.0.0", nullable=False)
@@ -82,8 +86,34 @@ class PluginReviewModel(Base, TimestampMixin):
     comment: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
 
+class MarketplaceSkillModel(Base, TimestampMixin):
+    """技能市场主表：一个 slug 对应一条记录（轻量版，无版本/评论）"""
+    __tablename__ = "marketplace_skills"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    slug: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # 冗余存储作者名，避免跨表 join
+    author: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    # 关联 users.id（字符串 UUID），发布者即普通用户
+    developer_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # general / tools / life / entertainment 等
+    category: Mapped[str] = mapped_column(String(64), default="general", nullable=False, index=True)
+    # JSON 数组字符串，如 '["weather","forecast"]'
+    tags: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    version: Mapped[str] = mapped_column(String(64), default="1.0.0", nullable=False)
+    # 完整 SKILL.md 内容（安装时直接写回技能目录，无需 zip 文件存储）
+    content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    downloads: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
 __all__ = [
     "MarketplacePluginModel",
     "PluginVersionModel",
     "PluginReviewModel",
+    "MarketplaceSkillModel",
 ]

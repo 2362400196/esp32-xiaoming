@@ -59,6 +59,7 @@ class PluginManifest(BaseModel):
     version: str = Field(default="1.0.0", description="语义化版本（如 '1.0.0'）")
     author: str = Field(default="", description="作者")
     description: str = Field(default="", description="描述")
+    icon: str = Field(default="", description="插件图标文件名（zip 包内，如 icon.png）")
     api_version: str = Field(default="1.0", description="API兼容版本")
     requires: list[str] = Field(default_factory=list, description="能力要求（如 ['display']）")
     dependencies: list[str] = Field(
@@ -175,6 +176,7 @@ class PluginManifest(BaseModel):
         return {
             "name": self.name,
             "description": self.description,
+            "icon": self.icon,
             "requires": list(self.requires),
             "config_fields": list(self.config_fields),
             "permissions": list(self.permissions),  # 运行时权限校验用

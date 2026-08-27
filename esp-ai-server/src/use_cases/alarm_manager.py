@@ -4,6 +4,8 @@ alarm_manager.py - 闹钟和提醒管理器（DB 持久化）
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -232,101 +234,19 @@ class AlarmManager:
         if item.alarm_type == "reminder":
             # 提醒：合成 TTS 并直接发送音频帧，不经过 session_start/iat_start
             logger.info(f"[Alarm] 合成并发送 TTS: {item.text}")
-            try:
-                # 直接通过 channel 发送 play_audio + 音频帧
-                from src.infrastructure.web import get_app
-                from src.interfaces.tts_gateways import create_tts_gateway, VoiceGenerator
-                from src.infrastructure.config import get_settings
-                settings = get_settings()
-                _app = get_app()
-
-                # 获取设备 TTS 配置
-                user_config = device.get("user_config")
-                _tts_cfg = None
-                if user_config and hasattr(user_config, 'tts_config') and user_config.tts_config:
-                    _u = user_config.tts_config
-                    _tts_cfg = {
-                        "api_key": _u.get("api_key", settings.tts.api_key),
-                        "resource_id": _u.get("resource_id") or settings.tts.resource_id or "",
-                        "voice_type": _u.get("voice_type", settings.tts.voice_type or "BV001_streaming"),
-                        "sample_rate": settings.tts.sample_rate or 24000,
-                        "speed_ratio": _u.get("speed_ratio", settings.tts.speed_ratio or 1.0),
-                        "volume_ratio": _u.get("volume_ratio", settings.tts.volume_ratio or 1.0),
-                        "pitch_ratio": _u.get("pitch_ratio", settings.tts.pitch_ratio or 1.0),
-                        "enable_pool": settings.tts.enable_pool,
-                    }
-                volc_tts = create_tts_gateway(config=_tts_cfg)
-                tts_session = await volc_tts.create_session()
-                if tts_session:
-                    vg = VoiceGenerator()
-                    audio_chunks = []
-                    async for chunk in tts_session.synthesize(item.text):
-                        if chunk:
-                            audio_chunks.append(chunk)
-
-                    if audio_chunks:
-                        # 不发送 session_start，直接发 play_audio + 音频
-                        await channel.send_json({"type": "play_audio", "tts_task_id": "0010"})
-                        await asyncio.sleep(0.1)
-                        await channel.send_json({"type": "session_status", "status": "tts_chunk_start"})
-                        await asyncio.sleep(0.05)
-                        for chunk in audio_chunks:
-                            frame = vg.make_tts_frame("0010", chunk, "00")
-                            await channel.send_bytes(frame)
-                            await asyncio.sleep(0.02)
-                        await channel.send_bytes(vg.make_end_frame("0010"))
-                        await asyncio.sleep(0.05)
-                        await channel.send_json({"type": "session_status", "status": "tts_real_end"})
-                        logger.info(f"[Alarm] TTS 音频已发送: {len(audio_chunks)} 帧, {item.text[:20]}")
-                    await tts_session.close()
-                await volc_tts.close()
-            except Exception as e:
-                logger.error(f"[Alarm] TTS 播报失败: {e}")
+            await self._play_tts(channel, device, item.text)
 
         elif item.alarm_type == "alarm":
-            # 闹钟：通过 SDK 搜索并播放音乐
-            # item.text 为歌名，为空时随机推荐一首
-            from src.infrastructure.config import get_settings
-            settings = get_settings()
-            _user_cfg = device.get("user_config")
-            music_api_url = ""
-            if _user_cfg and hasattr(_user_cfg, "music_config") and _user_cfg.music_config:
-                music_api_url = (_user_cfg.music_config.get("api_url") or "").strip()
-            if not music_api_url:
-                music_api_url = settings.music.api_url
-
-            if not music_api_url:
-                logger.error("[Alarm] 音乐服务未配置，无法播放闹钟铃声")
-                return
-
-            try:
-                if item.text:
-                    resp, err = await http_request("GET", f"{music_api_url}/stream_pcm", params={"song": item.text}, timeout=10)
-                else:
-                    resp, err = await http_request("GET", f"{music_api_url}/random", timeout=10)
-                if err:
-                    raise err
-                data = resp.json()
-                if not data.get("success"):
-                    logger.warning(f"[Alarm] 未找到歌曲: {item.text or '随机'}")
-                    return
-
-                audio_url = data.get("audio_url", "")
-                if not audio_url:
-                    logger.warning(f"[Alarm] 歌曲无音频链接: {data.get('title', item.text or '随机')}")
-                    return
-
-                result = await play_music_url(
-                    url=audio_url,
-                    title=data.get("title", item.text or "随机"),
-                    artist=data.get("artist", ""),
-                    duration=data.get("duration", 0),
-                    device_key=item.device_key,
-                    lyric_url=data.get("lyric_url", ""),
-                )
-                logger.info(f"[Alarm] 闹钟铃声: {data.get('title', item.text or '随机')}, SDK 结果: {result}")
-            except Exception as e:
-                logger.error(f"[Alarm] 搜索歌曲失败: {e}")
+            # 闹钟：优先音乐服务（音乐插件已启用且配置了服务地址），否则降级为 TTS 语音播报
+            music_ok = self._is_music_plugin_enabled(device)
+            music_api_url = self._resolve_music_api_url(device) if music_ok else ""
+            if music_ok and music_api_url:
+                await self._play_alarm_music(channel, device, item, music_api_url)
+            else:
+                reason = "音乐插件未启用" if not music_ok else "音乐服务未配置"
+                logger.info(f"[Alarm] {reason}，闹钟降级为 TTS 语音播报: {item.alarm_id}")
+                now = datetime.now()
+                await self._play_tts(channel, device, f"起床啦，现在是{now.strftime('%H点%M分')}，该起床啦")
 
         elif item.alarm_type == "sleep_timer":
             # 睡眠定时器：停止一切活动，进入休息状态
@@ -398,6 +318,179 @@ class AlarmManager:
             logger.info(f"[Alarm] 微信提醒已发送到 {binding.wechat_chat_id[:16]}: {msg[:40]}")
         except Exception as e:
             logger.warning(f"[Alarm] 微信提醒发送失败: {e}")
+
+    def _is_music_plugin_enabled(self, device) -> bool:
+        """判断音乐插件（media_player）是否已启用（与 tools_system 白名单语义一致）。
+
+        可选插件需在设备 enabled_plugins 白名单内才生效；
+        enabled_plugins 为 None/空 时按无白名单处理（可选插件默认不启用）。
+        """
+        try:
+            from src.infrastructure.plugin_loader import (
+                get_loaded_plugins,
+                is_optional_plugin,
+                is_system_plugin,
+            )
+            if "media_player" not in get_loaded_plugins():
+                return False
+            user_config = device.get("user_config") if device else None
+            enabled = None
+            if user_config and hasattr(user_config, "enabled_plugins"):
+                enabled = user_config.enabled_plugins
+            enabled_set = set(enabled) if enabled else None
+            if is_optional_plugin("media_player") and not is_system_plugin("media_player"):
+                if enabled_set is None or "media_player" not in enabled_set:
+                    return False
+            return True
+        except Exception:
+            return False
+
+    def _resolve_music_api_url(self, device) -> str:
+        """解析音乐服务地址，优先级：media_player 插件 KV 配置 > 设备 music_config > 全局 .env。"""
+        # 1. media_player 插件 KV 配置（按设备隔离存储）
+        try:
+            kv_url = self._read_media_player_kv("api_url", device)
+            if kv_url and str(kv_url).strip():
+                return str(kv_url).strip()
+        except Exception:
+            pass
+        # 2. 设备 music_config
+        try:
+            user_config = device.get("user_config") if device else None
+            if user_config and hasattr(user_config, "music_config") and user_config.music_config:
+                url = (user_config.music_config.get("api_url") or "").strip()
+                if url:
+                    return url
+        except Exception:
+            pass
+        # 3. 全局 .env
+        try:
+            from src.infrastructure.config import get_settings
+            url = (get_settings().music.api_url or "").strip()
+            if url:
+                return url
+        except Exception:
+            pass
+        return ""
+
+    def _read_media_player_kv(self, key: str, device) -> Any:
+        """读取 media_player 插件在 KV 中的配置（按设备隔离存储）。
+
+        路径：data/plugins/kv/{sanitized_device_id}/media_player.json
+        优先按设备 mac/device_id 查找，未命中时扫描所有设备目录回退。
+        """
+        import re
+        root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        kv_root = os.path.join(root, "data", "plugins", "kv")
+        candidates: list[str] = []
+        if device:
+            mac = device.get("mac") or ""
+            if mac:
+                candidates.append(re.sub(r'[\\/:*?"<>|]', '-', mac))
+            dev_id = device.get("device_id") or ""
+            if dev_id:
+                candidates.append(re.sub(r'[\\/:*?"<>|]', '-', dev_id))
+        for safe_id in candidates:
+            path = os.path.join(kv_root, safe_id, "media_player.json")
+            if os.path.isfile(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        store = json.load(f)
+                        if key in store:
+                            return store.get(key)
+                except (json.JSONDecodeError, OSError):
+                    continue
+        if os.path.isdir(kv_root):
+            for entry in os.listdir(kv_root):
+                path = os.path.join(kv_root, entry, "media_player.json")
+                if os.path.isfile(path):
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            store = json.load(f)
+                            if key in store:
+                                return store.get(key)
+                    except (json.JSONDecodeError, OSError):
+                        continue
+        return None
+
+    async def _play_alarm_music(self, channel, device, item: AlarmItem, music_api_url: str) -> None:
+        """通过音乐服务搜索并播放闹钟铃声。"""
+        try:
+            if item.text:
+                resp, err = await http_request(
+                    "GET", f"{music_api_url}/stream_pcm",
+                    params={"song": item.text}, timeout=10,
+                )
+            else:
+                resp, err = await http_request("GET", f"{music_api_url}/random", timeout=10)
+            if err:
+                raise err
+            data = resp.json()
+            if not data.get("success"):
+                logger.warning(f"[Alarm] 未找到歌曲: {item.text or '随机'}")
+                return
+            audio_url = data.get("audio_url", "")
+            if not audio_url:
+                logger.warning(f"[Alarm] 歌曲无音频链接: {data.get('title', item.text or '随机')}")
+                return
+            result = await play_music_url(
+                url=audio_url,
+                title=data.get("title", item.text or "随机"),
+                artist=data.get("artist", ""),
+                duration=data.get("duration", 0),
+                device_key=item.device_key,
+                lyric_url=data.get("lyric_url", ""),
+            )
+            logger.info(f"[Alarm] 闹钟铃声: {data.get('title', item.text or '随机')}, SDK 结果: {result}")
+        except Exception as e:
+            logger.error(f"[Alarm] 搜索歌曲失败: {e}")
+
+    async def _play_tts(self, channel, device, text: str) -> None:
+        """合成 TTS 并直接发送音频帧（不经过 session_start/iat_start）。"""
+        try:
+            from src.infrastructure.config import get_settings
+            from src.interfaces.tts_gateways import create_tts_gateway, VoiceGenerator
+            settings = get_settings()
+
+            user_config = device.get("user_config")
+            _tts_cfg = None
+            if user_config and hasattr(user_config, 'tts_config') and user_config.tts_config:
+                _u = user_config.tts_config
+                _tts_cfg = {
+                    "api_key": _u.get("api_key", settings.tts.api_key),
+                    "resource_id": _u.get("resource_id") or settings.tts.resource_id or "",
+                    "voice_type": _u.get("voice_type", settings.tts.voice_type or "BV001_streaming"),
+                    "sample_rate": settings.tts.sample_rate or 24000,
+                    "speed_ratio": _u.get("speed_ratio", settings.tts.speed_ratio or 1.0),
+                    "volume_ratio": _u.get("volume_ratio", settings.tts.volume_ratio or 1.0),
+                    "pitch_ratio": _u.get("pitch_ratio", settings.tts.pitch_ratio or 1.0),
+                    "enable_pool": settings.tts.enable_pool,
+                }
+            volc_tts = create_tts_gateway(config=_tts_cfg)
+            tts_session = await volc_tts.create_session()
+            if tts_session:
+                vg = VoiceGenerator()
+                audio_chunks = []
+                async for chunk in tts_session.synthesize_audio(text):
+                    if chunk:
+                        audio_chunks.append(chunk)
+                if audio_chunks:
+                    await channel.send_json({"type": "play_audio", "tts_task_id": "0010"})
+                    await asyncio.sleep(0.1)
+                    await channel.send_json({"type": "session_status", "status": "tts_chunk_start"})
+                    await asyncio.sleep(0.05)
+                    for chunk in audio_chunks:
+                        frame = vg.make_tts_frame("0010", chunk, "00")
+                        await channel.send_bytes(frame)
+                        await asyncio.sleep(0.02)
+                    await channel.send_bytes(vg.make_end_frame("0010"))
+                    await asyncio.sleep(0.05)
+                    await channel.send_json({"type": "session_status", "status": "tts_real_end"})
+                    logger.info(f"[Alarm] TTS 音频已发送: {len(audio_chunks)} 帧, {text[:20]}")
+                await tts_session.close()
+            await volc_tts.close()
+        except Exception as e:
+            logger.error(f"[Alarm] TTS 播报失败: {e}")
 
 
 def alarm_type_text(t: str) -> str:

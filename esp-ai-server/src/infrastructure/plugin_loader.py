@@ -487,6 +487,7 @@ def get_optional_plugins_info() -> list[dict]:
         if _plugin_optional.get(name):
             meta = _plugin_meta.get(name, {})
             manifest = _plugin_manifest.get(name)
+            provides = getattr(manifest, "provides", None) or {}
             out.append({
                 "name": name,
                 "version": _plugin_version.get(name, "1.0.0"),
@@ -497,6 +498,7 @@ def get_optional_plugins_info() -> list[dict]:
                 "config_fields": meta.get("config_fields", []),
                 "author": getattr(manifest, "author", "") if manifest else "",
                 "system": is_system_plugin(name),
+                "provides": provides,
             })
     return out
 

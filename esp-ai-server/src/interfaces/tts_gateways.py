@@ -79,7 +79,15 @@ class EventType(IntEnum):
     TTSSentenceStart = 350
     TTSSentenceEnd = 351
     TTSResponse = 352
+    TTSSubtitle = 364
     TTSEnded = 359
+
+
+@dataclass
+class TTSSynthEvent:
+    """TTS 合成事件：kind="audio" 时 data 为音频字节；kind="subtitle" 时 data 为 {seq, words}"""
+    kind: str
+    data: Any
 
 
 @dataclass
@@ -438,7 +446,7 @@ class TTSSession:
         self._seq = 0
         logger.info("[TTS] Session WS 已重连")
 
-    async def synthesize(self, text: str, cancel_event=None) -> AsyncIterator[bytes]:
+    async def synthesize(self, text: str, cancel_event=None) -> AsyncIterator[TTSSynthEvent]:
         if self._closed:
             return
 
@@ -462,6 +470,8 @@ class TTSSession:
                 "text": text,
             },
         }
+        if self._gateway.enable_subtitle:
+            request["req_params"]["audio_params"]["enable_subtitle"] = True
         if self._gateway.explicit_dialect:
             request["req_params"]["explicit_dialect"] = self._gateway.explicit_dialect
 
@@ -499,9 +509,11 @@ class TTSSession:
 
                 if msg.type == MsgType.AudioOnlyServer:
                     if msg.payload:
-                        yield msg.payload
+                        yield TTSSynthEvent("audio", msg.payload)
                 elif msg.type == MsgType.FullServerResponse:
-                    if msg.event == EventType.SessionFinished:
+                    if msg.event == EventType.TTSSubtitle:
+                        yield self._parse_subtitle_event(seq, msg)
+                    elif msg.event == EventType.SessionFinished:
                         logger.debug(f"[TTS] 句子 #{seq} 合成完成")
                         return
                     elif msg.event == EventType.SessionFailed:
@@ -522,6 +534,41 @@ class TTSSession:
         except asyncio.CancelledError:
             self._close_on_release = True
             raise
+
+    async def synthesize_audio(self, text: str, cancel_event=None) -> AsyncIterator[bytes]:
+        """合成并仅产出音频字节（忽略字幕事件），供不关心字级时间戳的调用方使用。"""
+        async for event in self.synthesize(text, cancel_event=cancel_event):
+            if event.kind == "audio" and event.data:
+                yield event.data
+
+    def _parse_subtitle_event(self, seq: int, msg: Message) -> TTSSynthEvent:
+        """解析 TTSSubtitle 事件（EventType=364），提取字级时间戳。
+
+        words 时间戳单位为秒，且是整句累计的绝对时间（实测每个子句批次
+        的首字 startTime 都大于上一批次末字 endTime，为子句间自然停顿），
+        因此直接换算为毫秒即可，无需累加子句偏移。
+        """
+        try:
+            payload = json.loads(msg.payload.decode("utf-8", "ignore"))
+            words = payload.get("words") or []
+            if not words:
+                return TTSSynthEvent("subtitle", {"seq": seq, "words": []})
+            word_list = []
+            for w in words:
+                try:
+                    start_ms = int(float(w.get("startTime", 0)) * 1000)
+                    end_ms = int(float(w.get("endTime", 0)) * 1000)
+                except (TypeError, ValueError):
+                    continue
+                word_list.append({
+                    "word": w.get("word", ""),
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                })
+            return TTSSynthEvent("subtitle", {"seq": seq, "words": word_list})
+        except Exception as e:
+            logger.warning(f"[TTS] 解析字幕事件异常 #{seq}: {e}")
+            return TTSSynthEvent("subtitle", {"seq": seq, "words": []})
 
     async def close(self):
         if self._released:
@@ -588,6 +635,7 @@ class VolcEngineTTSGateway(TTSRepository):
         self.volume_ratio = effective.get("volume_ratio", tts_config.volume_ratio)
         self.pitch_ratio = effective.get("pitch_ratio", tts_config.pitch_ratio)
         self.explicit_dialect = effective.get("explicit_dialect", tts_config.explicit_dialect) or ""
+        self.enable_subtitle = effective.get("enable_subtitle", tts_config.enable_subtitle)
         self._max_retries = 3
         self._ping_interval = 30
         self._connection_timeout = 15
@@ -813,6 +861,8 @@ class VolcEngineTTSGateway(TTSRepository):
                         "text": text,
                     },
                 }
+                if self.enable_subtitle:
+                    request["req_params"]["audio_params"]["enable_subtitle"] = True
                 if self.explicit_dialect:
                     request["req_params"]["explicit_dialect"] = self.explicit_dialect
 
@@ -913,6 +963,8 @@ class VolcEngineTTSGateway(TTSRepository):
                     "text": text,
                 },
             }
+            if self.enable_subtitle:
+                request["req_params"]["audio_params"]["enable_subtitle"] = True
             if self.explicit_dialect:
                 request["req_params"]["explicit_dialect"] = self.explicit_dialect
 

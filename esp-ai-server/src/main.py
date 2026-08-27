@@ -227,6 +227,8 @@ async def main() -> None:
         log_level=settings.log.level.value.lower(),
         workers=settings.server.workers,
         reload=settings.server.reload,
+        # 不覆盖自定义日志配置（否则 uvicorn 会重置根 logger，esp_ai.log 停止写入）
+        log_config=None,
     )
 
     server = uvicorn.Server(config)

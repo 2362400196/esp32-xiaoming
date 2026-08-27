@@ -68,7 +68,7 @@ class Speaker:
             # 先合成语音，确认能产生音频
             vg = self._wake_audio.voice_generator
             audio_chunks = []
-            async for chunk in session.synthesize(text):
+            async for chunk in session.synthesize_audio(text):
                 if chunk:
                     audio_chunks.append(chunk)
                     if len(audio_chunks) >= 500:

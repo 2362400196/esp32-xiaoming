@@ -11,7 +11,7 @@ SDK 层（ws_connect / http_request 等）由框架提供，插件通过 SDK 调
 
   TTS 插件:
     tts_start_synthesis(text, config) -> {"syn_id": str, "error": str|null}
-    tts_get_audio(syn_id) -> {"audio_base64": str, "done": bool, "error": str|null}
+    tts_get_audio(syn_id) -> {"audio_base64": str, "subtitle": list|null, "done": bool, "error": str|null}
     tts_end_synthesis(syn_id) -> {}
 
   ASR 插件:
@@ -35,6 +35,7 @@ from src.infrastructure.plugin_loader import (
     get_service_providers,
     has_service_plugin,
 )
+from src.interfaces.tts_gateways import TTSSynthEvent
 from src.use_cases.tools_system import StopPipeline
 
 logger = get_logger(__name__)
@@ -358,8 +359,8 @@ async def call_tts_synthesize(
     config: dict | None = None,
     tool_manager=None,
     provider: str | None = None,
-) -> AsyncIterator[bytes]:
-    """通过 TTS 服务插件合成语音，逐音频块产出。
+) -> AsyncIterator[TTSSynthEvent]:
+    """通过 TTS 服务插件合成语音，逐事件产出。
 
     Args:
         text: 待合成文本
@@ -368,7 +369,8 @@ async def call_tts_synthesize(
         provider: 指定 Provider 名称
 
     Yields:
-        逐音频块（bytes）
+        TTSSynthEvent：kind="audio" 时 data 为音频字节；
+                      kind="subtitle" 时 data 为 {words: [{word, start_ms, end_ms}]}
     """
     plugin_name = get_service_plugin("tts", provider)
     if not plugin_name:
@@ -395,7 +397,7 @@ async def call_tts_synthesize(
     if not syn_id:
         return
 
-    # 2. 轮询获取音频
+    # 2. 轮询获取音频/字幕事件
     try:
         while True:
             chunk = await _call_plugin_tool(
@@ -410,9 +412,13 @@ async def call_tts_synthesize(
             if isinstance(chunk_parsed, dict):
                 if chunk_parsed.get("error") or chunk_parsed.get("done"):
                     break
+                subtitle = chunk_parsed.get("subtitle")
+                if subtitle:
+                    yield TTSSynthEvent("subtitle", {"words": subtitle})
+                    continue
                 audio_b64 = chunk_parsed.get("audio_base64", "")
                 if audio_b64:
-                    yield base64.b64decode(audio_b64)
+                    yield TTSSynthEvent("audio", base64.b64decode(audio_b64))
             else:
                 break
     finally:

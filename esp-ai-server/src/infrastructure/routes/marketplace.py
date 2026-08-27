@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import io
 import json
+import mimetypes
 import re
 import secrets
 import zipfile
@@ -33,7 +34,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator
-from sqlalchemy import desc, func, or_, select
+from sqlalchemy import and_, desc, func, or_, select
 
 from src.infrastructure.db.models.marketplace import (
     MarketplacePluginModel,
@@ -46,6 +47,7 @@ from src.infrastructure.logging import get_logger
 from src.infrastructure.marketplace_storage import (
     MARKETPLACE_STORAGE_DIR,
     compute_checksum,
+    save_icon,
     save_package,
 )
 from src.infrastructure.security_jwt import get_current_user
@@ -61,6 +63,64 @@ _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+([\-+][0-9A-Za-z.\-]+)?$")
 
 # 上传 zip 大小上限：50MB
 _MAX_UPLOAD_SIZE = 50 * 1024 * 1024
+
+# 商店固定分类：基于插件 provides 能力（ASR/LLM/TTS/其他工具）
+STORE_CATEGORIES = [
+    {"name": "ASR", "key": "asr"},
+    {"name": "LLM", "key": "llm"},
+    {"name": "TTS", "key": "tts"},
+    {"name": "其他工具", "key": "other"},
+]
+
+
+def _extract_provides(manifest: dict) -> list:
+    """从 manifest 提取插件提供的能力（仅 asr/llm/tts 用于商店分类）。"""
+    provides = manifest.get("provides", {}) or {}
+    if isinstance(provides, dict):
+        return [k for k in ("asr", "llm", "tts") if k in provides]
+    return []
+
+
+def _extract_icon_from_zip(zip_bytes: bytes, icon_name: str) -> bytes | None:
+    """从 zip 包提取图标文件内容（manifest.icon 指定的文件）。
+
+    支持根目录或单层子目录，规范化路径防止路径穿越。
+    """
+    icon_name = (icon_name or "").strip().replace("\\", "/").lstrip("/")
+    if not icon_name or ".." in Path(icon_name).parts:
+        return None
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile:
+        return None
+    try:
+        return zf.read(icon_name)
+    except KeyError:
+        for n in zf.namelist():
+            if n.endswith("/" + icon_name) and n.count("/") == 1:
+                return zf.read(n)
+        return None
+
+
+def _category_filter(category: str):
+    """将商店分类名映射为 provides 筛选条件（None 表示不过滤）。"""
+    if category == "ASR":
+        return MarketplacePluginModel.provides.like('%"asr"%')
+    if category == "LLM":
+        return MarketplacePluginModel.provides.like('%"llm"%')
+    if category == "TTS":
+        return MarketplacePluginModel.provides.like('%"tts"%')
+    if category == "其他工具":
+        return or_(
+            MarketplacePluginModel.provides.is_(None),
+            MarketplacePluginModel.provides == "",
+            and_(
+                MarketplacePluginModel.provides.not_like('%"asr"%'),
+                MarketplacePluginModel.provides.not_like('%"llm"%'),
+                MarketplacePluginModel.provides.not_like('%"tts"%'),
+            ),
+        )
+    return None
 
 
 # ==================== Pydantic 请求/响应模型 ====================
@@ -199,6 +259,7 @@ async def developer_plugins(user: UserModel = Depends(get_current_user)):
                 "latest_version": p.latest_version,
                 "total_downloads": p.total_downloads,
                 "category": p.category,
+                "icon": p.icon,
                 "is_active": p.is_active,
                 "updated_at": p.updated_at,
             })
@@ -263,7 +324,7 @@ def _read_manifest_from_zip(zip_bytes: bytes) -> tuple[dict, set]:
     return manifest, names
 
 
-def _validate_manifest(manifest: dict) -> tuple[str, str, str, str, str, list, str, str]:
+def _validate_manifest(manifest: dict) -> tuple[str, str, str, str, str, list, str, str, list, str]:
     """校验 manifest 必需字段。"""
     raw_id = str(manifest.get("id", "")).strip()
     if not raw_id:
@@ -288,7 +349,9 @@ def _validate_manifest(manifest: dict) -> tuple[str, str, str, str, str, list, s
     tags = [str(t) for t in tags_raw]
     changelog = str(manifest.get("changelog", "")).strip()
     signature = str(manifest.get("signature", "") or "").strip()
-    return slug, name, version, description, category, tags, changelog, signature
+    provides = _extract_provides(manifest)
+    icon = str(manifest.get("icon", "") or "").strip()
+    return slug, name, version, description, category, tags, changelog, signature, provides, icon
 
 
 def _read_source_from_zip(zip_bytes: bytes) -> dict:
@@ -339,7 +402,15 @@ def _read_source_from_zip(zip_bytes: bytes) -> dict:
         try:
             content = zf.read(n).decode("utf-8")
             files.append({"name": n, "content": content})
-        except (UnicodeDecodeError, KeyError):
+        except UnicodeDecodeError:
+            # 二进制文件（如图标 png/jpg）以 base64 返回，编辑后重新打包时保留
+            import base64
+            files.append({
+                "name": n,
+                "content": base64.b64encode(zf.read(n)).decode("ascii"),
+                "binary": True,
+            })
+        except KeyError:
             continue
 
     return {
@@ -351,17 +422,26 @@ def _read_source_from_zip(zip_bytes: bytes) -> dict:
 
 
 def _create_zip_from_source(manifest: dict, plugin_code: str, files: list | None = None) -> bytes:
-    """从 manifest dict、plugin.py 源码和附加文件创建 zip 包。"""
+    """从 manifest dict、plugin.py 源码和附加文件创建 zip 包。
+
+    files 条目支持二进制文件：{"name": "icon.png", "content": "<base64>", "binary": true}
+    """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         zf.writestr("plugin.py", plugin_code)
         for item in files or []:
             fname = str(item.get("name") or "").strip().lstrip("/")
-            content = str(item.get("content") or "")
             if not fname or fname in ("manifest.json", "plugin.py") or ".." in Path(fname).parts:
                 continue
-            zf.writestr(fname, content)
+            if item.get("binary"):
+                import base64
+                try:
+                    zf.writestr(fname, base64.b64decode(str(item.get("content") or "")))
+                except Exception:
+                    continue
+            else:
+                zf.writestr(fname, str(item.get("content") or ""))
     return buf.getvalue()
 
 
@@ -386,13 +466,20 @@ async def upload_plugin(
 
         try:
             manifest, _names = _read_manifest_from_zip(zip_bytes)
-            slug, name, version, description, category, tags, changelog, signature = _validate_manifest(manifest)
+            slug, name, version, description, category, tags, changelog, signature, provides, icon = _validate_manifest(manifest)
         except ValueError as e:
             return {"code": 1, "message": str(e), "data": None}
 
         rel_path = await save_package(zip_bytes, slug, version)
         pkg_abs = MARKETPLACE_STORAGE_DIR / rel_path
         checksum = await compute_checksum(pkg_abs)
+
+        # 提取并保存图标（manifest.icon 指定的文件）
+        icon_file = ""
+        if icon:
+            icon_bytes = _extract_icon_from_zip(zip_bytes, icon)
+            if icon_bytes:
+                icon_file = await save_icon(icon_bytes, slug, icon)
 
         async with get_session_ctx() as session:
             result = await session.execute(
@@ -407,6 +494,8 @@ async def upload_plugin(
                     description=description,
                     developer_id=str(user.id),
                     category=category,
+                    icon=icon_file,
+                    provides=json.dumps(provides, ensure_ascii=False),
                     tags=json.dumps(tags, ensure_ascii=False),
                     latest_version=version,
                 )
@@ -428,6 +517,9 @@ async def upload_plugin(
                 plugin.name = name
                 plugin.description = description
                 plugin.category = category
+                # 新包带图标则更新；manifest 无 icon 视为移除；提取失败保留旧图标
+                plugin.icon = (icon_file or plugin.icon) if icon else ""
+                plugin.provides = json.dumps(provides, ensure_ascii=False)
                 plugin.tags = json.dumps(tags, ensure_ascii=False)
                 plugin.latest_version = version
                 plugin_id = plugin.id
@@ -587,7 +679,7 @@ async def update_plugin_source(
         await _ensure_developer(user)
 
         try:
-            m_slug, m_name, m_version, m_desc, m_cat, m_tags, m_changelog, m_sig = _validate_manifest(body.manifest)
+            m_slug, m_name, m_version, m_desc, m_cat, m_tags, m_changelog, m_sig, m_provides, m_icon = _validate_manifest(body.manifest)
         except ValueError as e:
             return {"code": 1, "message": str(e), "data": None}
 
@@ -620,6 +712,13 @@ async def update_plugin_source(
         pkg_abs = MARKETPLACE_STORAGE_DIR / rel_path
         checksum = await compute_checksum(pkg_abs)
 
+        # 提取并保存图标（manifest.icon 指定的文件）
+        icon_file = ""
+        if m_icon:
+            icon_bytes = _extract_icon_from_zip(zip_bytes, m_icon)
+            if icon_bytes:
+                icon_file = await save_icon(icon_bytes, slug, m_icon)
+
         changelog = body.changelog or m_changelog
 
         async with get_session_ctx() as session:
@@ -631,6 +730,9 @@ async def update_plugin_source(
             plugin.name = m_name
             plugin.description = m_desc
             plugin.category = m_cat
+            # 新包带图标则更新；manifest 无 icon 视为移除；提取失败保留旧图标
+            plugin.icon = (icon_file or plugin.icon) if m_icon else ""
+            plugin.provides = json.dumps(m_provides, ensure_ascii=False)
             plugin.tags = json.dumps(m_tags, ensure_ascii=False)
             plugin.latest_version = m_version
 
@@ -689,6 +791,19 @@ async def create_plugin_from_code(
             if existing.scalar_one_or_none() is not None:
                 return {"code": 1, "message": f"插件 slug '{slug}' 已存在", "data": None}
 
+        # 从 files 中的 manifest.json 提取 provides/icon（用于商店分类和图标，并写入 zip 的 manifest）
+        provides = []
+        icon = ""
+        for f in body.files or []:
+            if isinstance(f, dict) and str(f.get("name", "")).endswith("manifest.json"):
+                try:
+                    m = json.loads(f.get("content", "{}"))
+                    provides = _extract_provides(m)
+                    icon = str(m.get("icon", "") or "").strip()
+                except Exception:
+                    provides = []
+                break
+
         manifest = {
             "id": slug,
             "name": body.name,
@@ -699,6 +814,10 @@ async def create_plugin_from_code(
             "changelog": body.changelog,
             "api_version": "1.0",
         }
+        if provides:
+            manifest["provides"] = {k: [] for k in provides}
+        if icon:
+            manifest["icon"] = icon
 
         zip_bytes = _create_zip_from_source(manifest, body.plugin_code, body.files)
         if len(zip_bytes) > _MAX_UPLOAD_SIZE:
@@ -708,6 +827,13 @@ async def create_plugin_from_code(
         pkg_abs = MARKETPLACE_STORAGE_DIR / rel_path
         checksum = await compute_checksum(pkg_abs)
 
+        # 提取并保存图标（manifest.icon 指定的文件）
+        icon_file = ""
+        if icon:
+            icon_bytes = _extract_icon_from_zip(zip_bytes, icon)
+            if icon_bytes:
+                icon_file = await save_icon(icon_bytes, slug, icon)
+
         async with get_session_ctx() as session:
             plugin = MarketplacePluginModel(
                 slug=slug,
@@ -715,6 +841,8 @@ async def create_plugin_from_code(
                 description=body.description,
                 developer_id=str(user.id),
                 category=body.category,
+                icon=icon_file,
+                provides=json.dumps(provides, ensure_ascii=False),
                 tags=json.dumps(body.tags, ensure_ascii=False),
                 latest_version=body.version,
             )
@@ -768,6 +896,7 @@ def _plugin_list_item(p: MarketplacePluginModel, dev_name: str) -> dict:
         "review_count": p.review_count,
         "is_featured": p.is_featured,
         "category": p.category,
+        "icon": p.icon,
     }
 
 
@@ -793,7 +922,9 @@ async def list_plugins(
                 MarketplacePluginModel.description.ilike(like),
             ))
         if category:
-            stmt = stmt.where(MarketplacePluginModel.category == category)
+            cat_cond = _category_filter(category)
+            if cat_cond is not None:
+                stmt = stmt.where(cat_cond)
 
         sort = (sort or "downloads").lower()
         if sort == "rating":
@@ -814,7 +945,9 @@ async def list_plugins(
                 MarketplacePluginModel.description.ilike(like),
             ))
         if category:
-            count_stmt = count_stmt.where(MarketplacePluginModel.category == category)
+            cat_cond = _category_filter(category)
+            if cat_cond is not None:
+                count_stmt = count_stmt.where(cat_cond)
 
         async with get_session_ctx() as session:
             total = (await session.execute(count_stmt)).scalar() or 0
@@ -861,6 +994,7 @@ async def get_plugin_detail(slug: str):
             "name": plugin.name,
             "description": plugin.description,
             "category": plugin.category,
+            "icon": plugin.icon,
             "tags": tags,
             "latest_version": plugin.latest_version,
             "total_downloads": plugin.total_downloads,
@@ -952,6 +1086,30 @@ async def download_plugin(slug: str, version: str = Query("latest")):
         return {"code": 1, "message": str(e), "data": None}
 
 
+@router.get("/api/v1/marketplace/plugins/{slug}/icon")
+async def get_plugin_icon(slug: str):
+    """返回插件图标文件（未上传图标时返回 404）。"""
+    try:
+        async with get_session_ctx() as session:
+            plugin = (await session.execute(
+                select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
+            )).scalar_one_or_none()
+            if plugin is None or not plugin.icon:
+                raise HTTPException(status_code=404, detail="插件未上传图标")
+            icon_name = plugin.icon
+
+        icon_path = MARKETPLACE_STORAGE_DIR / slug / icon_name
+        if not icon_path.is_file():
+            raise HTTPException(status_code=404, detail="图标文件不存在")
+        media_type = mimetypes.guess_type(icon_name)[0] or "image/png"
+        return FileResponse(path=str(icon_path), media_type=media_type)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Marketplace] 插件图标读取失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ==================== 评论 ====================
 
 @router.get("/api/v1/marketplace/plugins/{slug}/reviews")
@@ -1032,18 +1190,55 @@ async def create_plugin_review(
 
 # ==================== 分类聚合 ====================
 
+def _optional_category_keys(provides) -> set:
+    """从可选插件的 provides 提取能力集合（仅 asr/llm/tts）。"""
+    if isinstance(provides, dict):
+        return {k for k in ("asr", "llm", "tts") if k in provides}
+    return set()
+
+
+def _count_optional_by_category(optional_plugins: list, category: str) -> int:
+    """统计可选插件中属于指定分类的数量。"""
+    cnt = 0
+    for p in optional_plugins:
+        keys = _optional_category_keys(p.get("provides"))
+        if category == "ASR":
+            if "asr" in keys:
+                cnt += 1
+        elif category == "LLM":
+            if "llm" in keys:
+                cnt += 1
+        elif category == "TTS":
+            if "tts" in keys:
+                cnt += 1
+        elif category == "其他工具":
+            if not keys:
+                cnt += 1
+    return cnt
+
+
 @router.get("/api/v1/marketplace/categories")
 async def list_categories():
-    """返回分类及插件数量。"""
+    """返回商店固定分类（ASR/LLM/TTS/其他工具）及插件数量（含内置可选插件）。"""
     try:
         async with get_session_ctx() as session:
-            rows = (await session.execute(
-                select(MarketplacePluginModel.category, func.count(MarketplacePluginModel.id))
-                .where(MarketplacePluginModel.is_active == True)  # noqa: E712
-                .group_by(MarketplacePluginModel.category)
-                .order_by(desc(func.count(MarketplacePluginModel.id)))
-            )).all()
-        data = [{"name": cat, "count": cnt} for (cat, cnt) in rows]
+            base = select(func.count(MarketplacePluginModel.id)).where(
+                MarketplacePluginModel.is_active == True  # noqa: E712
+            )
+            data = []
+            for cat in STORE_CATEGORIES:
+                cond = _category_filter(cat["name"])
+                cnt = 0
+                if cond is not None:
+                    cnt = (await session.execute(base.where(cond))).scalar() or 0
+                data.append({"name": cat["name"], "count": cnt})
+
+        # 合并内置可选插件统计（商店页面同时展示市场插件与可选插件）
+        from src.infrastructure.plugin_loader import get_optional_plugins_info
+        optional = get_optional_plugins_info()
+        for cat in data:
+            cat["count"] += _count_optional_by_category(optional, cat["name"])
+
         return {"code": 0, "message": "ok", "data": data}
     except Exception as e:
         logger.error(f"[Marketplace] 分类查询失败: {e}", exc_info=True)

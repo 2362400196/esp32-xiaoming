@@ -125,5 +125,5 @@ async def get_self_learned_skills(tool_manager=None) -> str:
     self_learned = [s for s in catalog if s.device_id]
     if not self_learned:
         return "还没有自学习的技能"
-    lines = [f"· {s.name or s.id}：{s.description}" for s in self_learned]
+    lines = [f"· {s.id}：{s.description}" for s in self_learned]
     return "自学习技能列表：\n" + "\n".join(lines)

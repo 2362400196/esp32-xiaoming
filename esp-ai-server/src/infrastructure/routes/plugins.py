@@ -535,7 +535,13 @@ async def get_local_plugin_source(name: str, _admin=Depends(require_admin)):
                 content = f.read_text(encoding="utf-8")
                 files.append({"name": rel, "content": content})
             except UnicodeDecodeError:
-                continue  # 跳过二进制文件
+                # 二进制文件（如图标 png/jpg）以 base64 返回，编辑后重新打包时保留
+                import base64
+                files.append({
+                    "name": rel,
+                    "content": base64.b64encode(f.read_bytes()).decode("ascii"),
+                    "binary": True,
+                })
 
         plugin_file = plugin_dir / "plugin.py"
         manifest_file = plugin_dir / "manifest.json"
@@ -590,14 +596,20 @@ async def update_local_plugin_source(
             plugin_dir.mkdir(parents=True, exist_ok=True)
             for item in body.files:
                 fname = str(item.get("name") or "").strip().lstrip("/")
-                content = str(item.get("content") or "")
                 if not fname or ".." in Path(fname).parts:
                     return {"code": 1, "message": f"非法文件名: {fname}", "data": None}
                 target = (plugin_dir / fname).resolve()
                 if not str(target).startswith(str(plugin_dir.resolve())):
                     return {"code": 1, "message": f"非法文件名: {fname}", "data": None}
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
+                if item.get("binary"):
+                    import base64
+                    try:
+                        target.write_bytes(base64.b64decode(str(item.get("content") or "")))
+                    except Exception:
+                        continue
+                else:
+                    target.write_text(str(item.get("content") or ""), encoding="utf-8")
         elif body.plugin_code:
             plugin_file = plugin_dir / "plugin.py"
             plugin_file.write_text(body.plugin_code, encoding="utf-8")
@@ -689,14 +701,20 @@ async def create_local_plugin(
         if body.files:
             for item in body.files:
                 fname = str(item.get("name") or "").strip().lstrip("/")
-                content = str(item.get("content") or "")
                 if not fname or ".." in Path(fname).parts:
                     return {"code": 1, "message": f"非法文件名: {fname}", "data": None}
                 target = (plugin_dir / fname).resolve()
                 if not str(target).startswith(str(plugin_dir.resolve())):
                     return {"code": 1, "message": f"非法文件名: {fname}", "data": None}
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
+                if item.get("binary"):
+                    import base64
+                    try:
+                        target.write_bytes(base64.b64decode(str(item.get("content") or "")))
+                    except Exception:
+                        continue
+                else:
+                    target.write_text(str(item.get("content") or ""), encoding="utf-8")
         else:
             (plugin_dir / "plugin.py").write_text(body.plugin_code, encoding="utf-8")
 

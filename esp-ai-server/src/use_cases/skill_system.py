@@ -69,6 +69,7 @@ _skills_by_device: dict[str, list[SkillEntry]] = {}  # device_id → [skills]
 _global_skills: list[SkillEntry] = []
 _skills_dir: str = ""
 _data_dir: str = ""  # 设备自学习技能的数据目录
+_skill_retriever: Optional["SkillRetriever"] = None  # 技能检索器（init/reload 时重建）
 
 
 def init(skills_root_dir: str, data_dir: str = "") -> None:
@@ -94,6 +95,8 @@ def init(skills_root_dir: str, data_dir: str = "") -> None:
 
     total = len(_skills_by_id)
     logger.info(f"[SkillSystem] 已加载 {total} 个技能")
+
+    _rebuild_retriever()
 
 
 def reload() -> None:
@@ -204,11 +207,15 @@ def _parse_skill_md(path: str) -> tuple[Optional[SkillMetadata], str]:
     """解析 SKILL.md 文件"""
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
+    return _parse_skill_content(content)
 
+
+def _parse_skill_content(content: str) -> tuple[Optional[SkillMetadata], str]:
+    """解析 SKILL.md 内容字符串（用户上传/市场安装共用）"""
     fm_pattern = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
     m = fm_pattern.match(content)
     if not m:
-        logger.warning(f"[SkillSystem] {path} 缺少 frontmatter")
+        logger.warning("[SkillSystem] 内容缺少 frontmatter")
         return None, content
 
     raw_json = m.group(1).strip()
@@ -217,7 +224,7 @@ def _parse_skill_md(path: str) -> tuple[Optional[SkillMetadata], str]:
     try:
         data = json.loads(raw_json)
     except json.JSONDecodeError as e:
-        logger.error(f"[SkillSystem] {path} JSON 解析失败: {e}")
+        logger.error(f"[SkillSystem] 内容 JSON 解析失败: {e}")
         return None, body
 
     meta_data = data.get("metadata", {})
@@ -320,6 +327,111 @@ def get_device_skill_ids(device_id: str, skills: list[str] | None = None) -> lis
     return list(ids)
 
 
+# ── 技能检索器（按用户输入动态激活） ────────────────────────
+
+
+class SkillRetriever:
+    """技能检索器：按用户输入检索最相关的 Top-K 个技能。
+
+    复用 tools_system.ToolRetriever 的关键词 n-gram 匹配机制，
+    让提示词只注入当前相关的技能，避免随技能累积而膨胀。
+    """
+
+    def __init__(self, top_k: int = 5, min_result: int = 2):
+        from src.use_cases.tools_system import ToolRetriever
+        self._retriever = ToolRetriever(top_k=top_k, min_result=min_result)
+        self._index_valid = False
+
+    def update_index(self, catalog: list[SkillCatalogEntry]) -> None:
+        schemas = []
+        for entry in catalog:
+            doc = get_skill_document(entry.id) or ""
+            schemas.append({
+                "function": {
+                    "name": entry.id,
+                    "description": f"{entry.description}\n{doc}",
+                }
+            })
+        self._retriever.update_index(schemas)
+        self._index_valid = True
+
+    def retrieve(self, query: str, all_skill_ids: list[str]) -> list[str]:
+        if not self._index_valid or not query or not query.strip():
+            return all_skill_ids
+        result = self._retriever.retrieve(query, set(all_skill_ids))
+        return [sid for sid in all_skill_ids if sid in result]
+
+
+def _rebuild_retriever() -> None:
+    """重建技能检索索引（init/reload 时调用）"""
+    global _skill_retriever
+    try:
+        _skill_retriever = SkillRetriever(top_k=5)
+        _skill_retriever.update_index(get_catalog())
+    except Exception as e:
+        logger.warning(f"[SkillSystem] 技能检索索引重建失败: {e}")
+
+
+def retrieve_relevant_skills(
+    query: str,
+    device_id: str = "",
+    skills: list[str] | None = None,
+    disabled_skills: list[str] | None = None,
+    top_k: int = 5,
+) -> list[SkillCatalogEntry]:
+    """按用户输入检索最相关的技能（用于每轮动态注入提示词）。
+
+    query 为空时返回全部可见技能（安全降级）。
+    """
+    catalog = get_catalog(device_id, skills)
+    if disabled_skills:
+        catalog = [e for e in catalog if e.id not in disabled_skills]
+    if not catalog:
+        return []
+    visible_ids = [e.id for e in catalog]
+    result_ids = _skill_retriever.retrieve(query, visible_ids) if _skill_retriever else visible_ids
+    by_id = {e.id: e for e in catalog}
+    return [by_id[sid] for sid in result_ids if sid in by_id]
+
+
+def _render_core_personality(
+    device_id: str = "",
+    skills: list[str] | None = None,
+    disabled_skills: list[str] | None = None,
+    max_chars: int = 600,
+) -> str:
+    """合并 self_growth / user_profile 技能为一段紧凑的核心人格描述（始终在提示词）。
+
+    self_growth 技能内容高度重复（自学习反复追加相似段落），
+    每类只取第一个技能的开头核心指令，避免人格描述随技能数膨胀。
+    """
+    catalog = get_catalog(device_id, skills)
+    if disabled_skills:
+        catalog = [e for e in catalog if e.id not in disabled_skills]
+    core = [e for e in catalog if e.category and ("self_growth" in e.category or "user_profile" in e.category)]
+    if not core:
+        return ""
+
+    sections = []
+    seen_categories: set[str] = set()
+    for entry in core:
+        cat = entry.category[0] if entry.category else "general"
+        if cat in seen_categories:
+            continue
+        seen_categories.add(cat)
+        doc = get_skill_document(entry.id) or ""
+        text = doc.strip()
+        if text:
+            sections.append(text[:400].strip())
+
+    if not sections:
+        return ""
+    merged = "\n\n".join(sections)
+    if len(merged) > max_chars:
+        merged = merged[:max_chars].rstrip() + "\n…（完整人格设定可用 read_skill_document 查看）"
+    return "## 核心人格设定 (Core Personality)\n\n" + merged
+
+
 # ── 技能管理 API ──────────────────────────────────────────
 
 
@@ -389,6 +501,57 @@ def create_skill(
 
     logger.info(f"[SkillSystem] 已创建技能: {name}")
     return entry
+
+
+def import_skill_from_content(content: str) -> SkillEntry:
+    """从 SKILL.md 内容导入技能（用户上传 / 市场安装共用）。
+
+    技能 ID 取 frontmatter 的 name，校验合法性后写入技能目录并注册到内存。
+    """
+    if not content or not content.strip():
+        raise ValueError("SKILL.md 内容不能为空")
+
+    meta, _ = _parse_skill_content(content)
+    if not meta or not meta.name:
+        raise ValueError("SKILL.md 缺少有效的 frontmatter（name/description 必填）")
+
+    skill_id = meta.name
+    if not _NAME_RE.match(skill_id):
+        raise ValueError("技能名称只能包含小写字母、数字和下划线，且必须以字母开头")
+
+    if _skills_dir and os.path.isdir(os.path.join(_skills_dir, skill_id)):
+        raise ValueError(f"技能 '{skill_id}' 已存在")
+
+    skill_dir = os.path.join(_skills_dir, skill_id) if _skills_dir else ""
+    if not skill_dir:
+        raise ValueError("技能目录未初始化")
+    os.makedirs(skill_dir, exist_ok=True)
+
+    md_path = os.path.join(skill_dir, "SKILL.md")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    entry = _load_skill(skill_dir)
+    if not entry:
+        raise RuntimeError(f"导入成功但加载失败: {md_path}")
+
+    logger.info(f"[SkillSystem] 已导入技能: {skill_id}")
+    return entry
+
+
+def parse_skill_content(content: str) -> dict:
+    """解析 SKILL.md 内容，返回元信息 dict（供上传/发布校验用，不落盘）。"""
+    meta, _ = _parse_skill_content(content)
+    if not meta or not meta.name:
+        raise ValueError("SKILL.md 缺少有效的 frontmatter（name/description 必填）")
+    return {
+        "id": meta.name,
+        "name": meta.name,
+        "description": meta.description,
+        "author": meta.author,
+        "category": meta.category,
+        "tags": meta.tags,
+    }
 
 
 def update_skill(
@@ -464,10 +627,19 @@ def delete_skill(skill_id: str) -> bool:
 # ── 渲染目录（给 LLM 用） ──────────────────────────────────
 
 
-def render_skills_catalog(device_id: str = "", skills: list[str] | None = None, disabled_skills: list[str] | None = None) -> str:
+def render_skills_catalog(
+    device_id: str = "",
+    skills: list[str] | None = None,
+    disabled_skills: list[str] | None = None,
+    query: str = "",
+) -> str:
     """
-    渲染技能内容，直接注入到 LLM 系统提示词中。
-    对于短技能，直接内联完整文档；对于长技能（>500字），只列目录提示用工具查看。
+    渲染技能内容，注入到 LLM 系统提示词中。
+
+    三层结构控制提示词体积（自学习技能会持续累积）：
+    1. 核心人格层：self_growth/user_profile 技能合并为紧凑人格描述，始终内联；
+    2. 动态检索层：按 query 检索 Top-K 相关技能，只注入这些技能的文档；
+    3. 兜底说明：其余技能可通过 list_available_skills / read_skill_document 按需加载。
     """
     catalog = get_catalog(device_id, skills)
     if not catalog:
@@ -480,32 +652,33 @@ def render_skills_catalog(device_id: str = "", skills: list[str] | None = None, 
     lines = [
         "## 技能规则 (Skill Rules)",
         "",
-        "你拥有以下技能。当用户的输入匹配某个技能的触发条件时，",
-        "**必须严格按照该技能的执行步骤回复**，不要自行发挥或跳过。",
+        "匹配触发条件时，必须严格按照技能执行步骤回复，不要自行发挥。",
         "",
     ]
 
-    inline_count = 0
-    long_skills = []
-
-    for entry in catalog:
-        doc = get_skill_document(entry.id) or ""
-        # self_growth 类技能（AI人格/自我认知）始终内联，不受长度限制
-        is_self_growth = entry.category and "self_growth" in entry.category
-        if is_self_growth or len(doc) <= 500:
-            lines.append(f"### 技能: {entry.id}")
-            lines.append(f"触发条件: {entry.description}")
-            lines.append(f"执行规则:\n{doc}")
-            lines.append("")
-            inline_count += 1
-        else:
-            long_skills.append(entry)
-
-    if long_skills:
-        lines.append("### 长文档技能（需用工具查看）")
-        lines.append("以下技能内容较长，请在匹配时调用 `read_skill_document(\"skill_id\")` 查看详细说明：")
-        for entry in long_skills:
-            lines.append(f"- **{entry.id}**: {entry.description}")
+    # 第 1 层：核心人格（始终内联）
+    core = _render_core_personality(device_id, skills, disabled_skills)
+    if core:
+        lines.append(core)
         lines.append("")
+
+    # 第 2 层：按用户输入检索 Top-K 相关技能
+    relevant = retrieve_relevant_skills(query, device_id, skills, disabled_skills, top_k=5)
+    for entry in relevant:
+        # 核心人格已覆盖的技能不再重复内联
+        if entry.category and ("self_growth" in entry.category or "user_profile" in entry.category):
+            continue
+        doc = get_skill_document(entry.id) or ""
+        if len(doc) > 400:
+            doc = doc[:400].rstrip() + "\n…（完整内容可用 read_skill_document 查看）"
+        lines.append(f"### 技能: {entry.id}")
+        lines.append(f"触发条件: {entry.description}")
+        lines.append(f"执行规则:\n{doc}")
+        lines.append("")
+
+    # 第 3 层：兜底说明
+    lines.append("### 其他技能")
+    lines.append("可用 `list_available_skills` 查看全部，`read_skill_document(\"skill_id\")` 加载完整说明。")
+    lines.append("")
 
     return "\n".join(lines)

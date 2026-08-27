@@ -685,8 +685,9 @@ void eeui_port_set_bottom_text(const char *text)
             lv_obj_set_style_text_color(s_bottom_label, lv_color_make(25, 50, 83), 0);
             lv_obj_set_style_bg_color(s_bottom_label, lv_color_white(), 0);
             lv_obj_set_style_bg_opa(s_bottom_label, LV_OPA_50, 0);
-            lv_obj_set_style_pad_left(s_bottom_label, 5, 0);
-            lv_obj_set_style_pad_right(s_bottom_label, 5, 0);
+            // 内边距收窄：240px 屏 15 个字(≈236px) 需内容区≥237px，5+5 边距会换行
+            lv_obj_set_style_pad_left(s_bottom_label, 1, 0);
+            lv_obj_set_style_pad_right(s_bottom_label, 1, 0);
             lv_obj_move_foreground(s_bottom_label);
         }
         lv_label_set_text(s_bottom_label, text);

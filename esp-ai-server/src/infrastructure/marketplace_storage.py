@@ -61,6 +61,23 @@ async def save_package(zip_bytes: bytes, slug: str, version: str) -> str:
     return rel_path
 
 
+async def save_icon(icon_bytes: bytes, slug: str, icon_name: str) -> str:
+    """保存插件图标文件，返回文件名（如 icon.png）。
+
+    图标统一命名为 ``icon<ext>`` 存放在 ``<slug>/`` 目录下，与 zip 包同级。
+    """
+    import asyncio
+
+    plugin_dir = _slug_dir(slug)
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(icon_name).suffix.lower() or ".png"
+    file_name = f"icon{ext}"
+    file_path = plugin_dir / file_name
+    await asyncio.to_thread(file_path.write_bytes, icon_bytes)
+    logger.info(f"[Marketplace] 插件图标已保存: slug={slug} file={file_name} size={len(icon_bytes)}B")
+    return file_name
+
+
 async def get_package_path(slug: str, version: str) -> Path:
     """获取插件包绝对路径。
 
@@ -94,6 +111,7 @@ async def compute_checksum(file_path: Path) -> str:
 __all__ = [
     "MARKETPLACE_STORAGE_DIR",
     "save_package",
+    "save_icon",
     "get_package_path",
     "compute_checksum",
 ]

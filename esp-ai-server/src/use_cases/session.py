@@ -107,7 +107,6 @@ class Session:
 
         self.cancel_event = asyncio.Event()
         self._current_pipeline = None
-        self._precomputed_skill_catalog: Optional[str] = None  # 预渲染的 skill catalog，避免首轮 Pipeline 阻塞
 
         # 通过构造函数注入会话记忆仓储（由接口层负责提供具体实现）
         repository = memory_repository
@@ -857,7 +856,6 @@ class Session:
             device_id=self.device_id,
             ltm_service=self.ltm_service,
             config=pipeline_config,
-            precomputed_skill_catalog=self._precomputed_skill_catalog,
         )
         self._current_pipeline = pipeline
         try:

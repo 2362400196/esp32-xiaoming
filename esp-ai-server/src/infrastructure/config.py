@@ -114,6 +114,7 @@ class TTSConfig(BaseModel):
     volume_ratio: float = Field(default=1.0)
     pitch_ratio: float = Field(default=1.0)
     explicit_dialect: str = Field(default="", description="TTS 方言，可选：beijing/dongbei/henan/shaanxi/shanghai/sichuan/tianjin/yue")
+    enable_subtitle: bool = Field(default=True, description="启用火山引擎字幕服务，返回字级时间戳用于字幕精确同步")
 
     max_concurrency: int = Field(default=10)
 

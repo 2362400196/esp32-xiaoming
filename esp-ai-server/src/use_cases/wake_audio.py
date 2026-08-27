@@ -175,7 +175,7 @@ class WakeAudioManager:
             chunks = []
 
             async def _collect_chunks():
-                async for chunk in session.synthesize(wake_text):
+                async for chunk in session.synthesize_audio(wake_text):
                     if chunk:
                         chunks.append(chunk)
 

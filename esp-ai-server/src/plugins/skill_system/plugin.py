@@ -19,7 +19,7 @@ async def list_available_skills(device_key: str = "", tool_manager=None) -> str:
     lines = []
     for entry in catalog:
         tags = f"[{', '.join(entry.tags)}]" if entry.tags else ""
-        lines.append(f"· {entry.name}：{entry.description} {tags}")
+        lines.append(f"· {entry.id}：{entry.description} {tags}")
     return "可用技能列表：\n" + "\n".join(lines)
 
 

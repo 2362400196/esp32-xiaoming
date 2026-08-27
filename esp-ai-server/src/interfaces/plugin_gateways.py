@@ -27,6 +27,7 @@ from src.interfaces.service_plugin_adapter import (
     has_tts_plugin,
     has_asr_plugin,
 )
+from src.interfaces.tts_gateways import TTSSynthEvent
 
 logger = get_logger(__name__)
 
@@ -127,7 +128,7 @@ class PluginTTSSession:
     """TTS 插件会话
 
     实现与 VolcEngineTTS session 兼容的接口：
-      - synthesize(text, cancel_event) -> AsyncIterator[bytes]
+      - synthesize(text, cancel_event) -> AsyncIterator[TTSSynthEvent]
       - close()
     """
 
@@ -135,16 +136,16 @@ class PluginTTSSession:
         self._config = config or {}
         self._tool_manager = tool_manager
 
-    async def synthesize(self, text: str, cancel_event=None, **kwargs) -> AsyncIterator[bytes]:
-        """流式合成语音 - 委托给 TTS 服务插件"""
+    async def synthesize(self, text: str, cancel_event=None, **kwargs) -> AsyncIterator[TTSSynthEvent]:
+        """流式合成 - 委托给 TTS 服务插件，逐事件产出（audio/subtitle）"""
         try:
-            async for audio_chunk in call_tts_synthesize(
+            async for event in call_tts_synthesize(
                 text, self._config, self._tool_manager,
             ):
                 if cancel_event and cancel_event.is_set():
                     break
-                if audio_chunk:
-                    yield audio_chunk
+                if event:
+                    yield event
         except Exception as e:
             logger.error(f"[PluginTTS] synthesize 异常: {e}")
 

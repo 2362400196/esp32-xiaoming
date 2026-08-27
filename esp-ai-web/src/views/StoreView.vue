@@ -18,11 +18,20 @@
             <option value="rating">最高评分</option>
             <option value="newest">最新发布</option>
           </select>
-          <select class="cat-select" v-model="category" @change="loadMarket">
-            <option value="">全部分类</option>
-            <option v-for="c in categories" :key="c.name" :value="c.name">{{ c.name }}（{{ c.count }}）</option>
-          </select>
         </div>
+      </div>
+
+      <!-- 分类标签 -->
+      <div class="cat-tabs glass card-in">
+        <button class="cat-tab" :class="{ active: category === '' }" @click="setCategory('')">
+          全部
+          <span class="cat-count">{{ allCount }}</span>
+        </button>
+        <button v-for="c in categories" :key="c.name" class="cat-tab"
+          :class="{ active: category === c.name }" @click="setCategory(c.name)">
+          {{ c.name }}
+          <span class="cat-count">{{ c.count }}</span>
+        </button>
       </div>
 
       <!-- 加载状态 -->
@@ -50,7 +59,8 @@
           @click="openDetail(p)">
           <div class="market-card-header">
             <div class="market-icon">
-              <span>{{ (p.name || p.slug).charAt(0).toUpperCase() }}</span>
+              <img v-if="p.icon" class="market-icon-img" :src="iconUrl(p)" alt="" @error="onIconError(p)" />
+              <span v-else>{{ (p.name || p.slug).charAt(0).toUpperCase() }}</span>
             </div>
             <div class="market-info">
               <div class="market-title-row">
@@ -140,7 +150,8 @@
           
           <div class="detail-header">
             <div class="detail-icon">
-              <span>{{ (detailPlugin.name || detailPlugin.slug).charAt(0).toUpperCase() }}</span>
+              <img v-if="detailPlugin.icon" class="detail-icon-img" :src="iconUrl(detailPlugin)" alt="" @error="onIconError(detailPlugin)" />
+              <span v-else>{{ (detailPlugin.name || detailPlugin.slug).charAt(0).toUpperCase() }}</span>
             </div>
             <div class="detail-title-area">
               <h3 class="detail-name">{{ detailPlugin.name }}</h3>
@@ -341,23 +352,38 @@ async function doUninstall(p) {
   p.installing = false
 }
 
+/** 可选插件是否属于当前分类（provides 能力匹配） */
+function matchCategory(p, cat) {
+  if (!cat) return true
+  const provides = p.provides || {}
+  const keys = ['asr', 'llm', 'tts'].filter(k => k in provides)
+  if (cat === 'ASR') return keys.includes('asr')
+  if (cat === 'LLM') return keys.includes('llm')
+  if (cat === 'TTS') return keys.includes('tts')
+  if (cat === '其他工具') return keys.length === 0
+  return true
+}
+
 async function loadOptionalPlugins() {
   const res = await api.optionalPlugins()
   if (res.status === 200 && res.data?.code === 0) {
-    const list = (res.data.data || []).map(p => ({
-      slug: p.name,
-      name: p.title || p.name,
-      description: p.description || '',
-      latest_version: p.version || '1.0.0',
-      developer_name: '',
-      total_downloads: 0,
-      avg_rating: 0,
-      review_count: 0,
-      is_optional: true,
-      installed: p.installed || false,
-      system: p.system || false,
-      installing: false,
-    }))
+    const list = (res.data.data || [])
+      .filter(p => matchCategory(p, category.value))
+      .map(p => ({
+        slug: p.name,
+        name: p.title || p.name,
+        description: p.description || '',
+        latest_version: p.version || '1.0.0',
+        developer_name: '',
+        total_downloads: 0,
+        avg_rating: 0,
+        review_count: 0,
+        is_optional: true,
+        installed: p.installed || false,
+        system: p.system || false,
+        provides: p.provides || {},
+        installing: false,
+      }))
     // 标记已安装的可选插件
     const installed = new Set()
     for (const p of list) {
@@ -374,6 +400,15 @@ async function loadCategories() {
   if (res.status === 200 && res.data?.code === 0) {
     categories.value = res.data.data || []
   }
+}
+
+const allCount = computed(() => categories.value.reduce((s, c) => s + (c.count || 0), 0))
+
+function setCategory(cat) {
+  if (category.value === cat) return
+  category.value = cat
+  page.value = 1
+  loadMarket()
 }
 
 async function loadMarket() {
@@ -447,6 +482,15 @@ async function submitReview() {
 }
 
 // ===== Utils =====
+function iconUrl(p) {
+  return `/api/v1/marketplace/plugins/${encodeURIComponent(p.slug)}/icon`
+}
+
+/** 图标加载失败时回退为文字首字母 */
+function onIconError(p) {
+  p.icon = ''
+}
+
 function formatDownloads(n) {
   if (!n) return '0'
   if (n < 1000) return String(n)
@@ -502,7 +546,7 @@ onMounted(() => {
 }
 .search-input::placeholder { color: var(--text-dim); }
 .filter-group { display: flex; gap: 8px; }
-.sort-select, .cat-select {
+.sort-select {
   padding: 8px 12px; border-radius: var(--radius-sm); font-size: 13px;
   border: 1px solid var(--glass-border);
   background: var(--glass-bg-strong);
@@ -510,7 +554,33 @@ onMounted(() => {
   color: var(--text-main);
   cursor: pointer; transition: all 0.2s var(--ease);
 }
-.sort-select:hover, .cat-select:hover { border-color: var(--mint-border); }
+.sort-select:hover { border-color: var(--mint-border); }
+
+/* ===== 分类标签 ===== */
+.cat-tabs {
+  display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px;
+}
+.cat-tab {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 14px; border-radius: var(--radius-sm);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg-soft);
+  color: var(--text-sub); font-size: 13px;
+  cursor: pointer; transition: all 0.2s var(--ease);
+}
+.cat-tab:hover { border-color: var(--mint-border); color: var(--mint-deep); transform: translateY(-1px); }
+.cat-tab.active {
+  background: var(--mint-soft);
+  border-color: var(--mint-border);
+  color: var(--mint-deep); font-weight: 600;
+  animation: cat-breathe 2s ease-in-out infinite;
+}
+.cat-count { font-size: 11px; opacity: 0.65; }
+.cat-tab.active .cat-count { opacity: 0.85; }
+@keyframes cat-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 var(--mint-softer); }
+  50% { box-shadow: 0 0 0 4px var(--mint-softer); }
+}
 
 /* ===== 加载和空状态 ===== */
 .loading-state, .empty-state {
@@ -552,8 +622,11 @@ onMounted(() => {
   font-size: 20px; font-weight: 700; color: var(--mint);
   background: var(--mint-soft);
   border: 1px solid var(--mint-border);
-  flex-shrink: 0;
+  flex-shrink: 0; overflow: hidden;
   transition: all 0.3s var(--ease);
+}
+.market-icon-img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
 }
 .market-card:hover .market-icon { 
   background: var(--grad-mint); color: #fff; border-color: transparent; 
@@ -641,7 +714,10 @@ onMounted(() => {
   width: 64px; height: 64px; border-radius: var(--radius-md);
   display: flex; align-items: center; justify-content: center;
   font-size: 28px; font-weight: 700; color: var(--mint);
-  background: var(--mint-soft); border: 1px solid var(--mint-border); flex-shrink: 0;
+  background: var(--mint-soft); border: 1px solid var(--mint-border); flex-shrink: 0; overflow: hidden;
+}
+.detail-icon-img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
 }
 .detail-title-area { flex: 1; }
 .detail-name { font-size: 22px; font-weight: 700; margin: 0; }
@@ -745,7 +821,7 @@ onMounted(() => {
 @media (max-width: 640px) {
 	  .market-toolbar { flex-direction: column; }
 	  .filter-group { width: 100%; }
-	  .sort-select, .cat-select { flex: 1; }
+	  .sort-select { flex: 1; }
 	  .market-grid { grid-template-columns: 1fr; }
 	  .confirm-panel { width: min(320px, 92vw); }
 	  .detail-panel { width: min(480px, 96vw); padding: 20px; }

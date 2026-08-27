@@ -141,7 +141,7 @@
         <!-- 工作区：文件标签 + 大编辑器 + 操作栏 -->
         <div class="editor-workbench glass">
           <div class="file-tabs">
-            <button class="file-tab" v-for="f in codeEditor.files" :key="f.name"
+            <button class="file-tab" v-for="f in editableFiles" :key="f.name"
               :class="{ active: codeEditor.activeFile === f.name }"
               @click="codeEditor.activeFile = f.name">
               <span class="ft-icon" :class="fileIcon(f.name).cls">
@@ -154,6 +154,12 @@
             <button class="file-tab add" title="新建文件" @click="openNewFileDialog">
               <span class="ft-add">+</span>
             </button>
+            <div class="icon-upload" :title="iconPreview ? '点击更换图标' : '上传插件图标（支持 png/jpg，未上传则商店显示首字母）'">
+              <input ref="iconInput" type="file" accept="image/png,image/jpeg,image/jpg" class="icon-input" @change="onIconSelect" />
+              <img v-if="iconPreview" :src="iconPreview" class="icon-upload-preview" @click="$refs.iconInput.click()" @error="iconPreview = ''" />
+              <button v-else class="icon-upload-btn" @click="$refs.iconInput.click()">上传图标</button>
+              <span v-if="iconPreview" class="icon-remove" title="移除图标" @click="removeIcon">×</span>
+            </div>
           </div>
 
           <div class="editor-body">
@@ -315,6 +321,11 @@
                 </div>
               </div>
               <div class="plugin-row-actions">
+                <button v-if="p.source !== 'built-in' && !p.system && !isPublished(p.name)" class="row-btn publish"
+                  :disabled="publishing === p.name" title="发布到应用商店"
+                  @click="publishLocalPlugin(p)">
+                  {{ publishing === p.name ? '发布中…' : '发布' }}
+                </button>
                 <button v-if="p.source !== 'built-in'" class="row-btn" @click="openLocalEditEditor(p)">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                     <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
@@ -721,8 +732,9 @@ async function doUpload(mode) {
 // ===== 本地已安装（上传后检查） =====
 const localInstalled = ref([])
 const uninstalling = ref('')
+const publishing = ref('')
 
-const customLocalPlugins = computed(() => localInstalled.value.filter(p => p.source !== 'built-in'))
+const customLocalPlugins = computed(() => localInstalled.value.filter(p => p.source !== 'built-in' && !p.system))
 
 async function loadLocalInstalled() {
   const res = await api.installedPlugins()
@@ -753,6 +765,88 @@ async function uninstallLocal(p) {
     emit('toast', '卸载异常')
   }
   uninstalling.value = ''
+}
+
+// 语义化版本比较：a > b 返回 true
+function versionGt(a, b) {
+  const pa = String(a || '0').split('.').map(Number)
+  const pb = String(b || '0').split('.').map(Number)
+  for (let i = 0; i < 3; i++) {
+    const x = pa[i] || 0, y = pb[i] || 0
+    if (x !== y) return x > y
+  }
+  return false
+}
+
+// 本地插件是否已在应用商店发布（已发布则隐藏发布按钮）
+function isPublished(name) {
+  const slug = String(name || '').trim().toLowerCase()
+  return myPlugins.value.some(m => String(m.slug || '').trim().toLowerCase() === slug)
+}
+
+// 发布本地插件到应用商店：发布后本地插件保留，可继续编辑再发布
+async function publishLocalPlugin(p) {
+  const ok = await showConfirm({
+    title: '发布到应用商店',
+    message: `确定将「${p.title || p.name}」发布到应用商店吗？发布后本地插件将保留，可在本地继续使用和编辑。`,
+    confirmText: '发布',
+    cancelText: '取消',
+    danger: false,
+  })
+  if (!ok) return
+  publishing.value = p.name
+  try {
+    const srcRes = await api.getLocalPluginSource(p.name)
+    if (srcRes.status !== 200 || srcRes.data?.code !== 0) {
+      emit('toast', srcRes.data?.message || '获取本地源码失败')
+      publishing.value = ''
+      return
+    }
+    const d = srcRes.data.data || {}
+    const manifest = d.manifest || {}
+    const slug = String(manifest.id || p.name || '').trim().toLowerCase()
+    if (!slug) { emit('toast', 'manifest.json 缺少 id 字段，无法发布'); publishing.value = ''; return }
+    const files = d.files || []
+    const pluginCode = d.plugin_code || ''
+    const name = manifest.name || p.title || p.name
+    const version = manifest.version || p.version || '1.0.0'
+    const description = manifest.description || ''
+    const category = manifest.category || 'general'
+    const tags = Array.isArray(manifest.tags) ? manifest.tags : []
+    const changelog = manifest.changelog || ''
+
+    // 已存在则更新新版本（自动 bump 版本号），否则创建
+    const existsRes = await api.marketplaceDetail(slug)
+    const exists = existsRes.status === 200 && existsRes.data?.code === 0
+    let res
+    if (exists) {
+      const latest = existsRes.data.data?.latest_version || '0.0.0'
+      const newVersion = versionGt(version, latest) ? version : bumpVersion(latest)
+      const updManifest = { ...manifest, id: slug, name, version: newVersion, description, category, tags }
+      res = await api.devUpdatePluginSource(slug, {
+        plugin_code: pluginCode,
+        files,
+        manifest: updManifest,
+        changelog: changelog || '重新发布',
+      })
+    } else {
+      res = await api.devCreatePlugin({
+        slug, name, description, version, category, tags,
+        plugin_code: pluginCode, files, changelog,
+      })
+    }
+    if (res.status !== 200 || res.data?.code !== 0) {
+      emit('toast', res.data?.message || '发布失败')
+      publishing.value = ''
+      return
+    }
+
+    emit('toast', `「${name}」已发布到应用商店，本地插件已保留`)
+    await Promise.all([loadLocalInstalled(), loadMyPlugins()])
+  } catch (e) {
+    emit('toast', '发布异常：' + (e.message || ''))
+  }
+  publishing.value = ''
 }
 
 // ===== 运行日志 =====
@@ -994,6 +1088,9 @@ const codeEditor = ref({
 
 const editorFullscreen = ref(false)
 
+// 插件图标：dataURL 预览（未上传为空，商店显示首字母）
+const iconPreview = ref('')
+
 function toggleFullscreen() {
   editorFullscreen.value = !editorFullscreen.value
 }
@@ -1056,6 +1153,62 @@ function isCoreFile(name) {
   return name === 'plugin.py' || name === 'manifest.json'
 }
 
+// 可编辑文件（过滤二进制图标，避免作为文本打开）
+const editableFiles = computed(() =>
+  codeEditor.value.files.filter(f => !f.binary)
+)
+
+function updateManifestIcon(iconName) {
+  const mf = getFile('manifest.json')
+  if (!mf) return
+  try {
+    const obj = JSON.parse(mf.content)
+    if (iconName) obj.icon = iconName
+    else delete obj.icon
+    mf.content = JSON.stringify(obj, null, 2)
+  } catch { /* manifest 格式有误时不覆盖，让用户自行修复 */ }
+}
+
+function onIconSelect(e) {
+  const file = e.target.files && e.target.files[0]
+  e.target.value = ''
+  if (!file) return
+  if (!/^image\/(png|jpe?g)$/i.test(file.type)) { emit('toast', '图标仅支持 png/jpg 格式'); return }
+  if (file.size > 2 * 1024 * 1024) { emit('toast', '图标大小不能超过 2MB'); return }
+  const reader = new FileReader()
+  reader.onload = () => {
+    const dataUrl = reader.result
+    const base64 = String(dataUrl).split(',')[1] || ''
+    const ext = (file.name.split('.').pop() || 'png').toLowerCase().replace(/[^a-z0-9]/g, '')
+    const iconName = `icon.${ext || 'png'}`
+    // 替换旧的图标文件
+    codeEditor.value.files = codeEditor.value.files.filter(f => !f.binary)
+    codeEditor.value.files.push({ name: iconName, content: base64, binary: true })
+    iconPreview.value = dataUrl
+    updateManifestIcon(iconName)
+    emit('toast', '图标已添加')
+  }
+  reader.readAsDataURL(file)
+}
+
+function removeIcon() {
+  codeEditor.value.files = codeEditor.value.files.filter(f => !f.binary)
+  iconPreview.value = ''
+  updateManifestIcon('')
+}
+
+// 从 files 中的二进制图标生成预览（打开已有图标的插件时显示）
+function syncIconPreviewFromFiles() {
+  const bin = codeEditor.value.files.find(f => f.binary)
+  if (bin) {
+    const ext = (bin.name.split('.').pop() || 'png').toLowerCase()
+    const mime = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`
+    iconPreview.value = `data:${mime};base64,${bin.content}`
+  } else {
+    iconPreview.value = ''
+  }
+}
+
 const newFileName = ref('')
 const newFileDialog = ref(false)
 
@@ -1097,6 +1250,7 @@ function removeFile(name) {
 }
 
 function openCreateEditor() {
+  iconPreview.value = ''
   codeEditor.value = {
     show: true,
     mode: 'create',
@@ -1120,6 +1274,7 @@ function openCreateEditor() {
 }
 
 async function openEditEditor(p) {
+  iconPreview.value = ''
   codeEditor.value = {
     show: true,
     mode: 'edit',
@@ -1144,6 +1299,7 @@ async function openEditEditor(p) {
       { name: 'manifest.json', content: d.manifest_raw || '{}' },
     ])
     codeEditor.value.name = d.name || p.name
+    syncIconPreviewFromFiles()
   } else {
     emit('toast', res.data?.message || '获取源码失败')
     codeEditor.value.show = false
@@ -1151,6 +1307,7 @@ async function openEditEditor(p) {
 }
 
 async function openLocalEditEditor(p) {
+  iconPreview.value = ''
   codeEditor.value = {
     show: true,
     mode: 'local-edit',
@@ -1174,6 +1331,7 @@ async function openLocalEditEditor(p) {
         { name: 'plugin.py', content: d.plugin_code || d.code || '' },
         { name: 'manifest.json', content: d.manifest_raw || d.manifest || '{}' },
       ])
+      syncIconPreviewFromFiles()
     } else {
       emit('toast', res.data?.message || '获取源码失败')
       codeEditor.value.show = false
@@ -1574,6 +1732,23 @@ onBeforeUnmount(() => {
 .row-btn.danger { border-color: var(--danger-soft); background: var(--danger-soft); color: var(--danger); }
 .row-btn.danger:hover:not(:disabled) { background: rgba(239,68,68,0.18); border-color: var(--danger); }
 .row-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.row-btn.publish {
+  width: auto;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--grad-mint);
+  border-color: transparent;
+  box-shadow: var(--shadow-mint);
+}
+.row-btn.publish:hover:not(:disabled) {
+  color: #fff;
+  background: var(--mint-deep);
+  border-color: transparent;
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-mint);
+}
 
 /* ===== 上传区域 ===== */
 .upload-zone {
@@ -1797,6 +1972,29 @@ onBeforeUnmount(() => {
 .file-tab.active .ft-icon.toml { background: #7c3aed; color: #fff; }
 .file-tab.active .ft-icon.txt { background: #6b7280; color: #fff; }
 .file-tab.active .ft-icon.unknown { background: #6b7280; color: #fff; }
+
+/* ===== 插件图标上传 ===== */
+.icon-upload { display: flex; align-items: center; gap: 6px; margin-left: 6px; flex-shrink: 0; }
+.icon-input { display: none; }
+.icon-upload-btn {
+  display: flex; align-items: center; padding: 6px 12px; font-size: 12px; font-weight: 500;
+  color: var(--mint); background: transparent; border: 1px dashed var(--mint-border);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0; cursor: pointer;
+  transition: all 0.2s var(--ease); white-space: nowrap;
+}
+.icon-upload-btn:hover { background: var(--mint-softer); }
+.icon-upload-preview {
+  width: 30px; height: 30px; border-radius: var(--radius-sm);
+  object-fit: cover; cursor: pointer; border: 1px solid var(--mint-border);
+  box-shadow: 0 2px 8px rgba(16,185,129,0.18); transition: all 0.2s var(--ease);
+}
+.icon-upload-preview:hover { transform: scale(1.08); }
+.icon-remove {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 50%; font-size: 12px; line-height: 1;
+  color: var(--text-dim); cursor: pointer; transition: all 0.15s var(--ease);
+}
+.icon-remove:hover { background: var(--danger-soft); color: var(--danger); }
 .editor-body { flex: 1; min-height: 0; border: 1px solid var(--glass-border); border-radius: 0 var(--radius-md) var(--radius-md) var(--radius-md); overflow: hidden; }
 .editor-loading { display: flex; flex-direction: column; align-items: center; gap: 12px; height: 100%; color: var(--text-sub); justify-content: center; }
 .spinner { width: 28px; height: 28px; border: 3px solid rgba(16,185,129,0.15); border-top-color: var(--mint); border-radius: 50%; animation: spin 0.8s linear infinite; }

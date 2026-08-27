@@ -33,6 +33,60 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+# MP3 帧头解析：按比特率表计算每帧时长，累加得到总时长（支持 CBR/VBR）
+# 注意：MPEG2/2.5 Layer III 的比特率仅为 MPEG1 的一半（8~160kbps）
+_MP3_BITRATE = {
+    (3, 1): [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0],  # MPEG1 L3
+    (2, 1): [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0],      # MPEG2 L3
+    (0, 1): [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0],      # MPEG2.5 L3
+}
+_MP3_SAMPLE_RATE = {
+    3: [44100, 48000, 32000, 0],  # MPEG1
+    2: [22050, 24000, 16000, 0],  # MPEG2
+    0: [11025, 12000, 8000, 0],   # MPEG2.5
+}
+
+
+def mp3_duration_ms(data: bytes) -> int:
+    """解析 MP3 帧头计算总时长（ms）。仅处理 Layer III（TTS 输出格式）。"""
+    if not data:
+        return 0
+    total_ms = 0
+    pos = 0
+    n = len(data)
+    while pos + 4 <= n:
+        if data[pos] != 0xFF or (data[pos + 1] & 0xE0) != 0xE0:
+            pos += 1
+            continue
+        b1 = data[pos + 1]
+        b2 = data[pos + 2]
+        version = (b1 >> 3) & 0x03  # 3=MPEG1, 2=MPEG2, 0=MPEG2.5
+        layer = (b1 >> 1) & 0x03    # 1=Layer III
+        if version == 1 or layer != 1:
+            pos += 1
+            continue
+        bitrate_idx = (b2 >> 4) & 0x0F
+        sample_idx = (b2 >> 2) & 0x03
+        padding = (b2 >> 1) & 0x01
+        bitrate_kbps = _MP3_BITRATE.get((version, layer), [0] * 16)[bitrate_idx]
+        sample_rate = _MP3_SAMPLE_RATE.get(version, [0] * 4)[sample_idx]
+        if bitrate_kbps == 0 or sample_rate == 0:
+            pos += 1
+            continue
+        if version == 3:
+            frame_len = 144 * bitrate_kbps * 1000 // sample_rate + padding
+            samples = 1152
+        else:
+            frame_len = 72 * bitrate_kbps * 1000 // sample_rate + padding
+            samples = 576
+        if frame_len <= 0:
+            pos += 1
+            continue
+        total_ms += samples * 1000 // sample_rate
+        pos += frame_len
+    return total_ms
+
+
 class SentenceSplitter:
     """句子分割器：将流式token组装成完整句子"""
 
@@ -144,7 +198,6 @@ class ConversationPipeline:
         cancel_event: Optional[asyncio.Event] = None,
         device_id: str = "",
         ltm_service: Optional["LongTermMemoryServiceImpl"] = None,
-        precomputed_skill_catalog: Optional[str] = None,
         max_sentences: int = 100,
     ) -> None:
         self.llm_processor = llm_processor
@@ -177,12 +230,10 @@ class ConversationPipeline:
         # 后台任务引用（防止被 GC 回收导致协程中途取消且无告警）
         self._bg_tasks: set = set()
         self._total_duration_ms = 0.0  # 累计TTS音频总时长
+        self._cumulative_duration_ms = 0.0  # 已合成句子累计实际时长，用于字级时间戳换算绝对流位置
         self._perf: dict = {}  # 性能分析计时数据（LLM/TTS 各环节耗时）
 
-        # system prompt 缓存：skill 目录和回复要求基本不变，避免每次 run() 都重新拼接
-        # 优先使用外部预计算的 catalog（从 Session 传入，避免首轮 2.3s 阻塞）
-        self._cached_skill_catalog: Optional[str] = precomputed_skill_catalog
-        self._skill_cache_key: str = "__precomputed__" if precomputed_skill_catalog is not None else ""
+        # system prompt 缓存：回复要求基本不变，避免每次 run() 都重新拼接
         self._cached_reply_style: str = ""
         # 性能优化：缓存 LTM summary catalog，避免每次 run() 都查 DB
         self._cached_ltm_catalog: Optional[str] = None
@@ -283,23 +334,17 @@ class ConversationPipeline:
         except Exception:
             pass
 
-        # 注入 Skill 目录（带缓存）
+        # 注入 Skill 目录（按用户输入动态检索，控制提示词体积）
         try:
             from src.use_cases import skill_system
             _skills = getattr(self.user_config, 'skills', None) if self.user_config else None
             _disabled = getattr(self.user_config, 'disabled_skills', None) if self.user_config else None
-            # 缓存 skill_catalog，仅在实际需要时刷新
-            _skill_key = f"{self.device_id}:{_skills}:{_disabled}"
-            if self._cached_skill_catalog is None or getattr(self, '_skill_cache_key', '') != _skill_key:
-                skill_catalog = skill_system.render_skills_catalog(
-                    device_id=self.device_id,
-                    skills=_skills,
-                    disabled_skills=_disabled,
-                )
-                self._cached_skill_catalog = skill_catalog
-                self._skill_cache_key = _skill_key
-            else:
-                skill_catalog = self._cached_skill_catalog
+            skill_catalog = skill_system.render_skills_catalog(
+                device_id=self.device_id,
+                skills=_skills,
+                disabled_skills=_disabled,
+                query=iat_text,
+            )
             if skill_catalog:
                 sp = sp + "\n\n" + skill_catalog if sp else skill_catalog
         except Exception as e:
@@ -321,11 +366,7 @@ class ConversationPipeline:
                 if _catalog:
                     _ltm_block = (
                         "\n\n[Long-term Memory Summary Labels]\n"
-                        "以下是该用户的长期记忆标签列表。当用户提到与某个标签相关的话题时，\n"
-                        "你应该**主动调用 memory_recall 工具**来回忆相关记忆，并在对话中自然地提及。\n"
-                        "例如：用户说'我家猫' → 你应主动回忆与'宠物'或'猫'相关的记忆，\n"
-                        "然后说'我记得你之前说你家小猫叫XX，它最近怎么样？'\n"
-                        "不要等用户明确要求才回忆，主动联系已知信息会让对话更自然。\n"
+                        "用户提到相关话题时，主动调用 memory_recall 回忆（标签见下）：\n"
                         f"{_catalog}\n"
                         "[/Long-term Memory]"
                         f"{_device_info}"
@@ -406,6 +447,9 @@ class ConversationPipeline:
                 {"role": "user", "content": iat_text},
             ]
 
+        # 调试：打印完整系统提示词到终端，便于人工检查提示词体积与内容
+        logger.info(f"[Prompt] ===== 系统提示词开始 ({len(sp)} 字符) =====\n{sp}\n===== 系统提示词结束 =====")
+
         await self.fsm.set(SessionState.TTS)
         # play_audio 和 tts_chunk_start 延迟到第一帧音频数据到达时再发送
         # 避免 LLM+TTS 耗时超过客户端看门狗超时（10秒）
@@ -432,6 +476,7 @@ class ConversationPipeline:
         total_audio_chunks = 0
         stop_pipeline = False
         self._total_duration_ms = 0.0  # 重置累计TTS音频总时长
+        self._cumulative_duration_ms = 0.0  # 重置累计实际时长（字级时间戳绝对流位置基准）
 
         try:
             t_tts = asyncio.create_task(self._tts_task(volc_tts, tts_session))
@@ -829,22 +874,62 @@ class ConversationPipeline:
                 tts_duration_ms = 0
                 if original_text:
                     cn_chars = sum(1 for c in original_text if '\u4e00' <= c <= '\u9fff')
-                    en_chars = len(original_text) - cn_chars
+                    # 标点单独计费，避免被当作英文(90ms/字)重复累加导致估算偏长、字幕滞后
+                    punct_chars = sum(1 for c in original_text if c in "，。！？,.!?；;：:、…")
+                    en_chars = len(original_text) - cn_chars - punct_chars
                     tts_duration_ms = int(cn_chars * 230 + en_chars * 90)
+                    # 标点停顿补偿：TTS 在逗号/句号等处有自然语气停顿，纯字符估算偏短
+                    tts_duration_ms += original_text.count("，") * 250
+                    tts_duration_ms += original_text.count("。") * 400
+                    tts_duration_ms += original_text.count("！") * 400
+                    tts_duration_ms += original_text.count("？") * 400
+                    tts_duration_ms += original_text.count(",") * 250
+                    tts_duration_ms += original_text.count(".") * 300
+                    tts_duration_ms += original_text.count("!") * 300
+                    tts_duration_ms += original_text.count("?") * 300
                     if tts_duration_ms < 500:
                         tts_duration_ms = 500
                     logger.info(f"[Pipeline] TTS #{seq_id} {len(original_text)}字(中{cn_chars}英{en_chars}), 估 {tts_duration_ms}ms")
-                    # 合成前直接发送字幕和时长，不等音频帧，避免被音频队列阻塞
-                    payload = json.dumps({"text": original_text, "duration_ms": tts_duration_ms}, ensure_ascii=False)
+                    # 合成前直接发送字幕和估算时长，不等音频帧，避免被音频队列阻塞。
+                    # 字幕先到、音频后播；合成完成后会下发该句真实时长（tts_duration）修正。
+                    payload = json.dumps({"text": original_text, "duration_ms": tts_duration_ms, "seq": seq_id}, ensure_ascii=False)
                     await self.channel.send_json({"type": "instruct", "command_id": "on_llm_cb", "data": payload})
-                    await self.channel.send_json({"type": "instruct", "command_id": "tts_duration", "data": str(tts_duration_ms)})
                 total_audio_bytes = 0
+                audio_data = bytearray()
+                subtitle_end_ms = 0  # 本句字幕末字 end_ms（句内累计），用于时长兜底
                 try:
-                    async for audio_chunk in session.synthesize(sentence_text, cancel_event=self.cancel_event):
+                    async for event in session.synthesize(sentence_text, cancel_event=self.cancel_event):
                         if self.cancel_event.is_set():
                             break
+                        if isinstance(event, bytes):
+                            # 插件 TTS 网关：直接产出音频字节，无字幕事件
+                            audio_chunk = event
+                        elif event.kind == "subtitle":
+                            # 字级时间戳：换算为绝对流位置（相对整轮播放起点）后下发，
+                            # 设备端按实际播放位置直接比对，不受语气快慢/情感停顿影响
+                            words = event.data.get("words", [])
+                            if words:
+                                for w in words:
+                                    if w.get("end_ms", 0) > subtitle_end_ms:
+                                        subtitle_end_ms = w["end_ms"]
+                                base = int(self._cumulative_duration_ms)
+                                abs_words = [{
+                                    "word": w["word"],
+                                    "start_ms": w["start_ms"] + base,
+                                    "end_ms": w["end_ms"] + base,
+                                } for w in words]
+                                await self.channel.send_json({
+                                    "type": "instruct",
+                                    "command_id": "tts_subtitle",
+                                    "data": json.dumps({"seq": seq_id, "words": abs_words}, ensure_ascii=False),
+                                })
+                                logger.info(f"[Pipeline] TTS #{seq_id} 字幕 {len(abs_words)} 字, 流基准 {base}ms")
+                            continue
+                        else:
+                            audio_chunk = event.data
                         if audio_chunk:
                             total_audio_bytes += len(audio_chunk)
+                            audio_data.extend(audio_chunk)
                             _tts_chunks += 1
                             _tts_bytes += len(audio_chunk)
                             frame = self.voice_generator.make_tts_frame(
@@ -859,21 +944,24 @@ class ConversationPipeline:
                     logger.error(f"[Pipeline] TTS 合成 #{seq_id} 异常: {e}")
                     await self.queues.send.put((seq_id, b"", None))
 
-                # TTS 合成完成，从 MP3 数据计算准确时长
-                actual_ms = 0
-                if total_audio_bytes > 0:
-                    # 用字节数按常见比特率估算：假设 64kbps CBR
-                    est_by_bytes = total_audio_bytes * 8 // 64  # 64kbps -> ms
-                    if est_by_bytes > 500 and abs(est_by_bytes - tts_duration_ms) > 200:
-                        actual_ms = est_by_bytes
-
+                # TTS 合成完成，解析 MP3 帧头得到该句真实时长；
+                # 用字幕末字 endTime 兜底：音频收集不全或 MP3 解析失败时仍能给出准确时长
+                actual_ms = mp3_duration_ms(bytes(audio_data)) if audio_data else 0
+                if subtitle_end_ms > actual_ms:
+                    actual_ms = subtitle_end_ms
                 if actual_ms > 0:
-                    logger.info(f"[Pipeline] TTS #{seq_id} 修正: {tts_duration_ms}ms → {actual_ms}ms")
-                    await self.channel.send_json({"type": "instruct", "command_id": "tts_duration", "data": str(actual_ms)})
                     self._total_duration_ms += actual_ms
+                    self._cumulative_duration_ms += actual_ms
+                    logger.info(f"[Pipeline] TTS #{seq_id} 实际时长: {tts_duration_ms}ms → {actual_ms}ms, 累计 {self._total_duration_ms}ms")
+                    # 下发该句真实时长（带 seq），设备端按 seq 更新对应句子槽
+                    await self.channel.send_json({
+                        "type": "instruct",
+                        "command_id": "tts_duration",
+                        "data": json.dumps({"seq": seq_id, "duration_ms": actual_ms}),
+                    })
                 elif tts_duration_ms > 0:
-                    # 使用文本估算的时长
                     self._total_duration_ms += tts_duration_ms
+                    self._cumulative_duration_ms += tts_duration_ms
 
                 self.queues.audio.task_done()
         except asyncio.CancelledError:

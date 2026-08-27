@@ -291,15 +291,10 @@ class LongTermMemoryServiceImpl:
         return item
 
     async def get_summary_catalog(self, device_id: str) -> str:
-        labels = await self._repo.get_summary_labels(device_id)
+        labels = await self._repo.get_summary_labels(device_id, limit=20)
         if not labels:
             return ""
-        lines = [
-            "Long-term memory summary label catalog (use exact labels with memory_recall):",
-        ]
-        for lb in labels:
-            lines.append(f"- {lb}")
-        return "\n".join(lines)
+        return "可用标签: " + "、".join(labels)
 
     async def auto_extract(
         self,

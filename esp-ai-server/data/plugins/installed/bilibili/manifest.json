@@ -7,6 +7,9 @@
   "category": "general",
   "tags": [],
   "requires": [],
-  "permissions": ["network"],
-  "config_fields": []
+  "permissions": [
+    "network"
+  ],
+  "config_fields": [],
+  "icon": "icon.png"
 }

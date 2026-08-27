@@ -60,6 +60,7 @@ EVENT_TTS_SENTENCE_START = 350
 EVENT_TTS_SENTENCE_END = 351
 EVENT_TTS_RESPONSE = 352
 EVENT_TTS_ENDED = 359
+EVENT_TTS_SUBTITLE = 364
 
 
 def _build_message(type_: int, flags: int = 0, payload: bytes = b"",
@@ -183,11 +184,41 @@ def _build_request_payload(config: dict, text: str) -> bytes:
                 "speed_ratio": float(config.get("speed_ratio", "1.0")),
                 "volume_ratio": float(config.get("volume_ratio", "1.0")),
                 "pitch_ratio": float(config.get("pitch_ratio", "1.0")),
+                "enable_subtitle": True,
             },
             "text": text,
         },
     }
     return json.dumps(request, ensure_ascii=False).encode("utf-8")
+
+
+def _parse_subtitle_payload(payload: bytes, session: dict) -> list | None:
+    """解析 TTSSubtitle 事件（EventType=364）的 payload。
+
+    words 时间戳单位为秒，且是整句累计的绝对时间（实测每个子句批次
+    的首字 startTime 都大于上一批次末字 endTime，为子句间自然停顿），
+    因此直接换算为毫秒即可，无需累加子句偏移。
+    """
+    try:
+        data = json.loads(payload.decode("utf-8", "ignore"))
+    except Exception:
+        return None
+    words = data.get("words") or []
+    if not words:
+        return None
+    out = []
+    for w in words:
+        try:
+            start_ms = int(float(w.get("startTime", 0)) * 1000)
+            end_ms = int(float(w.get("endTime", 0)) * 1000)
+        except (TypeError, ValueError):
+            continue
+        out.append({
+            "word": w.get("word", ""),
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+        })
+    return out
 
 
 @tool(cache=False)
@@ -306,6 +337,12 @@ async def tts_volcengine_get_audio(syn_id: str, tool_manager=None) -> dict:
         return {"audio_base64": "", "done": False, "error": None}
 
     if msg_type == MSG_TYPE_FULL_SERVER_RESPONSE:
+        if msg_event == EVENT_TTS_SUBTITLE:
+            # 字级时间戳：返回字幕数据，由适配层转发给流水线
+            subtitle = _parse_subtitle_payload(payload, session)
+            if subtitle:
+                return {"audio_base64": "", "subtitle": subtitle, "done": False, "error": None}
+            return {"audio_base64": "", "done": False, "error": None}
         if msg_event == EVENT_TTS_SENTENCE_END:
             # 句子结束，payload 可能包含额外音频数据
             if payload:

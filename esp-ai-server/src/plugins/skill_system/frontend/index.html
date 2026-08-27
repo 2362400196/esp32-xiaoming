@@ -5,36 +5,88 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>技能系统</title>
 <style>
-:root{--mint:#10b981;--mint-deep:#059669;--mint-soft:rgba(16,185,129,0.1);--text-main:#1e293b;--text-sub:#64748b;--bg:#f0f5f0;--border:rgba(0,0,0,0.06);--radius:16px;--radius-sm:10px;--shadow:0 4px 20px rgba(0,0,0,0.06);--glass:linear-gradient(155deg,rgba(255,255,255,0.85),rgba(255,255,255,0.55));--glass-border:rgba(255,255,255,0.6)}
+:root{--mint:#10b981;--mint-deep:#059669;--mint-soft:rgba(16,185,129,0.12);--text-main:#1e293b;--text-sub:#64748b;--bg:#f0f5f0;--border:rgba(0,0,0,0.06);--radius:16px;--radius-sm:10px;--shadow:0 4px 20px rgba(0,0,0,0.06);--glass:linear-gradient(155deg,rgba(255,255,255,0.85),rgba(255,255,255,0.55));--glass-border:rgba(255,255,255,0.6)}
 *{box-sizing:border-box}
+html,body{scrollbar-width:none;-ms-overflow-style:none}
+html::-webkit-scrollbar,body::-webkit-scrollbar{display:none}
 body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text-main);min-height:100vh}
-.container{max-width:720px;margin:0 auto;padding:20px 16px 40px}
-.hero-bar{position:relative;overflow:hidden;padding:28px 30px;border-radius:var(--radius);background:var(--glass);border:1px solid var(--glass-border);backdrop-filter:blur(12px);margin-bottom:20px}
+.container{max-width:760px;margin:0 auto;padding:20px 16px 40px}
+.hero-bar{position:relative;overflow:hidden;padding:26px 28px;border-radius:var(--radius);background:var(--glass);border:1px solid var(--glass-border);backdrop-filter:blur(12px);margin-bottom:16px}
+.hero-bar::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--mint),#34d399,var(--mint))}
 .watermark{position:absolute;right:-8px;bottom:-18px;font-size:90px;font-weight:900;color:rgba(16,185,129,0.08);line-height:1;pointer-events:none;user-select:none}
 .hero-title{font-size:22px;font-weight:700;margin:0}.highlight{color:var(--mint-deep)}
 .hero-sub{font-size:13px;color:var(--text-sub);margin:4px 0 0}
-.card{background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius);padding:18px;margin-bottom:12px;backdrop-filter:blur(12px);box-shadow:var(--shadow)}
+.tabs{display:flex;gap:8px;margin-bottom:16px;padding:6px;background:var(--glass);border:1px solid var(--glass-border);border-radius:14px;backdrop-filter:blur(12px)}
+.tab{flex:1;padding:9px 0;font-size:13px;font-weight:600;border:none;border-radius:10px;background:transparent;color:var(--text-sub);cursor:pointer;transition:all 0.25s}
+.tab.active{background:var(--mint);color:#fff;box-shadow:0 4px 12px rgba(16,185,129,0.35);animation:breathe 2.4s ease-in-out infinite}
+@keyframes breathe{0%,100%{box-shadow:0 4px 12px rgba(16,185,129,0.35)}50%{box-shadow:0 4px 20px rgba(16,185,129,0.6)}}
+.hidden{display:none!important}
+.card{background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius);padding:16px 18px;margin-bottom:12px;backdrop-filter:blur(12px);box-shadow:var(--shadow)}
+.section-title{font-size:13px;font-weight:700;color:var(--text-sub);margin:18px 0 10px;display:flex;align-items:center;gap:8px}
+.section-title::before{content:'';width:4px;height:14px;border-radius:2px;background:var(--mint)}
 .skill-item{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border)}
 .skill-item:last-child{border-bottom:none}
 .skill-name{font-size:14px;font-weight:600}
-.skill-desc{font-size:12px;color:var(--text-sub);margin-top:2px}
-.skill-badge{font-size:11px;padding:2px 8px;border-radius:99px;font-weight:600}
+.skill-desc{font-size:12px;color:var(--text-sub);margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.skill-badge{font-size:11px;padding:2px 8px;border-radius:99px;font-weight:600;flex-shrink:0}
 .badge-on{background:var(--mint-soft);color:var(--mint-deep)}
 .badge-off{background:rgba(0,0,0,0.05);color:var(--text-sub)}
+.badge-dl{background:rgba(59,130,246,0.1);color:#2563eb}
 .spinner{width:28px;height:28px;border:3px solid var(--mint-soft);border-top-color:var(--mint-deep);border-radius:50%;animation:spin 0.8s linear infinite;margin:20px auto}
 @keyframes spin{to{transform:rotate(360deg)}}
-.btn{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;font-size:12px;font-weight:600;border:none;border-radius:8px;cursor:pointer;transition:all 0.25s}
-	.btn-primary{background:var(--mint);color:#fff}.btn-primary:hover{background:var(--mint-deep)}
-	.btn-ghost{background:transparent;color:var(--text-main)}.btn-ghost:hover{background:var(--mint-soft)}
-	.modal-mask{position:fixed;inset:0;background:rgba(15,23,42,0.45);backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:center;z-index:1000}
-	.modal-card{width:480px;max-width:92vw;max-height:85vh;display:flex;flex-direction:column;background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius);backdrop-filter:blur(12px);box-shadow:var(--shadow);overflow:hidden}
-	.modal-head{display:flex;align-items:center;justify-content:space-between;padding:18px 20px 12px;border-bottom:1px solid var(--border)}
-	.modal-title{font-size:15px;font-weight:700}
-	.modal-close{background:none;border:none;font-size:22px;color:var(--text-sub);cursor:pointer;line-height:1}
-	.modal-close:hover{color:var(--text-main)}
-	.modal-body{padding:20px;overflow-y:auto;flex:1}
-	.modal-foot{display:flex;justify-content:flex-end;gap:10px;padding:14px 20px;border-top:1px solid var(--border)}
-	.detail-doc{font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-all;background:rgba(255,255,255,0.5);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;margin:8px 0 0}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;font-size:12px;font-weight:600;border:none;border-radius:8px;cursor:pointer;transition:all 0.25s;white-space:nowrap}
+.btn:active{transform:scale(0.96)}
+.btn-primary{background:var(--mint);color:#fff}.btn-primary:hover{background:var(--mint-deep)}
+.btn-ghost{background:transparent;color:var(--text-main)}.btn-ghost:hover{background:var(--mint-soft)}
+.btn-danger{background:transparent;color:#ef4444}.btn-danger:hover{background:rgba(239,68,68,0.08)}
+.btn-sm{padding:3px 9px;font-size:11px}
+.btn-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.search-row{display:flex;gap:8px;margin-bottom:12px}
+.input{flex:1;padding:8px 12px;font-size:13px;border:1px solid var(--border);border-radius:10px;background:rgba(255,255,255,0.7);outline:none;transition:border-color 0.2s}
+.input:focus{border-color:var(--mint)}
+.cat-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.cat-tag{padding:5px 14px;font-size:12px;font-weight:600;border:none;border-radius:99px;background:rgba(255,255,255,0.6);color:var(--text-sub);cursor:pointer;transition:all 0.25s;border:1px solid var(--border)}
+.cat-tag:hover{background:var(--mint-soft);color:var(--mint-deep)}
+.cat-tag.active{background:var(--mint-soft);color:var(--mint-deep);border-color:var(--mint);animation:breathe 2.4s ease-in-out infinite}
+.market-item{display:flex;align-items:flex-start;gap:12px;padding:14px 0;border-bottom:1px solid var(--border)}
+.market-item:last-child{border-bottom:none}
+.market-icon{width:42px;height:42px;border-radius:12px;background:var(--mint-soft);color:var(--mint-deep);display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:800;flex-shrink:0}
+.market-main{flex:1;min-width:0}
+.market-name{font-size:14px;font-weight:700;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.market-desc{font-size:12px;color:var(--text-sub);margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.market-meta{font-size:11px;color:var(--text-sub);margin-top:6px;display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.tag-chip{font-size:10px;padding:1px 7px;border-radius:99px;background:rgba(0,0,0,0.04);color:var(--text-sub)}
+.upload-zone{border:2px dashed rgba(16,185,129,0.35);border-radius:var(--radius);padding:34px 20px;text-align:center;cursor:pointer;transition:all 0.25s;background:rgba(255,255,255,0.4)}
+.upload-zone:hover,.upload-zone.drag{border-color:var(--mint);background:var(--mint-soft)}
+.upload-icon{font-size:34px;margin-bottom:8px}
+.hint{font-size:14px;font-weight:600;color:var(--text-main)}
+.sub{font-size:12px;color:var(--text-sub);margin-top:4px}
+.file-name{font-size:12px;color:var(--mint-deep);font-weight:600;margin-top:10px;word-break:break-all}
+.form-row{display:flex;align-items:center;gap:10px;margin-top:12px}
+.form-label{font-size:12px;font-weight:600;color:var(--text-sub);flex-shrink:0;width:56px}
+select.input{flex:1}
+.preview-box{margin-top:12px;background:rgba(255,255,255,0.5);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-all;max-height:220px;overflow-y:auto}
+.preview-box::-webkit-scrollbar{display:none}
+.empty{padding:36px 20px;text-align:center;color:var(--text-sub);font-size:13px}
+.toast{position:fixed;top:20px;left:50%;transform:translateX(-50%) translateY(-80px);background:rgba(15,23,42,0.85);color:#fff;padding:10px 22px;border-radius:99px;font-size:13px;font-weight:600;z-index:2000;transition:transform 0.35s cubic-bezier(0.34,1.56,0.64,1);backdrop-filter:blur(8px)}
+.toast.show{transform:translateX(-50%) translateY(0)}
+.toast.err{background:rgba(220,38,38,0.9)}
+.modal-mask{position:fixed;inset:0;background:rgba(15,23,42,0.45);backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:center;z-index:1000}
+.modal-card{width:500px;max-width:92vw;max-height:85vh;display:flex;flex-direction:column;background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--radius);backdrop-filter:blur(12px);box-shadow:var(--shadow);overflow:hidden}
+.modal-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px 12px;border-bottom:1px solid var(--border)}
+.modal-title{font-size:15px;font-weight:700}
+.modal-close{background:none;border:none;font-size:22px;color:var(--text-sub);cursor:pointer;line-height:1}
+.modal-close:hover{color:var(--text-main)}
+.modal-body{padding:20px;overflow-y:auto;flex:1}
+.modal-body::-webkit-scrollbar{display:none}
+.modal-foot{display:flex;justify-content:flex-end;gap:10px;padding:14px 20px;border-top:1px solid var(--border)}
+.detail-doc{font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-all;background:rgba(255,255,255,0.5);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;margin:8px 0 0;max-height:300px;overflow-y:auto}
+.detail-doc::-webkit-scrollbar{display:none}
+.pager{display:flex;align-items:center;justify-content:center;gap:12px;margin-top:14px}
+.page-btn{padding:5px 14px;font-size:12px;font-weight:600;border:none;border-radius:8px;background:var(--mint-soft);color:var(--mint-deep);cursor:pointer;transition:all 0.2s}
+.page-btn:hover{background:var(--mint);color:#fff}
+.page-btn:disabled{opacity:0.4;cursor:not-allowed}
+.page-info{font-size:12px;color:var(--text-sub)}
 </style>
 </head>
 <body>
@@ -42,11 +94,61 @@ body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',
   <div class="hero-bar">
     <span class="watermark">S</span>
     <h2 class="hero-title">技能<span class="highlight">系统</span></h2>
-    <p class="hero-sub">技能目录管理 · 创建 · 更新 · 删除 · 设备控制</p>
+    <p class="hero-sub">技能目录管理 · 技能市场 · 上传发布</p>
   </div>
-  <div id="loading"><div class="spinner"></div></div>
-  <div id="content" style="display:none">
-    <div id="skillList"></div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="mine" onclick="switchTab('mine')">我的技能</button>
+    <button class="tab" data-tab="market" onclick="switchTab('market')">技能市场</button>
+    <button class="tab" data-tab="upload" onclick="switchTab('upload')">上传技能</button>
+  </div>
+
+  <div id="loading" class="hidden"><div class="spinner"></div></div>
+
+  <!-- 我的技能 -->
+  <div id="tab-mine" class="tab-panel">
+    <div id="mineList"></div>
+  </div>
+
+  <!-- 技能市场 -->
+  <div id="tab-market" class="tab-panel hidden">
+    <div class="search-row">
+      <input class="input" id="marketSearch" placeholder="搜索技能名称或描述…" onkeydown="if(event.key==='Enter'){marketPage=1;loadMarket()}">
+      <button class="btn btn-primary" onclick="marketPage=1;loadMarket()">搜索</button>
+    </div>
+    <div class="cat-row" id="marketCats"></div>
+    <div id="marketList"></div>
+    <div class="pager hidden" id="marketPager">
+      <button class="page-btn" id="prevPage" onclick="marketPage--;loadMarket()">上一页</button>
+      <span class="page-info" id="pageInfo"></span>
+      <button class="page-btn" id="nextPage" onclick="marketPage++;loadMarket()">下一页</button>
+    </div>
+    <div class="section-title">我发布的技能</div>
+    <div id="myPublish"></div>
+  </div>
+
+  <!-- 上传技能 -->
+  <div id="tab-upload" class="tab-panel hidden">
+    <div class="card">
+      <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
+        <div class="upload-icon">📄</div>
+        <div class="hint">点击选择 SKILL.md 或 zip 文件</div>
+        <div class="sub">支持 .md 或包含 SKILL.md 的 .zip，最大 100KB</div>
+        <div class="file-name hidden" id="fileName"></div>
+      </div>
+      <input type="file" id="fileInput" accept=".md,.zip" class="hidden" onchange="onFileSelected(event)">
+      <div id="uploadPreview" class="preview-box hidden"></div>
+      <div class="form-row">
+        <span class="form-label">绑定设备</span>
+        <select class="input" id="uploadDevice">
+          <option value="">仅安装到全局（所有设备可用）</option>
+        </select>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="btnUpload" onclick="uploadSkill()">安装技能</button>
+        <button class="btn btn-ghost" id="btnPublish" onclick="openPublishModal()">发布到技能市场</button>
+      </div>
+    </div>
   </div>
 
   <!-- 详情弹窗 -->
@@ -56,110 +158,459 @@ body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',
         <span class="modal-title" id="detailTitle">技能详情</span>
         <button class="modal-close" onclick="closeDetail()">×</button>
       </div>
-      <div class="modal-body">
-        <div id="detailContent"></div>
-      </div>
+      <div class="modal-body"><div id="detailContent"></div></div>
       <div class="modal-foot">
         <button class="btn btn-ghost" onclick="closeDetail()">关闭</button>
       </div>
     </div>
   </div>
+
+  <!-- 发布弹窗 -->
+  <div id="publishModal" class="modal-mask" style="display:none" onclick="closePublish()">
+    <div class="modal-card" onclick="event.stopPropagation()">
+      <div class="modal-head">
+        <span class="modal-title">发布到技能市场</span>
+        <button class="modal-close" onclick="closePublish()">×</button>
+      </div>
+      <div class="modal-body">
+        <div style="font-size:12px;color:var(--text-sub);margin-bottom:12px" id="publishFileInfo"></div>
+        <div class="form-row">
+          <span class="form-label">分类</span>
+          <select class="input" id="publishCategory"></select>
+        </div>
+        <div class="form-row">
+          <span class="form-label">标签</span>
+          <input class="input" id="publishTags" placeholder="用逗号分隔，如 weather,forecast">
+        </div>
+        <div style="font-size:11px;color:var(--text-sub);margin-top:10px;line-height:1.6">同一技能重复发布将更新已有版本（版本号自动 +1）。发布后可在「技能市场 → 我发布的技能」中管理。</div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" onclick="closePublish()">取消</button>
+        <button class="btn btn-primary" id="btnPublishConfirm" onclick="publishSkill()">确认发布</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 确认弹窗 -->
+  <div id="confirmModal" class="modal-mask" style="display:none" onclick="closeConfirm()">
+    <div class="modal-card" style="width:360px" onclick="event.stopPropagation()">
+      <div class="modal-body" style="padding:24px 20px;text-align:center">
+        <div style="font-size:15px;font-weight:700;margin-bottom:8px" id="confirmTitle">确认操作</div>
+        <div style="font-size:13px;color:var(--text-sub);line-height:1.6" id="confirmText"></div>
+      </div>
+      <div class="modal-foot" style="justify-content:center">
+        <button class="btn btn-ghost" onclick="closeConfirm()">取消</button>
+        <button class="btn btn-primary" id="confirmOk" onclick="confirmOk()">确定</button>
+      </div>
+    </div>
+  </div>
 </div>
+
+<div class="toast" id="toast"></div>
+
 <script>
 let deviceMac='';
+let marketPage=1;
+const MARKET_SIZE=10;
+let selectedFile=null;
+let publishFile=null;
+const CATEGORIES=['通用','工具','生活','娱乐','学习'];
+
 function getToken(){return localStorage.getItem('espai_token')||''}
 async function api(path,method='GET',body=null){
   const token=getToken();const headers={'Content-Type':'application/json'};
   if(token)headers['Authorization']='Bearer '+token;
   try{const r=await fetch(path,{method,headers,body:body?JSON.stringify(body):null});return await r.json()}catch(e){return{code:1,message:String(e)}}
 }
+async function apiForm(path,formData){
+  const token=getToken();
+  const headers={};
+  if(token)headers['Authorization']='Bearer '+token;
+  try{const r=await fetch(path,{method:'POST',headers,body:formData});return await r.json()}catch(e){return{code:1,message:String(e)}}
+}
 
+function toast(msg,isErr){
+  const t=document.getElementById('toast');
+  t.textContent=msg;
+  t.className='toast show'+(isErr?' err':'');
+  clearTimeout(t._timer);
+  t._timer=setTimeout(()=>t.classList.remove('show'),2600);
+}
+
+function switchTab(name){
+  document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.add('hidden'));
+  document.getElementById('tab-'+name).classList.remove('hidden');
+  if(name==='mine')loadSkills();
+  if(name==='market'){marketPage=1;loadMarket();loadMyPublish();}
+  if(name==='upload'){loadDevices();loadPublishCats();}
+}
+
+function escapeHtml(s){if(s==null)return'';const d=document.createElement('div');d.textContent=String(s);return d.innerHTML}
+
+// ================= 我的技能 =================
 async function loadSkills(){
-  document.getElementById('loading').style.display='block'
-  document.getElementById('content').style.display='none'
-  const res=await api('/api/v1/skills?device_id='+encodeURIComponent(deviceMac))
-  document.getElementById('loading').style.display='none'
-  document.getElementById('content').style.display='block'
+  const list=document.getElementById('mineList');
+  list.innerHTML='<div class="spinner"></div>';
+  const res=await api('/api/v1/skills?device_id='+encodeURIComponent(deviceMac));
   if(res.code===0&&res.data){
-    renderSkills(res.data.skills||[])
+    renderSkills(res.data.skills||[]);
+  }else{
+    list.innerHTML='<div class="empty">加载失败：'+escapeHtml(res.message||'未知错误')+'</div>';
   }
 }
 
 function renderSkills(skills){
-  const list=document.getElementById('skillList')
+  const list=document.getElementById('mineList');
   if(!skills||skills.length===0){
-    list.innerHTML='<div class="card" style="text-align:center;padding:32px;color:var(--text-sub)">暂无技能</div>'
-    return
+    list.innerHTML='<div class="empty">暂无技能，去「技能市场」或「上传技能」添加吧</div>';
+    return;
   }
   list.innerHTML=skills.map(s=>{
-    const disabled=s.disabled||false
-    const skillId=s.id||s.skill_id||''
+    const disabled=s.disabled||false;
+    const skillId=s.id||s.skill_id||'';
+    const cats=(s.category||[]).map(c=>`<span class="tag-chip">${escapeHtml(c)}</span>`).join('');
     return `<div class="card">
       <div class="skill-item">
-        <div>
+        <div style="min-width:0">
           <div class="skill-name">${escapeHtml(skillId)}</div>
-          <div class="skill-desc">${escapeHtml(s.description||'')}</div>
+          <div class="skill-desc">${escapeHtml(s.description||'暂无描述')}</div>
+          ${cats?`<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">${cats}</div>`:''}
         </div>
         <span class="skill-badge ${disabled?'badge-off':'badge-on'}">${disabled?'已禁用':'已启用'}</span>
       </div>
-      <div style="display:flex;gap:6px;margin-top:4px">
-        <button class="btn btn-ghost" onclick="viewSkillDetail('${escapeHtml(skillId)}')">查看</button>
-        <button class="btn btn-ghost" onclick="toggleSkill('${escapeHtml(skillId)}',${disabled})">${disabled?'启用':'禁用'}</button>
+      <div class="btn-row">
+        <button class="btn btn-ghost btn-sm" onclick="viewSkillDetail('${escapeHtml(skillId)}')">查看</button>
+        <button class="btn btn-ghost btn-sm" onclick="toggleSkill('${escapeHtml(skillId)}',${disabled})">${disabled?'启用':'禁用'}</button>
       </div>
-    </div>`
-  }).join('')
+    </div>`;
+  }).join('');
 }
 
 async function toggleSkill(skillId,currentlyDisabled){
-  const newDisabled=!currentlyDisabled
-  const res=await api('/api/v1/skills/'+encodeURIComponent(skillId)+'/toggle?device_id='+encodeURIComponent(deviceMac)+'&disabled='+newDisabled,'POST')
-  if(res.code===0)loadSkills()
+  const newDisabled=!currentlyDisabled;
+  const res=await api('/api/v1/skills/'+encodeURIComponent(skillId)+'/toggle?device_id='+encodeURIComponent(deviceMac)+'&disabled='+newDisabled,'POST');
+  if(res.code===0){toast(newDisabled?'已禁用':'已启用');loadSkills();}
+  else toast(res.message||'操作失败',true);
 }
 
 async function viewSkillDetail(skillId){
-  const res=await api('/api/v1/skills/'+encodeURIComponent(skillId))
+  const res=await api('/api/v1/skills/'+encodeURIComponent(skillId));
   if(res.code===0&&res.data){
-    document.getElementById('detailTitle').textContent='技能详情 — '+skillId
-    const d=res.data
-    let html='<div style="margin-bottom:12px">'
-    html+='<div style="font-size:12px;font-weight:600;color:var(--text-sub);margin-bottom:2px">描述</div>'
-    html+='<div style="font-size:13px">'+escapeHtml(d.description||'')+'</div>'
+    document.getElementById('detailTitle').textContent='技能详情 — '+skillId;
+    const d=res.data;
+    let html='<div style="margin-bottom:12px">';
+    html+='<div style="font-size:12px;font-weight:600;color:var(--text-sub);margin-bottom:2px">描述</div>';
+    html+='<div style="font-size:13px">'+escapeHtml(d.description||'')+'</div>';
     if(d.category&&d.category.length){
-      html+='<div style="font-size:12px;font-weight:600;color:var(--text-sub);margin-top:10px;margin-bottom:2px">分类</div>'
-      html+='<div style="font-size:13px">'+d.category.map(c=>escapeHtml(c)).join('、')+'</div>'
+      html+='<div style="font-size:12px;font-weight:600;color:var(--text-sub);margin-top:10px;margin-bottom:2px">分类</div>';
+      html+='<div style="font-size:13px">'+d.category.map(c=>escapeHtml(c)).join('、')+'</div>';
     }
     if(d.tags&&d.tags.length){
-      html+='<div style="font-size:12px;font-weight:600;color:var(--text-sub);margin-top:10px;margin-bottom:2px">标签</div>'
-      html+='<div style="font-size:13px">'+d.tags.map(t=>escapeHtml(t)).join('、')+'</div>'
+      html+='<div style="font-size:12px;font-weight:600;color:var(--text-sub);margin-top:10px;margin-bottom:2px">标签</div>';
+      html+='<div style="font-size:13px">'+d.tags.map(t=>escapeHtml(t)).join('、')+'</div>';
     }
-    html+='</div>'
-    const doc=d.document||d.instructions||''
+    if(d.cap_groups&&d.cap_groups.length){
+      html+='<div style="font-size:12px;font-weight:600;color:var(--text-sub);margin-top:10px;margin-bottom:2px">工具权限</div>';
+      html+='<div style="font-size:13px">'+d.cap_groups.map(c=>escapeHtml(c)).join('、')+'</div>';
+    }
+    html+='</div>';
+    const doc=d.document||d.instructions||'';
     if(doc){
-      html+='<div><div style="font-size:12px;font-weight:600;color:var(--text-sub);margin-bottom:2px">执行指令</div>'
-      html+='<pre class="detail-doc">'+escapeHtml(doc)+'</pre></div>'
+      html+='<div><div style="font-size:12px;font-weight:600;color:var(--text-sub);margin-bottom:2px">执行指令</div>';
+      html+='<pre class="detail-doc">'+escapeHtml(doc)+'</pre></div>';
     }
-    document.getElementById('detailContent').innerHTML=html
-    document.getElementById('detailModal').style.display='flex'
+    document.getElementById('detailContent').innerHTML=html;
+    document.getElementById('detailModal').style.display='flex';
+  }else{
+    toast(res.message||'加载失败',true);
   }
 }
 
-function closeDetail(){
-  document.getElementById('detailModal').style.display='none'
+function closeDetail(){document.getElementById('detailModal').style.display='none'}
+
+// ================= 确认弹窗 =================
+let confirmCb=null;
+function confirmAction(title,text,cb){
+  document.getElementById('confirmTitle').textContent=title;
+  document.getElementById('confirmText').textContent=text;
+  confirmCb=cb;
+  document.getElementById('confirmModal').style.display='flex';
+}
+function closeConfirm(){
+  document.getElementById('confirmModal').style.display='none';
+  confirmCb=null;
+}
+function confirmOk(){
+  const cb=confirmCb;
+  closeConfirm();
+  if(cb)cb();
 }
 
-function escapeHtml(s){if(!s)return'';const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+// ================= 技能市场 =================
+let marketCategory='';
+
+async function loadMarket(){
+  const list=document.getElementById('marketList');
+  list.innerHTML='<div class="spinner"></div>';
+  const search=document.getElementById('marketSearch').value.trim();
+  const params=new URLSearchParams({page:String(marketPage),size:String(MARKET_SIZE)});
+  if(search)params.set('search',search);
+  if(marketCategory)params.set('category',marketCategory);
+  const res=await api('/api/v1/skills/marketplace?'+params.toString());
+  if(res.code===0&&res.data){
+    renderMarket(res.data.items||[],res.data.total||0);
+  }else{
+    list.innerHTML='<div class="empty">加载失败：'+escapeHtml(res.message||'未知错误')+'</div>';
+  }
+}
+
+function renderMarket(items,total){
+  const list=document.getElementById('marketList');
+  const pager=document.getElementById('marketPager');
+  if(!items||items.length===0){
+    list.innerHTML='<div class="empty">技能市场暂无内容</div>';
+    pager.classList.add('hidden');
+    return;
+  }
+  list.innerHTML=items.map(s=>{
+    const tags=(s.tags||[]).slice(0,3).map(t=>`<span class="tag-chip">${escapeHtml(t)}</span>`).join('');
+    return `<div class="market-item">
+      <div class="market-icon">${escapeHtml((s.name||'?').charAt(0).toUpperCase())}</div>
+      <div class="market-main">
+        <div class="market-name">${escapeHtml(s.name)}
+          <span class="skill-badge badge-dl">⬇ ${s.downloads||0}</span>
+          <span class="tag-chip">v${escapeHtml(s.version||'1.0.0')}</span>
+        </div>
+        <div class="market-desc">${escapeHtml(s.description||'')}</div>
+        <div class="market-meta">
+          <span>👤 ${escapeHtml(s.author||'匿名')}</span>
+          <span>${escapeHtml(s.category||'通用')}</span>
+          ${tags}
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-ghost btn-sm" onclick="viewMarketSkill('${escapeHtml(s.slug)}')">详情</button>
+          <button class="btn btn-primary btn-sm" onclick="installMarketSkill('${escapeHtml(s.slug)}')">安装</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+  const pages=Math.max(1,Math.ceil(total/MARKET_SIZE));
+  document.getElementById('pageInfo').textContent=marketPage+' / '+pages+'（共 '+total+' 个）';
+  document.getElementById('prevPage').disabled=marketPage<=1;
+  document.getElementById('nextPage').disabled=marketPage>=pages;
+  pager.classList.remove('hidden');
+}
+
+async function loadMarketCats(){
+  const row=document.getElementById('marketCats');
+  let html='<button class="cat-tag active" onclick="filterMarket(\'\')">全部</button>';
+  CATEGORIES.forEach(c=>{
+    html+=`<button class="cat-tag" onclick="filterMarket('${c}')">${c}</button>`;
+  });
+  row.innerHTML=html;
+}
+
+function filterMarket(cat){
+  marketCategory=cat;
+  marketPage=1;
+  document.querySelectorAll('#marketCats .cat-tag').forEach(b=>b.classList.toggle('active',b.textContent===cat||(cat===''&&b.textContent==='全部')));
+  loadMarket();
+}
+
+async function viewMarketSkill(slug){
+  const res=await api('/api/v1/skills/marketplace/'+encodeURIComponent(slug));
+  if(res.code===0&&res.data){
+    const d=res.data;
+    document.getElementById('detailTitle').textContent='市场技能 — '+d.name;
+    let html='<div style="margin-bottom:12px">';
+    html+='<div style="font-size:12px;font-weight:600;color:var(--text-sub);margin-bottom:2px">描述</div>';
+    html+='<div style="font-size:13px">'+escapeHtml(d.description||'')+'</div>';
+    html+='<div class="market-meta" style="margin-top:8px"><span>👤 '+escapeHtml(d.author||'匿名')+'</span><span>⬇ '+(d.downloads||0)+' 次安装</span><span>v'+escapeHtml(d.version||'1.0.0')+'</span><span>'+escapeHtml(d.category||'通用')+'</span></div>';
+    if(d.tags&&d.tags.length){
+      html+='<div style="font-size:12px;font-weight:600;color:var(--text-sub);margin-top:10px;margin-bottom:2px">标签</div>';
+      html+='<div style="font-size:13px">'+d.tags.map(t=>escapeHtml(t)).join('、')+'</div>';
+    }
+    html+='</div>';
+    html+='<div><div style="font-size:12px;font-weight:600;color:var(--text-sub);margin-bottom:2px">SKILL.md 内容</div>';
+    html+='<pre class="detail-doc">'+escapeHtml(d.content||'')+'</pre></div>';
+    document.getElementById('detailContent').innerHTML=html;
+    document.getElementById('detailModal').style.display='flex';
+  }else{
+    toast(res.message||'加载失败',true);
+  }
+}
+
+async function installMarketSkill(slug){
+  confirmAction('安装技能', '确定安装技能「'+slug+'」吗？将写入全局技能目录。', async function(){
+    const res=await api('/api/v1/skills/marketplace/'+encodeURIComponent(slug)+'/install?device_id='+encodeURIComponent(deviceMac),'POST');
+    if(res.code===0){toast('安装成功');loadMarket();}
+    else toast(res.message||'安装失败',true);
+  });
+}
+
+// ================= 我发布的技能 =================
+async function loadMyPublish(){
+  const list=document.getElementById('myPublish');
+  const res=await api('/api/v1/skills/marketplace/mine');
+  if(res.code===0&&res.data){
+    const items=res.data.items||[];
+    if(items.length===0){
+      list.innerHTML='<div class="empty">你还没有发布过技能</div>';
+      return;
+    }
+    list.innerHTML=items.map(s=>`
+      <div class="market-item">
+        <div class="market-icon">${escapeHtml((s.name||'?').charAt(0).toUpperCase())}</div>
+        <div class="market-main">
+          <div class="market-name">${escapeHtml(s.name)} <span class="tag-chip">v${escapeHtml(s.version||'1.0.0')}</span></div>
+          <div class="market-desc">${escapeHtml(s.description||'')}</div>
+          <div class="market-meta"><span>⬇ ${s.downloads||0} 次安装</span><span>${escapeHtml(s.category||'通用')}</span></div>
+          <div class="btn-row">
+            <button class="btn btn-ghost btn-sm" onclick="viewMarketSkill('${escapeHtml(s.slug)}')">详情</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteMyPublish('${escapeHtml(s.slug)}')">删除</button>
+          </div>
+        </div>
+      </div>`).join('');
+  }else{
+    list.innerHTML='<div class="empty">加载失败</div>';
+  }
+}
+
+async function deleteMyPublish(slug){
+  confirmAction('删除已发布技能', '确定删除已发布的技能「'+slug+'」吗？删除后其他用户将无法再安装。', async function(){
+    const res=await api('/api/v1/skills/marketplace/'+encodeURIComponent(slug),'DELETE');
+    if(res.code===0){toast('已删除');loadMyPublish();}
+    else toast(res.message||'删除失败',true);
+  });
+}
+
+// ================= 上传技能 =================
+async function loadDevices(){
+  const sel=document.getElementById('uploadDevice');
+  const current=sel.value;
+  const res=await api('/api/v1/devices');
+  let html='<option value="">仅安装到全局（所有设备可用）</option>';
+  if(res.code===0&&res.data){
+    const devices=Array.isArray(res.data)?res.data:(res.data.devices||res.data.items||[]);
+    devices.forEach(d=>{
+      const id=d.device_id||d.id||d.mac_address||'';
+      const name=d.name||d.device_name||id;
+      if(id)html+=`<option value="${escapeHtml(id)}">${escapeHtml(name)}</option>`;
+    });
+  }
+  sel.innerHTML=html;
+  sel.value=current;
+}
+
+function loadPublishCats(){
+  const sel=document.getElementById('publishCategory');
+  sel.innerHTML=CATEGORIES.map(c=>`<option value="${c}">${c}</option>`).join('');
+}
+
+function onFileSelected(e){
+  const f=e.target.files[0];
+  if(!f)return;
+  selectedFile=f;
+  document.getElementById('fileName').textContent='已选择：'+f.name+'（'+(f.size/1024).toFixed(1)+' KB）';
+  document.getElementById('fileName').classList.remove('hidden');
+  previewSkillFile(f);
+}
+
+function previewSkillFile(f){
+  const box=document.getElementById('uploadPreview');
+  const reader=new FileReader();
+  reader.onload=function(){
+    const text=String(reader.result||'');
+    const isZip=f.name.toLowerCase().endsWith('.zip');
+    if(isZip){
+      box.textContent='已选择 zip 压缩包，安装时将自动解压读取其中的 SKILL.md';
+    }else{
+      box.textContent=text.slice(0,2000)+(text.length>2000?'\n…（已截断预览）':'');
+    }
+    box.classList.remove('hidden');
+  };
+  reader.readAsText(f);
+}
+
+async function uploadSkill(){
+  if(!selectedFile){
+    toast('请先选择文件',true);
+    return;
+  }
+  const fd=new FormData();
+  fd.append('file',selectedFile);
+  fd.append('device_id',document.getElementById('uploadDevice').value||'');
+  document.getElementById('btnUpload').disabled=true;
+  const res=await apiForm('/api/v1/skills/upload',fd);
+  document.getElementById('btnUpload').disabled=false;
+  if(res.code===0){
+    toast('技能安装成功');
+    selectedFile=null;
+    document.getElementById('fileInput').value='';
+    document.getElementById('fileName').classList.add('hidden');
+    document.getElementById('uploadPreview').classList.add('hidden');
+    switchTab('mine');
+  }else{
+    toast(res.message||'上传失败',true);
+  }
+}
+
+// ================= 发布到市场 =================
+function openPublishModal(){
+  if(!selectedFile){
+    toast('请先在下方选择要发布的技能文件',true);
+    return;
+  }
+  publishFile=selectedFile;
+  document.getElementById('publishFileInfo').textContent='将发布：'+publishFile.name;
+  document.getElementById('publishTags').value='';
+  document.getElementById('publishModal').style.display='flex';
+}
+
+function closePublish(){document.getElementById('publishModal').style.display='none'}
+
+async function publishSkill(){
+  if(!publishFile){
+    toast('未选择文件',true);
+    return;
+  }
+  const fd=new FormData();
+  fd.append('file',publishFile);
+  fd.append('category',document.getElementById('publishCategory').value||'通用');
+  const tags=document.getElementById('publishTags').value.split(/[,，]/).map(t=>t.trim()).filter(Boolean);
+  fd.append('tags',JSON.stringify(tags));
+  document.getElementById('btnPublishConfirm').disabled=true;
+  const res=await apiForm('/api/v1/skills/marketplace/publish',fd);
+  document.getElementById('btnPublishConfirm').disabled=false;
+  if(res.code===0){
+    toast(res.data&&res.data.is_new?'发布成功':'更新成功（版本 '+res.data.version+'）');
+    closePublish();
+  }else{
+    toast(res.message||'发布失败',true);
+  }
+}
+
+// ================= 初始化 =================
+loadMarketCats();
 
 window.addEventListener('message',function(e){
-  try{const m=typeof e.data==='object'?e.data:JSON.parse(e.data)
-  if(m.type==='deviceChanged'&&m.device){
-    deviceMac=m.device.device_id||m.device.id||m.device.mac||''
-    if(deviceMac)loadSkills()
-  }}catch{}
-})
+  try{
+    const m=typeof e.data==='object'?e.data:JSON.parse(e.data);
+    if(m.type==='deviceChanged'&&m.device){
+      deviceMac=m.device.device_id||m.device.id||m.device.mac||'';
+      if(deviceMac)loadSkills();
+    }
+  }catch{}
+});
 
 try{window.parent.postMessage({type:'ready'},'*')}catch(e){}
 
-(function(){const did=new URLSearchParams(window.location.search).get('device_id');if(did){deviceMac=did;loadSkills()}})();
+(function(){
+  const did=new URLSearchParams(window.location.search).get('device_id');
+  if(did){deviceMac=did;loadSkills();}
+  else{loadSkills();}
+})();
 </script>
 </body>
 </html>

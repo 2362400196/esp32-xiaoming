@@ -9,17 +9,24 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import Optional
 
 from src.infrastructure.db.repositories.growth_repositories import UserProfileRepository
 from src.infrastructure.logging import get_logger
 from .models import UserProfile
+from .similarity import text_similarity
 
 logger = get_logger(__name__)
 
 # 模块级仓储单例（延迟使用全局异步会话工厂，构造时不连接 DB）
 _profile_repo = UserProfileRepository()
+
+# 画像兴趣条目上限（超出部分不再展示，控制提示词体积）
+PROFILE_INTEREST_LIMIT = 30
+# 兴趣条目合并前相似度阈值（LLM 常用不同措辞重复同一事实，需语义去重）
+PROFILE_SIMILARITY_THRESHOLD = 0.6
 
 
 class UserProfileService:
@@ -51,6 +58,7 @@ class UserProfileService:
 
         if profile is None:
             profile = UserProfile(device_id=device_id)
+        self._dedup_interests(profile)
         self._profiles[device_id] = profile
         return profile
 
@@ -156,7 +164,6 @@ class UserProfileService:
         if category not in profile.interests:
             profile.interests[category] = []
 
-        import re
         if category == "likes":
             match = re.search(r"喜欢(.+?)(?:，|。|$)", pref)
         elif category == "dislikes":
@@ -166,8 +173,30 @@ class UserProfileService:
 
         if match:
             item = match.group(1).strip()
-            if item and item not in profile.interests[category]:
+            if item and not self._is_duplicate_interest(profile.interests[category], item):
                 profile.interests[category].append(item)
+
+    def _is_duplicate_interest(self, items: list, item: str) -> bool:
+        """判断新偏好是否与已有条目重复（子串命中或相似度过高）"""
+        norm = re.sub(r"\s+", "", item)
+        for existing in items:
+            norm_existing = re.sub(r"\s+", "", existing)
+            if norm and (norm in norm_existing or norm_existing in norm):
+                return True
+            if text_similarity(existing, item) >= PROFILE_SIMILARITY_THRESHOLD:
+                return True
+        return False
+
+    def _dedup_interests(self, profile: UserProfile) -> None:
+        """清理画像中语义重复的兴趣条目（含历史数据）"""
+        for category in list(profile.interests.keys()):
+            deduped = []
+            for item in profile.interests[category]:
+                if not item:
+                    continue
+                if not self._is_duplicate_interest(deduped, item):
+                    deduped.append(item)
+            profile.interests[category] = deduped
 
     async def get_profile_summary(self, device_id: str) -> str:
         """获取用户画像摘要（给LLM用）"""
@@ -181,11 +210,11 @@ class UserProfileService:
         if profile.family:
             parts.append(f"家人：{', '.join(profile.family)}")
         if profile.interests.get("likes"):
-            parts.append(f"喜欢：{', '.join(profile.interests['likes'])}")
+            parts.append(f"喜欢：{', '.join(profile.interests['likes'][:PROFILE_INTEREST_LIMIT])}")
         if profile.interests.get("dislikes"):
-            parts.append(f"不喜欢：{', '.join(profile.interests['dislikes'])}")
+            parts.append(f"不喜欢：{', '.join(profile.interests['dislikes'][:PROFILE_INTEREST_LIMIT])}")
         if profile.interests.get("learning"):
-            parts.append(f"正在学习：{', '.join(profile.interests['learning'])}")
+            parts.append(f"正在学习：{', '.join(profile.interests['learning'][:PROFILE_INTEREST_LIMIT])}")
         if profile.current_state.get("concerns"):
             parts.append(f"最近关心：{', '.join(profile.current_state['concerns'])}")
         if profile.current_state.get("last_emotion"):

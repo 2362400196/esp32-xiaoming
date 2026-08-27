@@ -23,6 +23,7 @@ from src.infrastructure.db.models.marketplace import (
     MarketplacePluginModel,
     PluginReviewModel,
     PluginVersionModel,
+    MarketplaceSkillModel,
 )
 
 __all__ = [
@@ -42,4 +43,5 @@ __all__ = [
     "MarketplacePluginModel",
     "PluginVersionModel",
     "PluginReviewModel",
+    "MarketplaceSkillModel",
 ]
