@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Body
@@ -19,8 +20,9 @@ from src.infrastructure.security_jwt import get_current_user
 from src.infrastructure.db.models.user import UserModel
 from src.infrastructure.db.session import get_session_ctx
 from src.infrastructure.db.models.device import DeviceModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from datetime import datetime, timezone
+from src.infrastructure.routes._deps import check_device_owner as _check_device_owner
 from src.infrastructure.web import get_device_registry, get_speaker
 
 logger = get_logger(__name__)
@@ -170,11 +172,9 @@ async def _create_device(body: CreateDeviceRequest) -> dict:
     if body.mcp_servers:
         config["mcp_servers"] = body.mcp_servers
 
-    try:
-        await repo.upsert_device(body.mac, config)
-    except Exception as e:
-        logger.error(f"[API] 创建设备失败: {e}", exc_info=True)
-        return {"code": 1, "message": f"创建设备失败: {e}", "data": None}
+    await repo.upsert_device(body.mac, config)
+
+    logger.info(f"[API] 新设备已创建: MAC={body.mac}, name={body.name}")
 
     logger.info(f"[API] 新设备已创建: MAC={body.mac}, name={body.name}")
 
@@ -339,52 +339,48 @@ async def _device_action(device_id: str, action: str, text: str) -> dict:
         if not session or not hasattr(session, "run_pipeline"):
             logger.error(f"[ACTION] session 不可用: session={session}, has_run={hasattr(session, 'run_pipeline') if session else 'N/A'}")
             return {"code": 1, "message": "设备会话不可用", "data": None}
-        try:
-            mem = getattr(session, "conversation_memory", None)
+        mem = getattr(session, "conversation_memory", None)
+        if mem:
+            await mem.ensure_loaded()
+        import time as _time
+        pre_time = _time.time()  # 用时间戳而非消息计数（避免 max 裁剪导致计数不变）
+        logger.info(f"[ACTION] chat 开始, pre_time={pre_time:.3f}, mem={'有' if mem else '无'}")
+
+        # 非阻塞启动 Pipeline（LLM + TTS + 播放在后台运行）
+        pipeline_task = asyncio.create_task(session.run_pipeline(text))
+        _bg_tasks.add(pipeline_task)
+        pipeline_task.add_done_callback(_bg_tasks.discard)
+        logger.info("[ACTION] Pipeline 后台任务已创建")
+
+        # 轮询等待 LLM 回复写入 memory（LLM 先于 TTS 完成，提前返回文本）
+        reply_text = ""
+        for _ in range(100):  # 100 × 0.3s = 30s 上限
+            await asyncio.sleep(0.3)
             if mem:
-                await mem.ensure_loaded()
-            import time as _time
-            pre_time = _time.time()  # 用时间戳而非消息计数（避免 max 裁剪导致计数不变）
-            logger.info(f"[ACTION] chat 开始, pre_time={pre_time:.3f}, mem={'有' if mem else '无'}")
-
-            # 非阻塞启动 Pipeline（LLM + TTS + 播放在后台运行）
-            pipeline_task = asyncio.create_task(session.run_pipeline(text))
-            _bg_tasks.add(pipeline_task)
-            pipeline_task.add_done_callback(_bg_tasks.discard)
-            logger.info("[ACTION] Pipeline 后台任务已创建")
-
-            # 轮询等待 LLM 回复写入 memory（LLM 先于 TTS 完成，提前返回文本）
-            reply_text = ""
-            for _ in range(100):  # 100 × 0.3s = 30s 上限
-                await asyncio.sleep(0.3)
+                # 用时间戳检测新消息（不受 max_messages 裁剪影响）
+                for m in reversed(mem.messages):
+                    if m.get("role") == "assistant" and m.get("timestamp", 0) >= pre_time:
+                        reply_text = m.get("content", "")
+                        break
+                if reply_text:
+                    break
+            # Pipeline 已结束（成功或失败）且无新回复
+            if pipeline_task.done():
                 if mem:
-                    # 用时间戳检测新消息（不受 max_messages 裁剪影响）
                     for m in reversed(mem.messages):
                         if m.get("role") == "assistant" and m.get("timestamp", 0) >= pre_time:
                             reply_text = m.get("content", "")
                             break
-                    if reply_text:
-                        break
-                # Pipeline 已结束（成功或失败）且无新回复
-                if pipeline_task.done():
-                    if mem:
-                        for m in reversed(mem.messages):
-                            if m.get("role") == "assistant" and m.get("timestamp", 0) >= pre_time:
-                                reply_text = m.get("content", "")
-                                break
-                    break
+                break
 
-            if reply_text:
-                logger.info(f"[ACTION] chat 成功, reply={reply_text[:50]}")
-                return {"code": 0, "message": reply_text, "data": {"reply": reply_text}}
-            if pipeline_task.done() and pipeline_task.exception():
-                logger.error(f"[ACTION] Pipeline 异常: {pipeline_task.exception()}")
-                return {"code": 1, "message": f"对话执行失败: {pipeline_task.exception()}", "data": None}
-            logger.info("[ACTION] 30s 超时，未检测到 LLM 回复")
-            return {"code": 0, "message": "已发送", "data": {"reply": ""}}
-        except Exception as e:
-            logger.error(f"[ACTION] chat action 异常: {e}", exc_info=True)
-            return {"code": 1, "message": f"对话执行失败: {e}", "data": None}
+        if reply_text:
+            logger.info(f"[ACTION] chat 成功, reply={reply_text[:50]}")
+            return {"code": 0, "message": reply_text, "data": {"reply": reply_text}}
+        if pipeline_task.done() and pipeline_task.exception():
+            logger.error(f"[ACTION] Pipeline 异常: {pipeline_task.exception()}")
+            return {"code": 1, "message": f"对话执行失败: {pipeline_task.exception()}", "data": None}
+        logger.info("[ACTION] 30s 超时，未检测到 LLM 回复")
+        return {"code": 0, "message": "已发送", "data": {"reply": ""}}
 
     # 纯功能动作：调用设备会话的工具管理器（插件权限/配置自动生效）
     if action == "music":
@@ -408,22 +404,6 @@ async def _device_action(device_id: str, action: str, text: str) -> dict:
     if speaker and result:
         await speaker.speak(device_id, str(result), need_wakeup=False)
     return {"code": 0, "message": "执行完成", "data": None}
-
-
-async def _check_device_owner(device_id: str, user: UserModel) -> bool:
-    from sqlalchemy import or_
-    async with get_session_ctx() as session:
-        result = await session.execute(
-            select(DeviceModel).where(
-                or_(
-                    DeviceModel.device_id == device_id,
-                    DeviceModel.mac_address == device_id,
-                    DeviceModel.device_key == device_id,
-                ),
-                DeviceModel.user_id == user.id,
-            )
-        )
-        return result.scalar_one_or_none() is not None
 
 
 # ============================================================
@@ -512,11 +492,22 @@ async def api_bind_device(device_id: str, body: BindRequest, user: UserModel = D
         if device_count >= user.max_devices:
             raise HTTPException(400, f"Device limit reached ({user.max_devices})")
 
-        device.user_id = user.id
-        device.bound_at = datetime.now(timezone.utc).timestamp()
-        device.bind_code = None
-        device.bind_code_expires = None
-        session.add(device)
+        # 原子占用设备：仅当 user_id 仍为空时更新，防止并发绑定的 TOCTOU 竞态双绑
+        result = await session.execute(
+            update(DeviceModel)
+            .where(
+                DeviceModel.device_id == body.device_id,
+                DeviceModel.user_id.is_(None),
+            )
+            .values(
+                user_id=user.id,
+                bound_at=datetime.now(timezone.utc).timestamp(),
+                bind_code=None,
+                bind_code_expires=None,
+            )
+        )
+        if result.rowcount != 1:
+            raise HTTPException(400, "Device already bound to another user")
 
     return {"code": 0, "message": "Device bound successfully"}
 
@@ -543,15 +534,27 @@ async def api_bind_by_code(body: BindByCodeRequest, user: UserModel = Depends(ge
         if device_count >= user.max_devices:
             raise HTTPException(400, f"Device limit reached ({user.max_devices})")
 
-        device.user_id = user.id
-        device.bind_code = "BOUND"
-        device.bind_code_expires = None
-        import secrets
-        device.device_key = "bound_" + secrets.token_hex(8)
+        # 原子占用设备：仅当 user_id 仍为空时更新，防止并发绑定的 TOCTOU 竞态双绑。
+        # 绑定成功即清空 bind_code（一次性使用），避免残留被复用
+        bind_values = {
+            "user_id": user.id,
+            "bind_code": None,
+            "bind_code_expires": None,
+            "device_key": "bound_" + secrets.token_hex(8),
+        }
         # 绑定时可指定设备名称
         if body.name:
-            device.name = body.name
-        session.add(device)
+            bind_values["name"] = body.name
+        result = await session.execute(
+            update(DeviceModel)
+            .where(
+                DeviceModel.device_id == device.device_id,
+                DeviceModel.user_id.is_(None),
+            )
+            .values(**bind_values)
+        )
+        if result.rowcount != 1:
+            raise HTTPException(400, "Device already bound to another user")
 
     return {"code": 0, "message": "Device bound successfully", "device_id": device.device_id}
 
@@ -571,6 +574,9 @@ async def api_unbind_device(device_id: str, user: UserModel = Depends(get_curren
             raise HTTPException(404, "Device not found or not yours")
         device.user_id = None
         device.bound_at = None
+        # 解绑同时清空绑定码，避免残留的绑定码/哨兵被复用
+        device.bind_code = None
+        device.bind_code_expires = None
         session.add(device)
     return {"code": 0, "message": "Device unbound"}
 
@@ -738,41 +744,38 @@ async def api_set_display_config(mac: str, body: dict = Body(...), user: UserMod
 @router.get("/tools")
 async def list_tools(request: Request, user: UserModel = Depends(get_current_user)):
     """列出所有可用工具的名称和描述（含 MCP）"""
-    try:
-        from src.use_cases.tools_system import get_openai_tools_schema
-        all_tools = list(get_openai_tools_schema())
-        seen = set()
-        result = []
+    from src.use_cases.tools_system import get_openai_tools_schema
+    all_tools = list(get_openai_tools_schema())
+    seen = set()
+    result = []
 
-        # 全局内置工具
-        for t in all_tools:
-            fn = t.get("function", {})
-            name = fn.get("name", "")
-            if name and name not in seen:
-                seen.add(name)
-                result.append({"type": "global", "name": name, "description": fn.get("description", ""), "parameters": fn.get("parameters", {})})
+    # 全局内置工具
+    for t in all_tools:
+        fn = t.get("function", {})
+        name = fn.get("name", "")
+        if name and name not in seen:
+            seen.add(name)
+            result.append({"type": "global", "name": name, "description": fn.get("description", ""), "parameters": fn.get("parameters", {})})
 
-        # MCP 工具：从 app.state 获取
-        for _attempt in range(2):
-            tm = getattr(request.app.state, 'tool_manager', None)
-            if (_attempt == 1 or not tm):
-                from src.infrastructure.web import get_app as _gapp
-                _a = _gapp()
-                if _a:
-                    tm = getattr(_a.state, 'tool_manager', None)
-            if tm:
-                try:
-                    mcp_schemas = getattr(tm, '_mcp_tool_schemas', {})
-                    for schema_list in mcp_schemas.values():
-                        for t in schema_list:
-                            name = t.get("function", {}).get("name", "")
-                            if name and name not in seen:
-                                seen.add(name)
-                                result.append({"type": "mcp", "name": name, "description": t.get("function", {}).get("description", ""), "parameters": t.get("function", {}).get("parameters", {})})
-                except Exception as e:
-                    logger.debug(f"[Tools] 收集 MCP 工具列表异常: {e}")
-            break
+    # MCP 工具：从 app.state 获取
+    for _attempt in range(2):
+        tm = getattr(request.app.state, 'tool_manager', None)
+        if (_attempt == 1 or not tm):
+            from src.infrastructure.web import get_app as _gapp
+            _a = _gapp()
+            if _a:
+                tm = getattr(_a.state, 'tool_manager', None)
+        if tm:
+            try:
+                mcp_schemas = getattr(tm, '_mcp_tool_schemas', {})
+                for schema_list in mcp_schemas.values():
+                    for t in schema_list:
+                        name = t.get("function", {}).get("name", "")
+                        if name and name not in seen:
+                            seen.add(name)
+                            result.append({"type": "mcp", "name": name, "description": t.get("function", {}).get("description", ""), "parameters": t.get("function", {}).get("parameters", {})})
+            except Exception as e:
+                logger.debug(f"[Tools] 收集 MCP 工具列表异常: {e}")
+        break
 
-        return {"code": 0, "message": "ok", "data": result}
-    except Exception as e:
-        return {"code": 1, "message": str(e), "data": None}
+    return {"code": 0, "message": "ok", "data": result}

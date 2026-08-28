@@ -157,13 +157,13 @@ class TestSessionInit:
         assert s.session_id  # 自动生成 8 字符
         assert len(s.session_id) == 8
         assert s.runtime is not None
-        assert s.queues is not None
-        assert s.splitter is not None
         assert s.audio_processor is not None
         assert s.cancel_event is not None
         assert s._current_pipeline is None
-        # _precomputed_skill_catalog 属性存在且默认为 None
-        assert s._precomputed_skill_catalog is None
+        # 播放完成上报期望标志：仅在 pipeline 下发音频后为 True
+        assert s._pending_out_audio_over is False
+        # _precomputed_skill_catalog 由 ws_session_handler 外部注入，构造时不预创建
+        assert getattr(s, "_precomputed_skill_catalog", None) is None
         assert s._tts_playing is False
         assert s._device_buffer == 10240
         assert s._closed is False
@@ -195,12 +195,13 @@ class TestSessionInit:
                 tool_mgr=None,
                 memory_repository=None,  # 显式传入 None
             )
-        assert isinstance(s.conversation_memory._repository, SqlShortTermMemoryRepository)
+        # 未注入时 repository 为 None（由接口层显式提供 SqlShortTermMemoryRepository）
+        assert s.conversation_memory._repository is None
 
     def test_precomputed_skill_catalog_attribute(self):
-        # _precomputed_skill_catalog 属性可读写
+        # _precomputed_skill_catalog 属性可读写（由 ws_session_handler 外部注入）
         s = make_session()
-        assert s._precomputed_skill_catalog is None
+        assert getattr(s, "_precomputed_skill_catalog", None) is None
         s._precomputed_skill_catalog = "PRECOMPUTED"
         assert s._precomputed_skill_catalog == "PRECOMPUTED"
 
@@ -598,17 +599,16 @@ class TestSessionRunPipeline:
         # _current_pipeline 在 finally 中被清空
         assert s._current_pipeline is None
 
-    async def test_run_pipeline_passes_precomputed_catalog(self):
-        # 验证 _precomputed_skill_catalog 被传给 pipeline
+    async def test_run_pipeline_renders_catalog_per_query(self):
+        # Pipeline 现按查询实时渲染 Skill 目录（带缓存），Session 不再透传预渲染目录
         s = make_session()
         s._precomputed_skill_catalog = "MY_CATALOG"
         mock_pipeline = MagicMock()
         mock_pipeline.run = AsyncMock(return_value=MagicMock(stop_pipeline=False))
         with patch("src.use_cases.session.ConversationPipeline", return_value=mock_pipeline) as mock_ctor:
             await s.run_pipeline("hi")
-        # 检查构造参数
         _, kwargs = mock_ctor.call_args
-        assert kwargs.get("precomputed_skill_catalog") == "MY_CATALOG"
+        assert "precomputed_skill_catalog" not in kwargs
 
     async def test_run_pipeline_exception_returns_none(self):
         # pipeline.run 抛异常时返回 None
@@ -655,19 +655,20 @@ class TestSessionInterrupt:
         await s.interrupt()
         assert s.cancel_event.is_set()
 
-    async def test_interrupt_clears_queues(self):
+    async def test_interrupt_clears_pending_over_flag(self):
         s = make_session()
-        await s.queues.text.put(("a", "b"))
-        await s.queues.audio.put(("a", "b", "c"))
+        s._pending_out_audio_over = True
         await s.interrupt()
-        assert s.queues.text.empty()
-        assert s.queues.audio.empty()
+        assert s._pending_out_audio_over is False
 
-    async def test_interrupt_resets_splitter(self):
+    async def test_interrupt_sends_sid_tts_end_frame(self):
+        # 打断时的结束帧必须与 pipeline 音频同一会话（SID_TTS="0010"），
+        # 否则设备端正在播放的会话收不到结束帧（历史 bug 曾发 "0001"）
+        from src.infrastructure.config import SID_TTS
         s = make_session()
-        s.splitter.feed("你好世界")
-        await s.interrupt()
-        assert s.splitter.buffer == ""
+        with patch.object(s.voice_generator, "make_end_frame", return_value=b"") as mf:
+            await s.interrupt()
+            mf.assert_called_with(SID_TTS)
 
     async def test_interrupt_resets_runtime(self):
         s = make_session()
@@ -1042,13 +1043,11 @@ class TestSessionClose:
         # close() 内部 stop_asr() 会将 _watchdog_task 置 None 并 cancel
         assert saved_task.cancelled() or saved_task.done()
 
-    async def test_close_clears_queues(self):
+    async def test_close_clears_pending_over_flag(self):
         s = make_session()
-        await s.queues.text.put(("a", "b"))
-        await s.queues.audio.put(("a", "b", "c"))
+        s._pending_out_audio_over = True
         await s.close()
-        assert s.queues.text.empty()
-        assert s.queues.audio.empty()
+        assert s._pending_out_audio_over is False
 
     async def test_close_resets_runtime(self):
         s = make_session()
@@ -1136,6 +1135,8 @@ def make_mock_asr_client(binary_protocol=False, enable_pool=False):
     client.get_pool = MagicMock(return_value=None)
     client.take_pre_ws = MagicMock(return_value=(None, None))
     client.pre_connect = AsyncMock(return_value=None)
+    # 传统（非插件）ASR 网关
+    client.is_plugin = False
     return client
 
 

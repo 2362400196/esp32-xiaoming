@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import struct
@@ -609,8 +610,10 @@ class TTSSession:
 
 class VolcEngineTTSGateway(TTSRepository):
 
-    _pool: VolcEngineTTSConnectionPool | None = None
-    _pool_initialized = False
+    # 按配置键隔离的连接池字典（避免跨设备串用其他设备的 api_key 连接池）
+    _pools: dict[str, VolcEngineTTSConnectionPool] = {}
+    # 已触发过 warm_up 的池键集合
+    _pool_warmed: set[str] = set()
 
     def __init__(self, config: dict | None = None):
         settings = get_settings()
@@ -676,7 +679,17 @@ class VolcEngineTTSGateway(TTSRepository):
         if not config.get("api_key"):
             return None
 
-        if cls._pool is None or cls._pool.is_closed:
+        # 按当前配置生成稳定的池键：api_key 做短 hash 避免内存中明文暴露
+        # 不同设备（api_key/resource_id/voice_type 不同）各自持有独立连接池
+        config_key = (
+            f"{config.get('api_key', '')}:"
+            f"{config.get('resource_id', 'seed-tts-2.0')}:"
+            f"{config.get('voice_type', 'BV001_streaming')}"
+        )
+        pool_key = hashlib.md5(config_key.encode()).hexdigest()
+
+        pool = cls._pools.get(pool_key)
+        if pool is None or pool.is_closed:
             # 连接池尺寸参数优先从 config（设备级）读取，回退全局
             pool_config = {
                 "max_size": config.get("pool_max_size") or tts_config.pool_max_size,
@@ -685,7 +698,7 @@ class VolcEngineTTSGateway(TTSRepository):
                 "idle_timeout": config.get("pool_idle_timeout") or tts_config.pool_idle_timeout,
                 "connection_timeout": config.get("pool_connection_timeout") or tts_config.pool_connection_timeout,
             }
-            cls._pool = VolcEngineTTSConnectionPool(
+            pool = VolcEngineTTSConnectionPool(
                 api_key=config.get("api_key", ""),
                 resource_id=config.get("resource_id", "seed-tts-2.0"),
                 voice_type=config.get("voice_type", "BV001_streaming"),
@@ -694,20 +707,22 @@ class VolcEngineTTSGateway(TTSRepository):
                 pitch_ratio=config.get("pitch_ratio", 1.0),
                 **pool_config,
             )
-            cls._pool_initialized = False
+            cls._pools[pool_key] = pool
+            cls._pool_warmed.discard(pool_key)
 
-        if not cls._pool_initialized:
-            asyncio.create_task(cls._pool.warm_up())
-            cls._pool_initialized = True
+        if pool_key not in cls._pool_warmed:
+            asyncio.create_task(pool.warm_up())
+            cls._pool_warmed.add(pool_key)
 
-        return cls._pool
+        return pool
 
     @classmethod
     async def close_pool(cls) -> None:
-        if cls._pool and not cls._pool.is_closed:
-            await cls._pool.close()
-            cls._pool = None
-            cls._pool_initialized = False
+        for pool in list(cls._pools.values()):
+            if not pool.is_closed:
+                await pool.close()
+        cls._pools.clear()
+        cls._pool_warmed.clear()
 
     async def _create_connection(self):
         headers = {

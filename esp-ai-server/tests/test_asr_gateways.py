@@ -138,12 +138,12 @@ def patched_asr():
 
 @pytest.fixture(autouse=True)
 def reset_asr_pool():
-    """重置 VolcEngineASRGateway 类级连接池"""
-    VolcEngineASRGateway._pool = None
-    VolcEngineASRGateway._pool_initialized = False
+    """重置 VolcEngineASRGateway 类级连接池字典"""
+    VolcEngineASRGateway._pools.clear()
+    VolcEngineASRGateway._pool_warmed.clear()
     yield
-    VolcEngineASRGateway._pool = None
-    VolcEngineASRGateway._pool_initialized = False
+    VolcEngineASRGateway._pools.clear()
+    VolcEngineASRGateway._pool_warmed.clear()
 
 
 # ─── BaseASRGateway 测试 ───────────────────────────────────
@@ -481,6 +481,16 @@ class TestVolcEngineASRGateway:
 
     async def test_close_pool_no_pool(self, patched_asr):
         await VolcEngineASRGateway.close_pool()  # 不应报错
+
+    async def test_get_pool_isolated_per_config(self, patched_asr):
+        """不同设备配置（api_key 不同）应持有独立连接池，避免密钥串用"""
+        patched_asr["settings"].asr.enable_pool = True
+        with patch("src.interfaces.asr.volcengine.asyncio.create_task",
+                   new=MagicMock(side_effect=lambda coro: coro.close() if hasattr(coro, "close") else None)):
+            pool_a = VolcEngineASRGateway.get_pool(config={"api_key": "key-a"})
+            pool_b = VolcEngineASRGateway.get_pool(config={"api_key": "key-b"})
+        assert pool_a is not pool_b
+        assert len(VolcEngineASRGateway._pools) == 2
 
 
 # ─── VolcEngineASRConnectionPool 测试 ──────────────────────

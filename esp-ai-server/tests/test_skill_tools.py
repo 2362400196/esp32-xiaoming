@@ -126,11 +126,13 @@ class TestListSkills:
             result = list_skills(tool_manager=None)
         assert "当前没有可用的技能" in result
 
-    def test_list_uses_device_id_from_tool_manager(self):
-        """调用 get_catalog 时传入 device_id"""
+    def test_list_uses_device_key_from_tool_manager(self):
+        """调用 get_catalog 时传入 device_key（来自 tool_manager.user_config.key）"""
         tm = MagicMock()
-        tm.device_id = "dev_123"
-        tm.user_config = None
+        uc = MagicMock()
+        uc.key = "dev_123"
+        uc.disabled_skills = None
+        tm.user_config = uc
 
         with patch.object(skill_system, "get_catalog", return_value=[]) as mock_get:
             list_skills(tool_manager=tm)

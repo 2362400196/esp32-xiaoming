@@ -17,7 +17,11 @@ from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
+from src.infrastructure.db.base import Base
 from src.use_cases.growth.models import (
     ConversationAnalysis,
     DiaryEntry,
@@ -381,7 +385,7 @@ class TestUserProfileService:
     def test_extract_name_patterns(self, tmp_path):
         svc = UserProfileService(str(tmp_path))
         assert svc._extract_name("我叫李四") == "李四"
-        assert svc._extract_name("名字是王五") == "王五"
+        assert svc._extract_name("叫我小明就好") == "小明"
 
     def test_extract_date(self, tmp_path):
         svc = UserProfileService(str(tmp_path))
@@ -400,115 +404,118 @@ class TestUserProfileService:
 
 
 class TestDiaryService:
-    """DiaryService 日记服务"""
+    """DiaryService 日记服务（DB 持久化，使用内存 SQLite）"""
 
-    def test_get_diary_dir(self, tmp_path):
+    @pytest_asyncio.fixture
+    async def diary_db(self, monkeypatch):
+        """内存 SQLite（:memory: + StaticPool），覆盖全局异步 session factory
+
+        参考 tests/test_growth_emo_skill_repos.py 的夹具模式。
+        """
+        engine = create_async_engine(
+            "sqlite+aiosqlite:///:memory:",
+            echo=False,
+            poolclass=StaticPool,
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async_factory = async_sessionmaker(
+            bind=engine, class_=AsyncSession, expire_on_commit=False, autoflush=False,
+        )
+        import src.infrastructure.db.engine as engine_mod
+        monkeypatch.setattr(engine_mod, "_async_engine", engine)
+        monkeypatch.setattr(engine_mod, "_async_session_factory", async_factory)
+        yield
+        await engine.dispose()
+
+    async def _seed_entry(self, device_id: str, date: str, content: str):
+        """直接通过仓储预置一条日记"""
+        from src.infrastructure.db.repositories.growth_repositories import DiaryRepository
+        await DiaryRepository().upsert_entry(device_id, date, content)
+
+    async def test_device_isolation(self, tmp_path, diary_db):
+        """日记按设备隔离（原 test_get_diary_dir：按设备分目录存储）"""
         ds = DiaryService(str(tmp_path))
-        d = ds._get_diary_dir("d1")
-        assert "d1" in d
-        assert "diary" in d
-        assert "entries" in d
+        today = datetime.now().strftime("%Y-%m-%d")
+        await self._seed_entry("d1", today, "d1的日记")
+        assert await ds.get_today_entry("d1") == "d1的日记"
+        assert await ds.get_today_entry("d2") is None
 
-    async def test_get_today_entry_none(self, tmp_path):
+    async def test_get_today_entry_none(self, tmp_path, diary_db):
         ds = DiaryService(str(tmp_path))
         result = await ds.get_today_entry("d1")
         assert result is None
 
-    async def test_get_today_entry_exists(self, tmp_path):
+    async def test_get_today_entry_exists(self, tmp_path, diary_db):
         ds = DiaryService(str(tmp_path))
-        diary_dir = tmp_path / "devices" / "d1" / "skills" / "diary" / "entries"
-        diary_dir.mkdir(parents=True)
         today = datetime.now().strftime("%Y-%m-%d")
-        (diary_dir / f"{today}.md").write_text("今天的日记", encoding="utf-8")
+        await self._seed_entry("d1", today, "今天的日记")
         result = await ds.get_today_entry("d1")
         assert result == "今天的日记"
 
-    async def test_ensure_diary_skill_creates(self, tmp_path):
-        ds = DiaryService(str(tmp_path))
-        await ds.ensure_diary_skill("d1")
-        assert os.path.exists(ds._get_skill_path("d1"))
-
-    async def test_ensure_diary_skill_exists(self, tmp_path):
-        ds = DiaryService(str(tmp_path))
-        skill_path = ds._get_skill_path("d1")
-        os.makedirs(os.path.dirname(skill_path), exist_ok=True)
-        with open(skill_path, "w", encoding="utf-8") as f:
-            f.write("existing")
-        await ds.ensure_diary_skill("d1")
-        with open(skill_path, "r", encoding="utf-8") as f:
-            assert f.read() == "existing"
-
-    async def test_write_daily_entry_no_llm(self, tmp_path):
+    async def test_write_daily_entry_no_llm(self, tmp_path, diary_db):
         ds = DiaryService(str(tmp_path))
         result = await ds.write_daily_entry("d1", "profile", "convs", "timeline", "understanding")
         assert result is None
 
-    async def test_write_daily_entry_with_llm(self, tmp_path):
+    async def test_write_daily_entry_with_llm(self, tmp_path, diary_db):
         llm = AsyncMock(return_value="今天很开心的日记内容")
         ds = DiaryService(str(tmp_path), llm_call_func=llm)
         result = await ds.write_daily_entry("d1", "", "convs", "timeline", "")
         assert result == "今天很开心的日记内容"
         today = datetime.now().strftime("%Y-%m-%d")
-        diary_file = tmp_path / "devices" / "d1" / "skills" / "diary" / "entries" / f"{today}.md"
-        assert diary_file.exists()
+        content = await ds.get_diary_content("d1", today)
+        assert content == "今天很开心的日记内容"
 
-    async def test_write_daily_entry_continuation(self, tmp_path):
+    async def test_write_daily_entry_continuation(self, tmp_path, diary_db):
         llm = AsyncMock(return_value="追加的内容")
         ds = DiaryService(str(tmp_path), llm_call_func=llm)
-        diary_dir = tmp_path / "devices" / "d1" / "skills" / "diary" / "entries"
-        diary_dir.mkdir(parents=True)
         today = datetime.now().strftime("%Y-%m-%d")
-        (diary_dir / f"{today}.md").write_text("已有内容", encoding="utf-8")
+        await self._seed_entry("d1", today, "已有内容")
         result = await ds.write_daily_entry("d1", "", "convs", "timeline", "", is_continuation=True)
         assert result == "追加的内容"
-        content = (diary_dir / f"{today}.md").read_text(encoding="utf-8")
+        content = await ds.get_diary_content("d1", today)
         assert "已有内容" in content
         assert "追加的内容" in content
 
-    async def test_write_daily_entry_llm_fails(self, tmp_path):
+    async def test_write_daily_entry_llm_fails(self, tmp_path, diary_db):
         llm = AsyncMock(side_effect=Exception("LLM error"))
         ds = DiaryService(str(tmp_path), llm_call_func=llm)
         result = await ds.write_daily_entry("d1", "", "convs", "timeline", "")
         assert result is None
 
-    async def test_get_recent_diaries_empty(self, tmp_path):
+    async def test_get_recent_diaries_empty(self, tmp_path, diary_db):
         ds = DiaryService(str(tmp_path))
         result = await ds._get_recent_diaries("d1")
         assert result == "还没有日记"
 
-    async def test_get_recent_diaries_with_entries(self, tmp_path):
+    async def test_get_recent_diaries_with_entries(self, tmp_path, diary_db):
         ds = DiaryService(str(tmp_path))
-        diary_dir = tmp_path / "devices" / "d1" / "skills" / "diary" / "entries"
-        diary_dir.mkdir(parents=True)
-        (diary_dir / "2026-01-01.md").write_text("日记1", encoding="utf-8")
-        (diary_dir / "2026-01-02.md").write_text("日记2", encoding="utf-8")
+        await self._seed_entry("d1", "2026-01-01", "日记1")
+        await self._seed_entry("d1", "2026-01-02", "日记2")
         result = await ds._get_recent_diaries("d1", limit=2)
         assert "日记1" in result or "日记2" in result
 
-    async def test_get_diary_content(self, tmp_path):
+    async def test_get_diary_content(self, tmp_path, diary_db):
         ds = DiaryService(str(tmp_path))
-        diary_dir = tmp_path / "devices" / "d1" / "skills" / "diary" / "entries"
-        diary_dir.mkdir(parents=True)
-        (diary_dir / "2026-01-01.md").write_text("内容", encoding="utf-8")
+        await self._seed_entry("d1", "2026-01-01", "内容")
         result = await ds.get_diary_content("d1", "2026-01-01")
         assert result == "内容"
 
-    async def test_get_diary_content_not_found(self, tmp_path):
+    async def test_get_diary_content_not_found(self, tmp_path, diary_db):
         ds = DiaryService(str(tmp_path))
         result = await ds.get_diary_content("d1", "2026-01-01")
         assert result is None
 
-    async def test_get_all_entries_empty(self, tmp_path):
+    async def test_get_all_entries_empty(self, tmp_path, diary_db):
         ds = DiaryService(str(tmp_path))
         entries = await ds.get_all_entries("d1")
         assert entries == []
 
-    async def test_get_all_entries_with_data(self, tmp_path):
+    async def test_get_all_entries_with_data(self, tmp_path, diary_db):
         ds = DiaryService(str(tmp_path))
-        diary_dir = tmp_path / "devices" / "d1" / "skills" / "diary" / "entries"
-        diary_dir.mkdir(parents=True)
-        (diary_dir / "2026-01-01.md").write_text("a", encoding="utf-8")
-        (diary_dir / "2026-01-02.md").write_text("b", encoding="utf-8")
+        await self._seed_entry("d1", "2026-01-01", "a")
+        await self._seed_entry("d1", "2026-01-02", "b")
         entries = await ds.get_all_entries("d1")
         assert len(entries) == 2
 

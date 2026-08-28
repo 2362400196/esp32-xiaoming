@@ -4,12 +4,14 @@ alarm_manager.py - 闹钟和提醒管理器（DB 持久化）
 from __future__ import annotations
 
 import asyncio
+import calendar
 import json
 import os
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from src.infrastructure.logging import get_logger
+from src.infrastructure.task_manager import background_task
 from src.infrastructure.db.repositories.growth_repositories import AlarmRepository
 from src.use_cases._plugin_helpers import http_request, play_music_url
 
@@ -53,19 +55,31 @@ class AlarmItem:
                 next_time += timedelta(days=1)
             return next_time
         elif self.repeat == "weekly":
+            # 以原触发时间的 weekday 为基准，保持周几语义：
+            # 先取今天的日期 + 原触发时刻，再对齐到原触发时间的 weekday
+            days_ahead = (self.trigger_at.weekday() - now.weekday()) % 7
             next_time = self.trigger_at.replace(
                 year=now.year, month=now.month, day=now.day
-            )
-            while next_time <= now:
+            ) + timedelta(days=days_ahead)
+            if next_time <= now:
                 next_time += timedelta(weeks=1)
             return next_time
         elif self.repeat == "monthly":
-            next_time = self.trigger_at.replace(year=now.year, month=now.month)
+            # 原始日 day=31 而目标月只有 30 天时 replace 会抛 ValueError，
+            # 这里 clamp 到该月最后一天，避免闹钟循环卡死
+            day = self.trigger_at.day
+            last_day = calendar.monthrange(now.year, now.month)[1]
+            next_time = self.trigger_at.replace(
+                year=now.year, month=now.month, day=min(day, last_day)
+            )
             if next_time <= now:
                 month = next_time.month + 1
                 year = next_time.year + (month - 1) // 12
                 month = (month - 1) % 12 + 1
-                next_time = next_time.replace(year=year, month=month)
+                last_day = calendar.monthrange(year, month)[1]
+                next_time = self.trigger_at.replace(
+                    year=year, month=month, day=min(day, last_day)
+                )
             return next_time
         return None
 
@@ -108,8 +122,9 @@ class AlarmManager:
 
     def add_alarm(self, item: AlarmItem) -> str:
         self._alarms[item.alarm_id] = item
-        # 同步写入 DB
-        asyncio.create_task(self._repo.upsert({
+        # 写入 DB：add_alarm 是同步接口（调用方未 await），无法直接 await；
+        # 通过 task_manager 包装持有引用，失败时记 ERROR 日志
+        background_task(self._repo.upsert({
             "alarm_id": item.alarm_id,
             "device_key": item.device_key,
             "alarm_type": item.alarm_type,
@@ -117,7 +132,7 @@ class AlarmManager:
             "text": item.text,
             "repeat": item.repeat,
             "created_at": item.created_at.timestamp(),
-        }))
+        }), name="alarm_db_upsert")
         logger.info(
             f"[Alarm] 已添加{alarm_type_text(item.alarm_type)}: "
             f"{item.alarm_id}, 触发时间={item.trigger_at}, 重复={item.repeat}"
@@ -127,7 +142,8 @@ class AlarmManager:
     def remove_alarm(self, alarm_id: str) -> bool:
         if alarm_id in self._alarms:
             del self._alarms[alarm_id]
-            asyncio.create_task(self._repo.delete(alarm_id))
+            # 从 DB 删除：同 add_alarm，通过 task_manager 包装，失败记 ERROR 日志
+            background_task(self._repo.delete(alarm_id), name="alarm_db_delete")
             logger.info(f"[Alarm] 已移除: {alarm_id}")
             return True
         return False
@@ -152,7 +168,7 @@ class AlarmManager:
         """启动后台检查协程"""
         if self._task is not None:
             return
-        self._task = asyncio.create_task(self._check_loop())
+        self._task = background_task(self._check_loop(), name="alarm_check_loop")
         logger.info("[Alarm] 后台检查已启动 (task=%s)", hex(id(self._task)))
 
     async def stop(self):
@@ -191,8 +207,8 @@ class AlarmManager:
             next_time = item.next_trigger()
             if next_time:
                 item.trigger_at = next_time
-                # 同步更新 DB 中的触发时间
-                asyncio.create_task(self._repo.upsert({
+                # 直接 await 更新 DB 中的触发时间（持久化失败由 _check_loop 记 ERROR 日志）
+                await self._repo.upsert({
                     "alarm_id": item.alarm_id,
                     "device_key": item.device_key,
                     "alarm_type": item.alarm_type,
@@ -200,14 +216,14 @@ class AlarmManager:
                     "text": item.text,
                     "repeat": item.repeat,
                     "created_at": item.created_at.timestamp(),
-                }))
+                })
                 logger.info(
                     f"[Alarm] {item.alarm_id} 下次触发: {next_time}"
                 )
             else:
                 del self._alarms[item.alarm_id]
-                # 同步从 DB 删除已过期的单次闹钟
-                asyncio.create_task(self._repo.delete(item.alarm_id))
+                # 直接 await 从 DB 删除已过期的单次闹钟
+                await self._repo.delete(item.alarm_id)
 
     async def _trigger(self, item: AlarmItem):
         """触发闹钟或提醒（语音 + 微信双通道）"""

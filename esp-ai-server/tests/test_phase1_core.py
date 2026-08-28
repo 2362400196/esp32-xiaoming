@@ -208,9 +208,10 @@ class TestBackpressureQueue:
 
 
 class TestTextQueue:
-    def test_is_drop_oldest(self):
+    def test_is_block(self):
+        # 08a5b4a 起有意改为 block，保证长回复不丢句
         q = TextQueue(maxsize=5)
-        assert q._on_full == "drop_oldest"
+        assert q._on_full == "block"
         assert q._name == "text_queue"
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import struct
 import time
@@ -104,8 +105,10 @@ class VolcEngineASRConnectionPool(ConnectionPoolBase):
 
 class VolcEngineASRGateway(BaseASRGateway):
 
-    _pool: VolcEngineASRConnectionPool | None = None
-    _pool_initialized = False
+    # 按配置键隔离的连接池字典（避免跨设备串用其他设备的 api_key 连接池）
+    _pools: dict[str, VolcEngineASRConnectionPool] = {}
+    # 已触发过 warm_up 的池键集合
+    _pool_warmed: set[str] = set()
     binary_protocol: bool = True
 
     def __init__(self, config: dict = None):
@@ -135,7 +138,17 @@ class VolcEngineASRGateway(BaseASRGateway):
         if not config.get("api_key"):
             return None
 
-        if cls._pool is None or cls._pool.is_closed:
+        # 按当前配置生成稳定的池键：api_key 做短 hash 避免内存中明文暴露
+        # 不同设备（api_key/resource_id/model_name 不同）各自持有独立连接池
+        config_key = (
+            f"{config.get('api_key', '')}:"
+            f"{config.get('resource_id', 'volc.bigasr.sauc.duration')}:"
+            f"{config.get('model_name', 'bigmodel')}"
+        )
+        pool_key = hashlib.md5(config_key.encode()).hexdigest()
+
+        pool = cls._pools.get(pool_key)
+        if pool is None or pool.is_closed:
             # 连接池尺寸参数优先从 config（设备级）读取，回退全局
             pool_config = {
                 "max_size": config.get("pool_max_size") or settings.asr.pool_max_size,
@@ -149,21 +162,23 @@ class VolcEngineASRGateway(BaseASRGateway):
                 "resource_id": config.get("resource_id", "volc.bigasr.sauc.duration"),
                 "model_name": config.get("model_name", "bigmodel"),
             })
-            cls._pool = VolcEngineASRConnectionPool(**pool_config)
-            cls._pool_initialized = False
+            pool = VolcEngineASRConnectionPool(**pool_config)
+            cls._pools[pool_key] = pool
+            cls._pool_warmed.discard(pool_key)
 
-        if not cls._pool_initialized:
-            asyncio.create_task(cls._pool.warm_up())
-            cls._pool_initialized = True
+        if pool_key not in cls._pool_warmed:
+            asyncio.create_task(pool.warm_up())
+            cls._pool_warmed.add(pool_key)
 
-        return cls._pool
+        return pool
 
     @classmethod
     async def close_pool(cls) -> None:
-        if cls._pool and not cls._pool.is_closed:
-            await cls._pool.close()
-            cls._pool = None
-            cls._pool_initialized = False
+        for pool in list(cls._pools.values()):
+            if not pool.is_closed:
+                await pool.close()
+        cls._pools.clear()
+        cls._pool_warmed.clear()
 
     def _make_header(self, message_type: int, flags: int = 0) -> bytes:
         version = 0x1 << 4
@@ -379,7 +394,6 @@ class VolcEngineASRGateway(BaseASRGateway):
         if self._enable_pool and self._pre_ws_pool_wrapper:
             pool = self.get_pool({
                 "api_key": self.api_key,
-                "access_key": self.access_key,
                 "resource_id": self.resource_id,
                 "model_name": self.model_name,
                 "enable_pool": self._enable_pool,

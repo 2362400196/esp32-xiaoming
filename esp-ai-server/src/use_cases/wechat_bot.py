@@ -242,23 +242,43 @@ class WeChatBot:
         return True
 
     def _persist_token(self) -> None:
-        """持久化 token 和 base_url 到统一数据文件（原子写入）"""
+        """持久化 token 和 base_url 到统一数据文件（原子写入）
+
+        配置了 FIELD_ENCRYPTION_KEY 时 token 以 ``enc:`` 前缀的 Fernet 密文落盘，
+        读取时 decrypt 对非 ``enc:`` 值原样返回，兼容历史明文数据；
+        未配置密钥时降级为明文（临时密钥重启即失效，会导致 token 无法恢复）。
+        """
+        from src.infrastructure.crypto import decrypt, encrypt, is_configured
+
         data = _load_wechat_data()
-        data["token"] = {
-            "token": self.state.token,
-            "base_url": self.state.base_url,
-            "account_id": self.state.account_id,
-        }
+        if is_configured():
+            data["token"] = {
+                "token": encrypt(self.state.token),
+                "base_url": self.state.base_url,
+                "account_id": self.state.account_id,
+            }
+            logger.info(f"[WeChat] token 已加密持久化到 {WECHAT_DATA_FILE}")
+        else:
+            data["token"] = {
+                "token": self.state.token,
+                "base_url": self.state.base_url,
+                "account_id": self.state.account_id,
+            }
+            logger.warning(
+                "[WeChat] FIELD_ENCRYPTION_KEY 未配置，token 以明文落盘；"
+                "配置该环境变量后 token 将加密存储"
+            )
         _save_wechat_data(data)
-        logger.info(f"[WeChat] token 已持久化到 {WECHAT_DATA_FILE}")
 
     def _load_persisted_token(self) -> bool:
         """从统一数据文件加载持久化的 token"""
+        from src.infrastructure.crypto import decrypt
+
         data = _load_wechat_data()
         tok = data.get("token", {})
         if not tok.get("token"):
             return False
-        self.state.token = tok.get("token", "")
+        self.state.token = decrypt(tok.get("token", ""))
         self.state.base_url = tok.get("base_url", DEFAULT_BASE_URL)
         self.state.account_id = tok.get("account_id", "default")
         if self.state.token:

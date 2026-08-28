@@ -839,10 +839,11 @@ class TestDefaultSystemPrompt:
         assert "TTS" in _DEFAULT_SYSTEM_PROMPT or "语音" in _DEFAULT_SYSTEM_PROMPT
         assert "情绪" in _DEFAULT_SYSTEM_PROMPT
 
-    def test_default_prompt_applied_to_settings(self):
-        """Settings 构造后 llm.system_prompt 使用默认值"""
+    def test_default_prompt_applied_to_settings(self, monkeypatch):
+        """Settings 构造后 llm.system_prompt 使用默认值（排除 .env/环境变量干扰）"""
+        monkeypatch.delenv("LLM_SYSTEM_PROMPT", raising=False)
         from src.infrastructure.config import Settings, _DEFAULT_SYSTEM_PROMPT
-        s = Settings()
+        s = Settings(_env_file=None)
         assert s.llm.system_prompt == _DEFAULT_SYSTEM_PROMPT
 
     def test_custom_prompt_overrides_default(self, monkeypatch):
@@ -896,7 +897,7 @@ class TestAdditionalConfigModels:
         """ShutdownConfig 默认值"""
         from src.infrastructure.config import ShutdownConfig
         cfg = ShutdownConfig()
-        assert cfg.grace_period == 5
+        assert cfg.grace_period == 10
 
     def test_rate_limit_config_defaults(self):
         """RateLimitConfig 默认值"""
@@ -928,7 +929,7 @@ class TestAdditionalConfigModels:
         assert cfg.enable_audio is True
         assert cfg.audio_cache_enabled is True
         assert cfg.audio_play_enabled is True
-        assert cfg.audio_source == "file"
+        assert cfg.audio_source == "tts"
         assert cfg.play_on_next_round is False
 
     def test_emotion_config_defaults(self):

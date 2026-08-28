@@ -41,10 +41,10 @@ class TestGifMakerRoutes:
 
     @pytest.fixture
     def app(self):
-        from src.infrastructure.routes.emos import register_routes
+        from src.infrastructure.routes.emos import router
         from src.infrastructure.security_jwt import get_current_user
         application = FastAPI()
-        register_routes(application)
+        application.include_router(router)
         # 制作器接口走 JWT 认证；单元测试直接放行
         application.dependency_overrides[get_current_user] = lambda: MagicMock(id="u1")
         return application

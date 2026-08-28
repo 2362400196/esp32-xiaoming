@@ -18,10 +18,14 @@ from src.domain.entities import SessionState
 from src.infrastructure.logging import get_logger, trace_id_var
 from src.infrastructure.monitoring import get_metrics
 from src.use_cases.auxiliary_services import AudioProcessor, ConversationMemory
-from src.use_cases.pipeline import ConversationPipeline, PipelineConfig, SentenceSplitter
-from src.use_cases.queues import BackpressureQueues
+from src.use_cases.pipeline import ConversationPipeline, PipelineConfig
 from src.use_cases.session_fsm import SessionFSM, WSChannel
 from src.use_cases.voice_generator import VoiceGenerator
+from src.infrastructure.config import SID_TTS
+
+# 设备上行音频队列上限（包）。按 32KB/s 约等于数秒音频；超出后丢最旧，
+# 防止 ASR 消费受阻时队列无限增长。正常消费速率下队列长度为 0-1。
+AUDIO_QUEUE_MAX_SIZE = 200
 
 if TYPE_CHECKING:
     from src.interfaces.asr.base import BaseASRGateway
@@ -101,12 +105,13 @@ class Session:
 
         self.session_id = str(uuid.uuid4())[:8]
         self.runtime = SessionRuntime()
-        self.queues = BackpressureQueues()
-        self.splitter = SentenceSplitter()
         self.audio_processor = AudioProcessor()
 
         self.cancel_event = asyncio.Event()
         self._current_pipeline = None
+        # 当前是否有已下发、尚未收到 client_out_audio_over 的音频播放。
+        # 用于过滤迟到的/意外的播放完成上报，防止误取消新一轮 pipeline。
+        self._pending_out_audio_over = False
 
         # 通过构造函数注入会话记忆仓储（由接口层负责提供具体实现）
         repository = memory_repository
@@ -170,7 +175,7 @@ class Session:
         self.runtime.asr_start_time = time.time()
         self.runtime.asr_last_audio_time = None
         if not self.runtime.audio_queue:
-            self.runtime.audio_queue = asyncio.Queue()
+            self.runtime.audio_queue = asyncio.Queue(maxsize=AUDIO_QUEUE_MAX_SIZE)
         elif not self.runtime.audio_queue.empty():
             logger.info(f"[Session:{self.session_id}] 清空旧音频队列，丢弃 {self.runtime.audio_queue.qsize()} 个数据包")
             while not self.runtime.audio_queue.empty():
@@ -817,10 +822,29 @@ class Session:
         self.runtime.audio_queue = None
         self.runtime.asr_stop_event = None
 
-    async def drain_asr(self):
+    async def drain_asr(self, flush_timeout: float = 1.5):
+        """结束本轮 ASR：投递结束哨兵，等待消费任务把队列中剩余音频发送完毕后自然退出。
+
+        旧实现投递哨兵后立即清空队列并取消任务——队列中尚未发往 ASR 服务的
+        句尾音频全部丢失（识别积压时表现为最后一个字被截断）。
+        消费循环收到 None 哨兵会向 ASR 服务发送结束标记后正常退出，
+        这里只需限时等待；超时才强制停止（兜底）。
+        """
         if self.runtime.audio_queue:
             with suppress(asyncio.QueueFull):
                 self.runtime.audio_queue.put_nowait(None)
+        task = self.runtime.asr_task
+        if task and not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=flush_timeout)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[Session:{self.session_id}] ASR 消费任务未在 {flush_timeout}s 内完成收尾，强制停止"
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug(f"[Session:{self.session_id}] ASR 收尾异常: {e}")
         self.stop_asr()
 
     def can_queue_audio(self):
@@ -832,9 +856,24 @@ class Session:
         )
 
     async def queue_audio(self, data: bytes):
-        if self.runtime.audio_queue and not self.runtime.asr_processed:
-            await self.runtime.audio_queue.put(data)
-            qsize = self.runtime.audio_queue.qsize()
+        """上行音频入队（有界队列 + 丢最旧，绝不阻塞 WS 主循环）。"""
+        q = self.runtime.audio_queue
+        if q and not self.runtime.asr_processed:
+            try:
+                q.put_nowait(data)
+            except asyncio.QueueFull:
+                # ASR 消费受阻（网络抖动等）：丢弃最旧一包腾位，避免队列无限增长
+                try:
+                    q.get_nowait()
+                    q.task_done()
+                except asyncio.QueueEmpty:
+                    pass
+                with suppress(asyncio.QueueFull):
+                    q.put_nowait(data)
+                logger.warning(
+                    f"[Session:{self.session_id}] 音频队列已满({q.maxsize})，丢弃最旧一包"
+                )
+            qsize = q.qsize()
             # 仅在队列积压时记录（正常消费时 qsize=0-1），避免每秒 60+ 行日志阻塞事件循环
             if qsize >= 10:
                 logger.debug(f"[Session:{self.session_id}] 音频积压: 队列长度: {qsize}")
@@ -858,6 +897,9 @@ class Session:
             config=pipeline_config,
         )
         self._current_pipeline = pipeline
+        # 标记"已下发音频、等待设备回 client_out_audio_over"：
+        # 播放完成上报处理用它过滤迟到的/意外的上报（防误取消新一轮 pipeline）
+        self._pending_out_audio_over = True
         try:
             result = await pipeline.run(iat_text)
             return result
@@ -884,16 +926,18 @@ class Session:
             self._watchdog_task = None
 
         self.stop_asr()
-        self.queues.clear_all()
-        self.splitter.reset()
-
         self.runtime.reset()
+
+        # 打断后不再期待设备回 client_out_audio_over（旧播放被终止）
+        self._pending_out_audio_over = False
 
         await self.set_tts_playing(False)
         self.tts_playback_done.set()
         self.tts_audio_ended.set()
 
-        await self.channel.send_bytes(self.voice_generator.make_end_frame("0001"))
+        # 注意会话 ID：pipeline/唤醒音/闹钟的音频都用 SID_TTS("0010")，
+        # 必须结束同一会话，否则设备端正在播放的会话收不到结束帧、播放状态残留
+        await self.channel.send_bytes(self.voice_generator.make_end_frame(SID_TTS))
         try:
             await self.channel.send_json({"type": "session_status", "status": "tts_real_end"})
         except Exception as e:
@@ -905,6 +949,7 @@ class Session:
         self.runtime.asr_processed = True
         # 通知 pipeline 停止发送数据，避免 session_end 后仍有 TTS 指令到达设备
         self.cancel_event.set()
+        self._pending_out_audio_over = False
         await self.channel.send_json({"type": "session_status", "status": "iat_end"})
         await self.drain_asr()
         await self.fsm.set(SessionState.IDLE)
@@ -1099,8 +1144,8 @@ class Session:
         self.cancel_pre_asr()
 
         self.stop_asr()
-        self.queues.clear_all()
         self.runtime.reset()
+        self._pending_out_audio_over = False
 
         await self.set_tts_playing(False)
         self.tts_playback_done.set()

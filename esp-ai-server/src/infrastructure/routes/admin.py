@@ -1018,16 +1018,30 @@ async def admin_export_config(_: UserModel = Depends(require_admin)):
 @router.post("/config/import")
 async def admin_import_config(data: dict, _: UserModel = Depends(require_admin)):
     """导入系统配置"""
+    # 合法环境变量名白名单：仅允许大写字母/下划线开头，后接大写字母/数字/下划线
+    _env_key_pattern = r"^[A-Z_][A-Z0-9_]*$"
     env_path = _project_root() / ".env"
     if not env_path.exists():
         raise HTTPException(400, ".env 文件不存在")
     content = env_path.read_text(encoding="utf-8")
     for key, val in data.items():
-        if val is not None:
-            if re.search(rf"^{key}=", content, re.MULTILINE):
-                content = re.sub(rf"^{key}=.*", f"{key}={val}", content, flags=re.MULTILINE)
-            else:
-                content += f"\n{key}={val}"
+        if val is None:
+            continue
+        # key 白名单校验：不合法的环境变量名直接拒绝，防止注入任意配置项
+        if not re.match(_env_key_pattern, str(key)):
+            raise HTTPException(400, f"非法配置项名: {key}")
+        # value 过滤换行符，防止伪造多行 .env 内容注入额外配置
+        value = str(val).replace("\n", " ").replace("\r", " ")
+        # key 用 re.escape 转义；替换文本用 lambda 返回，避免 value 中的反斜杠被当作正则替换引用
+        if re.search(rf"^{re.escape(str(key))}=", content, re.MULTILINE):
+            content = re.sub(
+                rf"^{re.escape(str(key))}=.*",
+                lambda _m: f"{key}={value}",
+                content,
+                flags=re.MULTILINE,
+            )
+        else:
+            content += f"\n{key}={value}"
     env_path.write_text(content, encoding="utf-8")
     logger.info(f"[Admin] 导入系统配置: {list(data.keys())}")
     return {"code": 0, "message": "配置已导入，重启后生效"}

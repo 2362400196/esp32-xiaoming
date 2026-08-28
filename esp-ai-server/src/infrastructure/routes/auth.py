@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+import asyncio
+import os
 import uuid
 from datetime import datetime, timezone
 
@@ -32,6 +34,15 @@ from src.infrastructure.security_jwt import (
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["auth"])
+
+# 注册临界区锁：保证"用户计数检查 + 插入"的原子性，防止并发注册产生多个 admin
+_registration_lock = asyncio.Lock()
+
+# 环境变量开关：默认允许首个注册用户自动成为管理员（向后兼容）。
+# 生产环境可显式设置 ALLOW_FIRST_USER_ADMIN=false 禁用自动授权。
+_ALLOW_FIRST_USER_ADMIN = os.getenv("ALLOW_FIRST_USER_ADMIN", "true").strip().lower() not in ("false", "0", "no", "off")
+if not _ALLOW_FIRST_USER_ADMIN:
+    logger.warning("[Auth] ALLOW_FIRST_USER_ADMIN=false：已禁用首个注册用户自动授权 admin")
 
 
 # ==================== Pydantic 模型 ====================
@@ -98,28 +109,33 @@ class UserResp(BaseModel):
 
 @router.post("/api/v1/auth/register")
 async def register(req: RegisterReq):
-    """用户注册。**系统中第一个注册的用户自动成为管理员**（role=admin），其余为普通用户。"""
-    async with get_session_ctx() as session:
-        existing = await session.execute(
-            select(UserModel).where(UserModel.email == req.email)
-        )
-        if existing.scalar_one_or_none():
-            raise HTTPException(400, "Email already registered")
+    """用户注册。**系统中第一个注册的用户自动成为管理员**（role=admin），其余为普通用户。
 
-        # 首个用户自动成为管理员（系统初始化：固件管理/批量 OTA/全局插件重载等仅管理员可用）
-        from sqlalchemy import func
-        user_count = await session.execute(select(func.count()).select_from(UserModel))
-        is_first_user = (user_count.scalar_one() or 0) == 0
+    可通过环境变量 ALLOW_FIRST_USER_ADMIN=false 禁用自动授权。
+    """
+    # 加锁串行化注册临界区：用户计数检查与插入在同一事务内完成，避免并发注册产生多个 admin
+    async with _registration_lock:
+        async with get_session_ctx() as session:
+            existing = await session.execute(
+                select(UserModel).where(UserModel.email == req.email)
+            )
+            if existing.scalar_one_or_none():
+                raise HTTPException(400, "Email already registered")
 
-        user = UserModel(
-            id=str(uuid.uuid4()),
-            email=req.email,
-            password_hash=hash_password(req.password),
-            nickname=req.nickname or req.email.split("@")[0],
-            role="admin" if is_first_user else "user",
-        )
-        session.add(user)
-        await session.flush()
+            # 首个用户自动成为管理员（系统初始化：固件管理/批量 OTA/全局插件重载等仅管理员可用）
+            from sqlalchemy import func
+            user_count = await session.execute(select(func.count()).select_from(UserModel))
+            is_first_user = _ALLOW_FIRST_USER_ADMIN and (user_count.scalar_one() or 0) == 0
+
+            user = UserModel(
+                id=str(uuid.uuid4()),
+                email=req.email,
+                password_hash=hash_password(req.password),
+                nickname=req.nickname or req.email.split("@")[0],
+                role="admin" if is_first_user else "user",
+            )
+            session.add(user)
+            await session.flush()
 
     return {"code": 0, "message": "ok", "data": {"user_id": user.id, "role": user.role}}
 
@@ -202,7 +218,7 @@ async def update_me(req: UserUpdateReq, user: UserModel = Depends(get_current_us
     if req.email and req.email != user.email:
         async with get_session_ctx() as session:
             existing = await session.execute(
-                __import__("sqlalchemy").select(UserModel).where(UserModel.email == req.email)
+                select(UserModel).where(UserModel.email == req.email)
             )
             if existing.scalar_one_or_none():
                 raise HTTPException(400, "Email already in use")

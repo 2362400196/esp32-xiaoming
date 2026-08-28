@@ -66,7 +66,7 @@ class FakeLTMRepository:
             if item.memory_id == memory_id:
                 item.deleted = True
 
-    async def get_summary_labels(self, device_id):
+    async def get_summary_labels(self, device_id, limit=None):
         labels = set()
         for item in self._storage.get(device_id, []):
             if not item.deleted:
@@ -565,8 +565,8 @@ class TestAutoExtract:
 class TestParseLlmJson:
     """_parse_llm_json：从 LLM 回复解析 JSON
 
-    注意：源文件中 _parse_llm_json 被定义了两次，第二个定义（实例方法）
-    覆盖了第一个 @staticmethod，因此必须通过实例调用。
+    注意：_parse_llm_json 为实例方法（重复的 @staticmethod 定义已删除），
+    因此通过实例调用。
     """
 
     def _make_svc(self):

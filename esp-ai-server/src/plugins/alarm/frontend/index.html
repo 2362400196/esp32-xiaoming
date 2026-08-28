@@ -132,7 +132,10 @@ async function loadData(){
       document.getElementById('content').innerHTML = '<div class="empty-state"><p class="empty-text">设备未指定</p></div>';
       return;
     }
-    const res = await fetch('/api/v1/alarm/list?device_id='+encodeURIComponent(deviceMac));
+    const headers = {};
+    const token = localStorage.getItem('espai_token') || '';
+    if(token) headers['Authorization'] = 'Bearer ' + token;
+    const res = await fetch('/api/v1/alarm/list?device_id='+encodeURIComponent(deviceMac), {headers});
     const d = await res.json();
     if(d.code!==0||!d.data){
       document.getElementById('content').innerHTML = '<div class="empty-state"><p class="empty-text">加载失败</p><p class="empty-hint">'+escHtml(d.message||'')+'</p></div>';
@@ -165,7 +168,10 @@ async function loadData(){
 async function cancelAlarm(alarmId){
   if(!confirm('确定取消这条闹钟/提醒？')) return;
   try{
-    const res = await fetch('/api/v1/alarm/cancel?alarm_id='+encodeURIComponent(alarmId), {method:'POST'});
+    const headers = {'Content-Type':'application/json'};
+    const token = localStorage.getItem('espai_token') || '';
+    if(token) headers['Authorization'] = 'Bearer ' + token;
+    const res = await fetch('/api/v1/alarm/cancel?alarm_id='+encodeURIComponent(alarmId), {method:'POST', headers});
     const d = await res.json();
     loadData();
   }catch(e){

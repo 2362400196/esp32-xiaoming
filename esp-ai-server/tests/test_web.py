@@ -409,31 +409,25 @@ class TestCreateApp:
 class TestRegisterRoutes:
     """_register_routes 路由注册测试"""
 
-    def test_register_routes_calls_all_registrars(self, mock_settings):
-        """应调用所有路由模块的 register_routes"""
+    def test_register_routes_includes_all_routers(self, mock_settings):
+        """应通过 include_router 注册各业务域路由模块"""
         app = FastAPI()
 
         # 用真实异步函数代替 MagicMock，避免 FastAPI 内部签名检查失败
         async def _fake_ws_handler(websocket):
             pass
 
-        with patch("src.infrastructure.device_api.register_device_routes") as mock_device, \
-             patch("src.infrastructure.routes.system.register_routes") as mock_system, \
-             patch("src.infrastructure.routes.devices.register_routes") as mock_devices, \
-             patch("src.infrastructure.routes.skills.register_routes") as mock_skills, \
-             patch("src.infrastructure.routes.mcp.register_routes") as mock_mcp, \
-             patch("src.infrastructure.routes.emos.register_routes") as mock_emos, \
-             patch("src.infrastructure.routes.growth.register_routes") as mock_growth, \
-             patch("src.interfaces.websocket_handler.handle_websocket", new=_fake_ws_handler):
+        with patch("src.interfaces.websocket_handler.handle_websocket", new=_fake_ws_handler):
             web._register_routes(app)
 
-        mock_device.assert_called_once_with(app)
-        mock_system.assert_called_once_with(app)
-        mock_devices.assert_called_once_with(app)
-        mock_skills.assert_called_once_with(app)
-        mock_mcp.assert_called_once_with(app)
-        mock_emos.assert_called_once_with(app)
-        mock_growth.assert_called_once_with(app)
+        paths = {getattr(r, "path", None) for r in app.routes}
+        # 各业务域路由模块的关键路径
+        assert "/health/live" in paths                      # system
+        assert "/api/v1/devices" in paths                   # devices
+        assert "/api/v1/skills" in paths                    # skills
+        assert "/api/v1/emos" in paths                      # emos
+        assert "/api/v1/growth/diary/{device_id}" in paths  # growth
+        assert "/api/v1/devices/{mac}/stats" in paths       # device_api
 
     def test_register_routes_adds_websocket_endpoints(self, mock_settings):
         """应添加 WebSocket 端点"""
@@ -442,14 +436,7 @@ class TestRegisterRoutes:
         async def _fake_ws_handler(websocket):
             pass
 
-        with patch("src.infrastructure.device_api.register_device_routes"), \
-             patch("src.infrastructure.routes.system.register_routes"), \
-             patch("src.infrastructure.routes.devices.register_routes"), \
-             patch("src.infrastructure.routes.skills.register_routes"), \
-             patch("src.infrastructure.routes.mcp.register_routes"), \
-             patch("src.infrastructure.routes.emos.register_routes"), \
-             patch("src.infrastructure.routes.growth.register_routes"), \
-             patch("src.interfaces.websocket_handler.handle_websocket", new=_fake_ws_handler):
+        with patch("src.interfaces.websocket_handler.handle_websocket", new=_fake_ws_handler):
             web._register_routes(app)
 
         # 验证 WebSocket 路由存在

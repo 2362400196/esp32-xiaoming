@@ -27,6 +27,7 @@
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_heap_caps.h"
+#include "esp_spiffs.h"
 #include "cJSON.h"
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
@@ -58,6 +59,45 @@ static lv_img_dsc_t *s_downloaded_descs = NULL;
 static uint8_t **s_downloaded_data = NULL;
 static volatile bool s_download_done = false;
 static volatile bool s_download_started = false;  // 下载任务已启动（区分"从未下载"与"下载中"）
+
+// ==================== 退役代际管理 ====================
+// LVGL 的 gif 定时器会【零拷贝引用】已下发的数据缓冲并持续异步解码
+// （lv_gif_set_src → gd_open_gif_data(img_dsc->data)，不复制数据）。
+// 刷新/重新下载时如果立即 free 旧缓冲，正在解码的定时器就会读到
+// 已被复用的内存（use-after-free）——表现为解码乱码（unknown sep）→
+// 错误循环刷屏 → LVGL 任务吃满 CPU → 触发任务看门狗。
+// 因此旧一代数据不立即释放，而是"退役"保留一代；下次刷新时才释放
+// 上一次退役的数据（此时 LVGL 必已通过 lv_gif_set_src 切换到新数据）。
+static uint8_t **s_retired_data = NULL;
+static lv_img_dsc_t *s_retired_descs = NULL;
+static int s_retired_count = 0;
+static int s_allocated_count = 0;  // 现任 s_downloaded_data 的文件数（换表情包时可能与新清单不同）
+
+/* 退役当前数据（必须在持有 s_gif_mutex 时调用）：现任缓冲转入退役代，释放上上代 */
+static void gif_retire_current_locked(void)
+{
+    /* 1. 释放上一次退役的数据（两代之前，LVGL 必已不再引用）。
+     *    注意用退役代自己的文件数释放（换包后清单数量可能已变化） */
+    if (s_retired_data) {
+        for (int i = 0; i < s_retired_count; i++) {
+            if (s_retired_data[i]) free(s_retired_data[i]);
+        }
+        free(s_retired_data);
+        s_retired_data = NULL;
+    }
+    if (s_retired_descs) {
+        free(s_retired_descs);
+        s_retired_descs = NULL;
+    }
+    /* 2. 现任数据降级为退役代（不释放，LVGL 可能仍在异步解码它） */
+    s_retired_data = s_downloaded_data;
+    s_retired_descs = s_downloaded_descs;
+    s_retired_count = s_allocated_count;
+    s_allocated_count = g_gif_files_count;
+    s_downloaded_data = NULL;
+    s_downloaded_descs = NULL;
+    s_download_done = false;
+}
 // 互斥锁：保护 s_downloaded_data/s_downloaded_descs/s_download_done 的访问，
 // 防止下载任务与 LVGL 渲染任务（get_downloaded_gif）之间的竞态（use-after-free）
 static SemaphoreHandle_t s_gif_mutex = NULL;
@@ -192,7 +232,17 @@ static void save_gif_to_cache(const char *filename, const uint8_t *data, size_t 
     size_t wr = fwrite(data, 1, size, f);
     fclose(f);
     if (wr != size) {
-        ESP_LOGW(TAG, "缓存写入不完整: %s (%d/%d)，删除无效缓存", filename, (int)wr, (int)size);
+        // 写 0 字节通常是分区已满（storage 分区与 Lua storage 共用）——打印用量便于诊断
+        size_t total = 0, used = 0;
+        if (esp_spiffs_info("storage", &total, &used) == ESP_OK) {
+            ESP_LOGW(TAG, "缓存写入不完整: %s (%d/%d)，删除无效缓存（SPIFFS 总=%luKB 已用=%luKB 空闲=%luKB）",
+                     filename, (int)wr, (int)size,
+                     (unsigned long)(total / 1024), (unsigned long)(used / 1024),
+                     (unsigned long)((total - used) / 1024));
+        } else {
+            ESP_LOGW(TAG, "缓存写入不完整: %s (%d/%d)，删除无效缓存（SPIFFS 信息读取失败）",
+                     filename, (int)wr, (int)size);
+        }
         remove(path);
     } else {
         ESP_LOGI(TAG, "%s 已写入缓存 (%d bytes)", filename, (int)size);
@@ -377,13 +427,8 @@ static bool download_from_api(const char *http_base, const char *device_id)
     // 加锁发布到全局：先释放旧数据，再替换指针，最后置 done 标志
     ensure_gif_mutex();
     if (s_gif_mutex && xSemaphoreTake(s_gif_mutex, portMAX_DELAY)) {
-        if (s_downloaded_data) {
-            for (int i = 0; i < g_gif_files_count; i++) {
-                if (s_downloaded_data[i]) free(s_downloaded_data[i]);
-            }
-            free(s_downloaded_data);
-        }
-        if (s_downloaded_descs) free(s_downloaded_descs);
+        /* 旧数据退役而非立即释放：LVGL 定时器可能仍在异步解码它（use-after-free 根因） */
+        gif_retire_current_locked();
         s_downloaded_data = new_data;
         s_downloaded_descs = new_descs;
         s_download_done = true;
@@ -614,13 +659,8 @@ static void download_all_from(const char *base_url)
     // 加锁发布到全局：先释放旧数据，再替换指针，最后置 done 标志
     ensure_gif_mutex();
     if (s_gif_mutex && xSemaphoreTake(s_gif_mutex, portMAX_DELAY)) {
-        if (s_downloaded_data) {
-            for (int i = 0; i < g_gif_files_count; i++) {
-                if (s_downloaded_data[i]) free(s_downloaded_data[i]);
-            }
-            free(s_downloaded_data);
-        }
-        if (s_downloaded_descs) free(s_downloaded_descs);
+        /* 旧数据退役而非立即释放：LVGL 定时器可能仍在异步解码它（use-after-free 根因） */
+        gif_retire_current_locked();
         s_downloaded_data = new_data;
         s_downloaded_descs = new_descs;
         s_download_done = true;
@@ -710,23 +750,9 @@ void refresh_gifs(void)
     clear_gif_cache();
 
     ensure_gif_mutex();
-    // 加锁释放旧数据，防止与 get_downloaded_gif（LVGL 渲染任务）竞态（use-after-free）
+    // 加锁退役旧数据（不立即释放——LVGL 定时器可能仍在异步解码它，见 gif_retire_current_locked）
     if (s_gif_mutex && xSemaphoreTake(s_gif_mutex, portMAX_DELAY)) {
-        if (s_downloaded_data) {
-            for (int i = 0; i < g_gif_files_count; i++) {
-                if (s_downloaded_data[i]) {
-                    free(s_downloaded_data[i]);
-                    s_downloaded_data[i] = NULL;
-                }
-            }
-            free(s_downloaded_data);
-            s_downloaded_data = NULL;
-        }
-        if (s_downloaded_descs) {
-            free(s_downloaded_descs);
-            s_downloaded_descs = NULL;
-        }
-        s_download_done = false;
+        gif_retire_current_locked();
         xSemaphoreGive(s_gif_mutex);
     }
 

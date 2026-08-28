@@ -94,8 +94,18 @@ async def get_stats(request: Request):
 
     if hasattr(request.app.state, 'device_registry') and request.app.state.device_registry:
         registry = request.app.state.device_registry
-        stats["devices"]["total"] = registry.count()
-        stats["devices"]["online"] = registry.count()
+        total = registry.count()
+        online = 0
+        # 在线数：注册表中 channel 仍处于连接状态的设备（与 devices.py 列表口径一致）
+        for did in registry.get_all_ids():
+            d = registry.get(did)
+            if not d:
+                continue
+            channel = d.get("channel")
+            if channel is not None and getattr(channel, "connected", False):
+                online += 1
+        stats["devices"]["total"] = total
+        stats["devices"]["online"] = online
 
     stats["gateways"]["asr"] = hasattr(request.app.state, 'asr_gateway') and request.app.state.asr_gateway is not None
     stats["gateways"]["llm"] = hasattr(request.app.state, 'llm_gateway') and request.app.state.llm_gateway is not None

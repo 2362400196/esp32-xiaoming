@@ -34,6 +34,15 @@ static void next_frame_task_cb(lv_timer_t * t);
  *  STATIC VARIABLES
  **********************/
 
+/* GIF 解码连续错误计数与重开熔断。
+ * 计数器为文件级静态（跨所有 gif 对象共享），新数据源（lv_gif_set_src）
+ * 和解码成功时会复位。
+ * 数据本身损坏（或缓冲被污染）时，reopen 无法自愈——6 次失败→重开→
+ * 又从头开始错误循环会无限往复，LVGL 任务吃满 CPU 触发任务看门狗，
+ * 因此重开一次仍失败后必须熔断暂停。 */
+static int s_error_count = 0;  /* GIF 解码连续错误计数，超过阈值重新打开 GIF */
+static int s_reopen_count = 0; /* 同一份数据的 reopen 次数 */
+
 const lv_obj_class_t lv_gif_class = {
     .constructor_cb = lv_gif_constructor,
     .destructor_cb = lv_gif_destructor,
@@ -63,6 +72,10 @@ void lv_gif_set_src(lv_obj_t * obj, const void * src)
 {
     lv_gif_t * gifobj = (lv_gif_t *) obj;
     gd_GIF * gif = gifobj->gif;
+
+    /* 新数据源：重置解码错误/重开熔断计数（静态计数器跨对象共享） */
+    s_error_count = 0;
+    s_reopen_count = 0;
 
     /*Close previous gif if any*/
     if(gif != NULL) {
@@ -204,7 +217,6 @@ static void lv_gif_destructor(const lv_obj_class_t * class_p, lv_obj_t * obj)
 
 static void next_frame_task_cb(lv_timer_t * t)
 {
-    static int s_error_count = 0;  /* GIF 解码连续错误计数，超过阈值重新打开 GIF */
 
     lv_obj_t * obj = t->user_data;
     if(obj == NULL) return;
@@ -235,7 +247,15 @@ static void next_frame_task_cb(lv_timer_t * t)
          * 连续错误超过 5 次时，完全重新打开 GIF 以重置所有状态 */
         s_error_count++;
         if(s_error_count > 5) {
-            ESP_LOGW("lv_gif", "gd_get_frame failed %d times, reopening GIF", s_error_count);
+            if(s_reopen_count >= 1) {
+                /* 已重开过一次仍连续失败 → 数据本身损坏，暂停动画防止 CPU 空转。
+                 * 下次 lv_gif_set_src 切换数据源时计数复位，自然恢复 */
+                ESP_LOGE("lv_gif", "GIF 数据重开后仍连续解码失败，暂停动画（数据可能已损坏）");
+                lv_timer_pause(t);
+                return;
+            }
+            s_reopen_count++;
+            ESP_LOGW("lv_gif", "gd_get_frame failed %d times, reopening GIF (第%d次重开)", s_error_count, s_reopen_count);
             const void *saved_data = gifobj->gif->data;
             uint32_t saved_data_size = gifobj->gif->data_size;
             gd_close_gif(gifobj->gif);
@@ -258,6 +278,7 @@ static void next_frame_task_cb(lv_timer_t * t)
 
     /* 成功解码，重置错误计数 */
     s_error_count = 0;
+    s_reopen_count = 0;
 
     uint32_t t1 = lv_tick_get();
     /* gd_GIF 结构体在内部 RAM，gif->canvas 指针安全可靠。

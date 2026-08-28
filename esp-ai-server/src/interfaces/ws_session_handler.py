@@ -14,6 +14,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from src.infrastructure.config import get_settings
 from src.infrastructure.logging import get_logger, set_trace_id, set_session_id, set_device_id
+from src.infrastructure.task_manager import background_task
 from src.infrastructure.monitoring import get_metrics
 from src.infrastructure.web import get_app, get_device_registry
 from src.infrastructure.db.repositories.short_term_memory_repo import SqlShortTermMemoryRepository
@@ -28,7 +29,7 @@ from src.interfaces.plugin_gateways import (
 )
 from src.use_cases.session_fsm import WSChannel, SessionFSM
 from src.domain.entities import SessionState
-from src.use_cases.session import Session
+from src.use_cases.session import Session, AUDIO_QUEUE_MAX_SIZE
 
 logger = get_logger(__name__)
 
@@ -84,7 +85,8 @@ def _log_perf_report(session, result, pipeline, asr_text: str) -> None:
 
         lines = [
             "═" * 64,
-            f"[Perf] 对话性能报告  session={session.session_id}  device={session.device_id[:16]}",
+            f"[Perf] 对话性能报告  session={session.session_id}  device={session.device_id[:16]}"
+            + ("  ⚠️ 本轮被中断（无完整 result，部分指标缺失）" if result is None else ""),
             f"  用户输入 : \"{asr_text[:40]}\"",
         ]
         if asr_ms is not None:
@@ -98,6 +100,11 @@ def _log_perf_report(session, result, pipeline, asr_text: str) -> None:
         )
         if resp_ms is not None:
             lines.append(f"  首响延迟 : {_fmt(resp_ms)}   (ASR完成→首帧音频)")
+        if perf.get("prompt_assembly_ms") is not None:
+            lines.append(
+                f"  Prompt组装: {_fmt(perf.get('prompt_assembly_ms'))}  "
+                f"(system {perf.get('prompt_chars', 0)}字/含历史 {perf.get('history_chars', 0)}字)"
+            )
         lines.append(f"  Pipeline : {_fmt(pipeline_ms)}   (总耗时)")
         if e2e_ms is not None:
             lines.append(f"  端到端   : {_fmt(e2e_ms)}   (ASR开始→播放完成)")
@@ -153,10 +160,9 @@ class WebSocketSessionHandler:
         self.wake_start_task = None
         self._asr_starting = False  # ASR 启动同步标志，防止 _start_asr_session 双重启动竞态
         self._new_wake_pending = False  # 新一轮 start 流程进行中，抑制旧 pipeline 取消后的 _start_next_asr
-        # 后台任务引用（防止被 GC 回收导致协程中途取消且无告警）
+        # 后台任务引用（防止被 GC 回收导致协程中途取消且无告警；
+        # 短生命周期后台任务统一走 task_manager.background_task，由其持有引用并记录异常）
         self._mcp_init_task = None
-        self._vad_tasks: set = set()
-        self._bg_tasks: set = set()
 
     async def initialize(self) -> None:
         """初始化会话：接收连接、创建网关、Session、启动后台任务
@@ -255,8 +261,9 @@ class WebSocketSessionHandler:
         startup_tool_mgr = getattr(get_app().state, 'tool_manager', None)
         if user_mcp_servers:
             # 后台初始化 MCP，避免阻塞事件循环导致设备 HTTP 请求超时
-            self._mcp_init_task = asyncio.create_task(
-                tool_mgr.initialize_mcp(user_mcp_servers, disabled_servers=_disabled_mcp_servers, disabled_tools=_disabled_mcp_tools)
+            self._mcp_init_task = background_task(
+                tool_mgr.initialize_mcp(user_mcp_servers, disabled_servers=_disabled_mcp_servers, disabled_tools=_disabled_mcp_tools),
+                name="mcp_init",
             )
         elif startup_tool_mgr and startup_tool_mgr._mcp_tool_map:
             tool_mgr._mcp_clients = startup_tool_mgr._mcp_clients
@@ -289,7 +296,7 @@ class WebSocketSessionHandler:
                 servers = mcp_cfg.get_servers() if hasattr(mcp_cfg, 'get_servers') else {}
                 if servers:
                     # 后台初始化 MCP，避免阻塞事件循环
-                    asyncio.create_task(tool_mgr.initialize_mcp(servers))
+                    background_task(tool_mgr.initialize_mcp(servers), name="mcp_init")
 
         asr_client = None
         try:
@@ -585,18 +592,16 @@ class WebSocketSessionHandler:
         self._broadcast_device_state(True, "idle")
 
         if asr_client:
-            _t = asyncio.create_task(session.pre_connect_asr())
-            self._bg_tasks.add(_t)
-            _t.add_done_callback(self._bg_tasks.discard)
+            background_task(session.pre_connect_asr(), name="pre_connect_asr")
 
         # 预热唤醒音频缓存，避免首次唤醒时 585ms TTS 合成延迟
         if _get_wake_enable_audio(settings, user_config):
             wam = getattr(get_app().state, 'wake_audio_manager', None)
             if wam:
-                asyncio.create_task(wam.ensure_cache(user_config=user_config))
+                background_task(wam.ensure_cache(user_config=user_config), name="wake_audio_cache")
 
         # 启动空闲保活任务
-        self.keepalive_task = asyncio.create_task(self.idle_keepalive())
+        self.keepalive_task = background_task(self.idle_keepalive(), name="idle_keepalive")
 
         await channel.send_json({"type": "play_audio_ws_conntceed"})
         logger.info(f"[WS] Sent play_audio_ws_conntceed, waiting for device response...")
@@ -608,8 +613,9 @@ class WebSocketSessionHandler:
             hub = get_web_state_hub()
             if hub:
                 device_id = self.device_mac or self.device_key
-                asyncio.get_running_loop().create_task(
-                    hub.broadcast_device_state(device_id, online, state)
+                background_task(
+                    hub.broadcast_device_state(device_id, online, state),
+                    name="broadcast_device_state",
                 )
         except Exception:
             pass
@@ -625,7 +631,7 @@ class WebSocketSessionHandler:
             # 实时下发 ASR 中间结果，屏幕边听边显示（VAD 结束后不再发，避免覆盖 LLM 字幕）
             if not self.session.runtime.asr_processed:
                 try:
-                    asyncio.get_running_loop().create_task(self._send_iat_partial(text))
+                    background_task(self._send_iat_partial(text), name="send_iat_partial")
                 except RuntimeError:
                     pass
 
@@ -685,8 +691,8 @@ class WebSocketSessionHandler:
             return
 
         session.tts_playback_done.clear()
-        self.pipeline_task = asyncio.create_task(session.run_pipeline(text))
-        self.tts_done_waiter = asyncio.create_task(self._on_tts_complete())
+        self.pipeline_task = background_task(session.run_pipeline(text), name="run_pipeline")
+        self.tts_done_waiter = background_task(self._on_tts_complete(), name="tts_complete_waiter")
 
     def _trigger_growth(self) -> None:
         """触发成长任务（冷却期后执行）"""
@@ -701,8 +707,9 @@ class WebSocketSessionHandler:
             self._growth_cooldown_task.cancel()
 
         # 启动新的冷却定时器
-        self._growth_cooldown_task = asyncio.create_task(
-            self._growth_cooldown_timer(self.device_key, self._growth_last_messages)
+        self._growth_cooldown_task = background_task(
+            self._growth_cooldown_timer(self.device_key, self._growth_last_messages),
+            name="growth_cooldown",
         )
         logger.info(f"[Growth] 已启动成长任务冷却定时器（{self._growth_cooldown_seconds}秒）: {self.device_key[:16]}")
 
@@ -855,6 +862,19 @@ class WebSocketSessionHandler:
         channel = self.channel
         settings = self.settings
         user_config = getattr(self.session, 'user_config', self.user_config)
+
+        # 性能：设备唤醒到用户开口之间有 1-2 秒（唤醒提示音播放），
+        # 用这个空档后台预取 prompt 组装素材（LTM 目录/记忆条目/用户画像），
+        # 使本轮及后续 60s 内对话的首响延迟不再包含这些 DB 读。
+        try:
+            from src.use_cases.pipeline import prewarm_prompt_caches
+            background_task(
+                prewarm_prompt_caches(session.device_id or self.device_key, session.ltm_service),
+                name="prompt_prewarm",
+            )
+        except Exception as e:
+            logger.debug(f"[Session:{session.session_id}] prompt 预热启动失败: {e}")
+
         wam = getattr(get_app().state, 'wake_audio_manager', None)
         wake_ok = True
         try:
@@ -939,12 +959,12 @@ class WebSocketSessionHandler:
         session.runtime.asr_full_text = ""
         if asr_client:
             session.runtime.asr_stop_event = asyncio.Event()
-            task = asyncio.create_task(session.start_asr(self.on_asr_text, self.on_vad_end))
+            task = background_task(session.start_asr(self.on_asr_text, self.on_vad_end), name="start_asr")
             task.add_done_callback(self._on_asr_start_done)
         else:
             # 无 ASR 客户端：没有启动任务可回调，立即清除标志避免卡死
             self._asr_starting = False
-        asyncio.create_task(session.start_watchdog(self.on_vad_end))
+        background_task(session.start_watchdog(self.on_vad_end), name="session_watchdog")
 
     def _on_asr_start_done(self, task: asyncio.Task) -> None:
         """start_asr 启动任务完成回调，清除同步启动标志"""
@@ -1243,13 +1263,13 @@ class WebSocketSessionHandler:
 
                             if asr_client:
                                 session.cancel_pre_asr()
-                                asyncio.create_task(session.pre_connect_asr())
+                                background_task(session.pre_connect_asr(), name="pre_connect_asr")
 
                             if _get_wake_enable_audio(settings, self.user_config):
                                 # 取消旧的唤醒任务，避免多个 task 竞争 _waiting_wake_audio 标志
                                 if self.wake_start_task and not self.wake_start_task.done():
                                     self.wake_start_task.cancel()
-                                self.wake_start_task = asyncio.create_task(self._do_wake_start())
+                                self.wake_start_task = background_task(self._do_wake_start(), name="wake_start")
                             else:
                                 # 无唤醒音频：直接启动 ASR，唤醒流程标志在此清除
                                 self._new_wake_pending = False
@@ -1261,12 +1281,10 @@ class WebSocketSessionHandler:
 
                         elif t == "iat_end":
                             if not session.runtime.asr_processed:
-                                _t = asyncio.create_task(self.on_vad_end())
-                                self._vad_tasks.add(_t)
-                                _t.add_done_callback(self._vad_tasks.discard)
+                                background_task(self.on_vad_end(), name="on_vad_end")
 
                         elif t == "play_audio_ws_conntceed":
-                            self.connect_audio_task = asyncio.create_task(self._play_connect_audio())
+                            self.connect_audio_task = background_task(self._play_connect_audio(), name="play_connect_audio")
                             logger.info("[WS] Device ready")
 
                         elif t == "client_out_audio_over":
@@ -1278,6 +1296,12 @@ class WebSocketSessionHandler:
                                 and not session._wake_audio_played.is_set()
                                 and getattr(session, '_wake_audio_expected_round', 0) == getattr(session, '_wake_audio_round', 0)):
                                 session._wake_audio_played.set()
+                            # 播放完成上报必须对应一次已下发的音频（_pending_out_audio_over），
+                            # 否则是迟到的/意外的上报——忽略之，防止误取消新一轮 pipeline
+                            if not session._pending_out_audio_over:
+                                logger.debug(f"[Session:{session.session_id}] 无进行中的音频播放，忽略此次 client_out_audio_over")
+                                continue
+                            session._pending_out_audio_over = False
                             session.tts_playback_done.set()
                             await session.set_tts_playing(False)
                             # 如果 pipeline 还在运行（如看门狗超时导致客户端提前结束），取消 pipeline
@@ -1295,11 +1319,11 @@ class WebSocketSessionHandler:
                                 # 尝试启动下一轮 ASR
                                 if session.runtime.asr_processed and session.runtime.audio_queue is None:
                                     session.runtime.asr_processed = False
-                                    session.runtime.audio_queue = asyncio.Queue()
+                                    session.runtime.audio_queue = asyncio.Queue(maxsize=AUDIO_QUEUE_MAX_SIZE)
                                     logger.info(f"[Session:{session.session_id}] TTS playback done, pre-created audio queue (IDLE state)")
                             elif session.runtime.asr_processed and session.runtime.audio_queue is None:
                                 session.runtime.asr_processed = False
-                                session.runtime.audio_queue = asyncio.Queue()
+                                session.runtime.audio_queue = asyncio.Queue(maxsize=AUDIO_QUEUE_MAX_SIZE)
                                 logger.info(f"[Session:{session.session_id}] TTS playback done, pre-created audio queue")
 
                         elif t == "client_out_audio_ing":
@@ -1322,7 +1346,8 @@ class WebSocketSessionHandler:
                                             })
                                     except Exception as e:
                                         logger.error(f"[WS] 自动续播异常: {e}", exc_info=True)
-                                self._bg_tasks.add(asyncio.create_task(_play_next()))
+                                # 通过 task_manager 执行，持有引用且异常有日志
+                                background_task(_play_next(), name="music_play_next")
                             else:
                                 logger.warning("[WS] music_play_next 但 channel/user_config 不可用")
 
@@ -1411,7 +1436,8 @@ class WebSocketSessionHandler:
                 bot = getattr(get_app().state, 'wechat_bot', None)
                 if bot and hasattr(bot, 'send_text'):
                     notify_text = f"⚠️ 设备「{binding.alias or self.device_key[:8]}」已离线，可能原因：网络断开或断电。"
-                    asyncio.create_task(bot.send_text(binding.wechat_chat_id, notify_text))
+                    # 断连通知为 fire-and-forget，通过 task_manager 包装持有引用，失败记 ERROR 日志
+                    background_task(bot.send_text(binding.wechat_chat_id, notify_text), name="wechat_offline_notify")
                     logger.info(f"[WeChat] 已推送设备断连通知到微信")
         except Exception as notify_err:
             logger.debug(f"[WeChat] 推送断连通知失败: {notify_err}")

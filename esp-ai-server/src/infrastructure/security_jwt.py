@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from hashlib import pbkdf2_hmac
+import hashlib
 import hmac
 import os
 import secrets
@@ -48,9 +49,13 @@ def _get_secret() -> str:
     settings = get_settings()
     secret = settings.jwt_secret
     if not secret:
-        # 开发环境 fallback：从 admin_api_key 派生
-        secret = settings.auth.admin_api_key
-        if not secret:
+        # 开发环境 fallback：从 admin_api_key 派生专用 JWT 密钥。
+        # 不能直接用 admin_api_key 本身——两个安全用途共用同一秘密，
+        # 任一泄露即全线失守；SHA-256 派生后泄露 JWT 密钥不会暴露 admin_api_key。
+        admin_key = settings.auth.admin_api_key
+        if admin_key:
+            secret = hashlib.sha256(f"espai-jwt:{admin_key}".encode("utf-8")).hexdigest()
+        else:
             # 既未配置 jwt_secret 也未配置 admin_api_key：进程内缓存随机临时密钥
             # 避免硬编码 fallback 被攻击者利用伪造任意身份 token
             if _TEMP_SECRET is None:

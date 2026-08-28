@@ -14,145 +14,100 @@ from src.infrastructure.logging import get_logger
 logger = get_logger(__name__)
 
 
+async def _existing_columns(conn, table: str) -> set[str]:
+    """读取表的现有列名集合（PRAGMA table_info）。表不存在返回空集。"""
+    rows = await conn.execute(text(f"PRAGMA table_info({table})"))
+    return {r[1] for r in rows.fetchall()}
+
+
+async def _ensure_column(conn, table: str, column: str, ddl: str, existing: set[str]) -> None:
+    """表缺少指定列时执行 ALTER 添加。
+
+    - 列已存在：静默跳过（正常幂等路径，不产生日志噪音）
+    - ALTER 真正失败（锁超时、磁盘错误等）：记 WARNING，避免 schema 与模型静默漂移
+    """
+    if column in existing:
+        return
+    try:
+        await conn.execute(text(ddl))
+        logger.info(f"[DB] 迁移: {table} 表增加 {column} 列")
+    except Exception as e:
+        logger.warning(f"[DB] 迁移: {table}.{column} ALTER 失败: {e}")
+
+
 async def init_db() -> None:
     """初始化数据库：创建所有表 + 执行 Schema 迁移（幂等）
 
     使用 ``Base.metadata.create_all`` 创建新表。
-    ALTER TABLE 用 try/except 包裹，已存在的列不会重复添加。
+    ALTER 前先用 PRAGMA 检查列是否存在，只对缺失的列执行 ALTER。
     """
     engine = get_engine()
     async with engine.begin() as conn:
-        # === Schema 迁移：市场插件表 developer_id 列类型修复 ===
+        # === Schema 检查：市场插件表 developer_id 列类型（只告警，不自动重建） ===
         # 旧 schema 中 developer_id 为 INTEGER（引用 marketplace_developers.id），
         # 新 schema 改为 VARCHAR(36)（引用 users.id UUID 字符串）。
-        # SQLite 的 create_all 不会 ALTER 已有表，需手动检测并重建。
+        # 禁止启动时自动 DROP 重建：一次误判即会清空全部市场数据。
+        # 检测到旧类型列时仅记录 ERROR 日志提示手动迁移，旧数据保留不动。
         try:
             col_info = await conn.execute(text("PRAGMA table_info(marketplace_plugins)"))
             cols = col_info.fetchall()
             if cols:
                 dev_col = [c for c in cols if c[1] == "developer_id"]
                 if dev_col and "INTEGER" in str(dev_col[0][2]).upper():
-                    logger.info("[DB] 迁移: marketplace 表 developer_id 列为旧 INTEGER 类型，重建市场表")
-                    await conn.execute(text("DROP TABLE IF EXISTS marketplace_plugin_reviews"))
-                    await conn.execute(text("DROP TABLE IF EXISTS marketplace_plugin_versions"))
-                    await conn.execute(text("DROP TABLE IF EXISTS marketplace_plugins"))
-                    await conn.execute(text("DROP TABLE IF EXISTS marketplace_developers"))
+                    logger.error(
+                        "[DB] 迁移: marketplace_plugins.developer_id 列为旧 INTEGER 类型，"
+                        "需要手动执行迁移，启动流程已跳过自动重建（旧数据保留）。"
+                        "涉及数据表：marketplace_plugins、marketplace_plugin_versions、"
+                        "marketplace_plugin_reviews、marketplace_developers。"
+                    )
         except Exception as e:
-            logger.debug(f"[DB] 迁移: 市场表检查跳过: {e}")
+            logger.warning(f"[DB] 迁移: 市场表 developer_id 类型检查失败: {e}")
 
         await conn.run_sync(Base.metadata.create_all)
 
-        # === Schema 迁移：management_api_key 列 ===
-        # SQLite 不支持 IF NOT EXISTS，用 try 包裹幂等执行
-        try:
-            await conn.execute(text(
-                "ALTER TABLE devices ADD COLUMN management_api_key VARCHAR(256) NOT NULL DEFAULT ''"
-            ))
-            logger.info("[DB] 迁移: devices 表增加 management_api_key 列")
-        except Exception:
-            logger.debug("[DB] 迁移: management_api_key 列已存在，跳过")
+        # === Schema 迁移：先读取现有列，再只补缺失的列 ===
+        devices_cols = await _existing_columns(conn, "devices")
+        marketplace_cols = await _existing_columns(conn, "marketplace_plugins")
 
-        # === Schema 迁移：user_id + bind_code 列（企业级架构） ===
-        try:
-            await conn.execute(text(
-                "ALTER TABLE devices ADD COLUMN user_id VARCHAR(36) REFERENCES users(id)"
-            ))
-            logger.info("[DB] 迁移: devices 表增加 user_id 列")
-        except Exception:
-            logger.debug("[DB] 迁移: user_id 列已存在，跳过")
-
-        try:
-            await conn.execute(text(
-                "ALTER TABLE devices ADD COLUMN bound_at FLOAT"
-            ))
-            logger.info("[DB] 迁移: devices 表增加 bound_at 列")
-        except Exception:
-            logger.debug("[DB] 迁移: bound_at 列已存在，跳过")
-
-        try:
-            await conn.execute(text(
-                "ALTER TABLE devices ADD COLUMN bind_code VARCHAR(6)"
-            ))
-            logger.info("[DB] 迁移: devices 表增加 bind_code 列")
-        except Exception:
-            logger.debug("[DB] 迁移: bind_code 列已存在，跳过")
-
-        try:
-            await conn.execute(text(
-                "ALTER TABLE devices ADD COLUMN bind_code_expires FLOAT"
-            ))
-            logger.info("[DB] 迁移: devices 表增加 bind_code_expires 列")
-        except Exception:
-            logger.debug("[DB] 迁移: bind_code_expires 列已存在，跳过")
-
-        # === Schema 迁移：插件商店（enabled_plugins 已安装插件列表 + has_display 屏幕能力） ===
-        try:
-            await conn.execute(text(
-                "ALTER TABLE devices ADD COLUMN enabled_plugins TEXT"
-            ))
-            logger.info("[DB] 迁移: devices 表增加 enabled_plugins 列（插件商店）")
-        except Exception:
-            logger.debug("[DB] 迁移: enabled_plugins 列已存在，跳过")
-
-        try:
-            await conn.execute(text(
-                "ALTER TABLE devices ADD COLUMN has_display BOOLEAN"
-            ))
-            logger.info("[DB] 迁移: devices 表增加 has_display 列（屏幕能力）")
-        except Exception:
-            logger.debug("[DB] 迁移: has_display 列已存在，跳过")
-
-        # === Schema 迁移：插件配置（plugin_configs，{插件名: {配置项: 值}}） ===
-        try:
-            await conn.execute(text(
-                "ALTER TABLE devices ADD COLUMN plugin_configs TEXT"
-            ))
-            logger.info("[DB] 迁移: devices 表增加 plugin_configs 列（插件配置）")
-        except Exception:
-            logger.debug("[DB] 迁移: plugin_configs 列已存在，跳过")
-
-        # === Schema 迁移：屏幕显示配置（robot_mode，screensaver） ===
-        try:
-            await conn.execute(text(
-                "ALTER TABLE devices ADD COLUMN robot_mode VARCHAR(8) NOT NULL DEFAULT 'false'"
-            ))
-            logger.info("[DB] 迁移: devices 表增加 robot_mode 列（机器人模式）")
-        except Exception:
-            logger.debug("[DB] 迁移: robot_mode 列已存在，跳过")
-
-        try:
-            await conn.execute(text(
-                "ALTER TABLE devices ADD COLUMN screensaver_enabled VARCHAR(8) NOT NULL DEFAULT 'true'"
-            ))
-            logger.info("[DB] 迁移: devices 表增加 screensaver_enabled 列（屏保开关）")
-        except Exception:
-            logger.debug("[DB] 迁移: screensaver_enabled 列已存在，跳过")
-
-        try:
-            await conn.execute(text(
-                "ALTER TABLE devices ADD COLUMN screensaver_timeout VARCHAR(8) NOT NULL DEFAULT '30'"
-            ))
-            logger.info("[DB] 迁移: devices 表增加 screensaver_timeout 列（屏保超时）")
-        except Exception:
-            logger.debug("[DB] 迁移: screensaver_timeout 列已存在，跳过")
-
-        # === Schema 迁移：市场插件 provides 能力列（商店分类 ASR/LLM/TTS/其他工具） ===
-        try:
-            await conn.execute(text(
-                "ALTER TABLE marketplace_plugins ADD COLUMN provides TEXT NOT NULL DEFAULT '[]'"
-            ))
-            logger.info("[DB] 迁移: marketplace_plugins 表增加 provides 列（商店分类）")
-        except Exception:
-            logger.debug("[DB] 迁移: provides 列已存在，跳过")
-
-        # === Schema 迁移：市场插件 icon 图标列（商店图标显示） ===
-        try:
-            await conn.execute(text(
-                "ALTER TABLE marketplace_plugins ADD COLUMN icon VARCHAR(256) NOT NULL DEFAULT ''"
-            ))
-            logger.info("[DB] 迁移: marketplace_plugins 表增加 icon 列（插件图标）")
-        except Exception:
-            logger.debug("[DB] 迁移: icon 列已存在，跳过")
+        await _ensure_column(conn, "devices", "management_api_key",
+            "ALTER TABLE devices ADD COLUMN management_api_key VARCHAR(256) NOT NULL DEFAULT ''",
+            devices_cols)
+        await _ensure_column(conn, "devices", "user_id",
+            "ALTER TABLE devices ADD COLUMN user_id VARCHAR(36) REFERENCES users(id)",
+            devices_cols)
+        await _ensure_column(conn, "devices", "bound_at",
+            "ALTER TABLE devices ADD COLUMN bound_at FLOAT",
+            devices_cols)
+        await _ensure_column(conn, "devices", "bind_code",
+            "ALTER TABLE devices ADD COLUMN bind_code VARCHAR(6)",
+            devices_cols)
+        await _ensure_column(conn, "devices", "bind_code_expires",
+            "ALTER TABLE devices ADD COLUMN bind_code_expires FLOAT",
+            devices_cols)
+        await _ensure_column(conn, "devices", "enabled_plugins",
+            "ALTER TABLE devices ADD COLUMN enabled_plugins TEXT",
+            devices_cols)
+        await _ensure_column(conn, "devices", "has_display",
+            "ALTER TABLE devices ADD COLUMN has_display BOOLEAN",
+            devices_cols)
+        await _ensure_column(conn, "devices", "plugin_configs",
+            "ALTER TABLE devices ADD COLUMN plugin_configs TEXT",
+            devices_cols)
+        await _ensure_column(conn, "devices", "robot_mode",
+            "ALTER TABLE devices ADD COLUMN robot_mode VARCHAR(8) NOT NULL DEFAULT 'false'",
+            devices_cols)
+        await _ensure_column(conn, "devices", "screensaver_enabled",
+            "ALTER TABLE devices ADD COLUMN screensaver_enabled VARCHAR(8) NOT NULL DEFAULT 'true'",
+            devices_cols)
+        await _ensure_column(conn, "devices", "screensaver_timeout",
+            "ALTER TABLE devices ADD COLUMN screensaver_timeout VARCHAR(8) NOT NULL DEFAULT '30'",
+            devices_cols)
+        await _ensure_column(conn, "marketplace_plugins", "provides",
+            "ALTER TABLE marketplace_plugins ADD COLUMN provides TEXT NOT NULL DEFAULT '[]'",
+            marketplace_cols)
+        await _ensure_column(conn, "marketplace_plugins", "icon",
+            "ALTER TABLE marketplace_plugins ADD COLUMN icon VARCHAR(256) NOT NULL DEFAULT ''",
+            marketplace_cols)
 
         # === 权限引导：系统中没有管理员时，最早注册的用户自动提升为管理员 ===
         # （兼容已部署系统：首个用户注册时已是 admin 的逻辑只对新系统生效）

@@ -15,6 +15,7 @@ import uuid
 from typing import Any, Awaitable, Callable, Optional
 
 from src.infrastructure.logging import get_logger
+from src.infrastructure.task_manager import background_task
 from src.domain.entities import MemoryItem
 from src.domain.value_objects import MemoryQuery
 from src.domain.repositories import LongTermMemoryRepository
@@ -80,7 +81,11 @@ class ConversationMemory:
             except RuntimeError:
                 _loop = None
             if _loop is not None:
-                _loop.create_task(asyncio.to_thread(self._repository.save, self._device_id, self._messages))
+                # 通过 task_manager 包装持有引用，落盘失败记 ERROR 日志
+                background_task(
+                    asyncio.to_thread(self._repository.save, self._device_id, self._messages),
+                    name="memory_save",
+                )
             else:
                 self._repository.save(self._device_id, self._messages)
 
@@ -294,72 +299,10 @@ class LongTermMemoryServiceImpl:
         labels = await self._repo.get_summary_labels(device_id, limit=20)
         if not labels:
             return ""
-        return "可用标签: " + "、".join(labels)
+        # 提示语中带上 memory_recall，方便上层提示词直接引导模型使用该工具
+        return "可用标签（配合 memory_recall 使用）: " + "、".join(labels)
 
-    async def auto_extract(
-        self,
-        device_id: str,
-        user_message: str,
-        llm_chat_func: Callable[[str, str], Awaitable[str]],
-    ) -> list[str]:
-        """从用户消息自动提取耐久事实（Use Case 层编排）
-
-        调用 LLM → 解析 JSON → 去重存储，属于 Use Case 层逻辑。
-        """
-        if not user_message or not user_message.strip():
-            return []
-
-        catalog = await self.get_summary_catalog(device_id)
-        user_prompt = (f"Existing summary labels:\n{catalog or '- (empty)'}\n\n"
-                       f"Current user message:\n{user_message}")
-
-        try:
-            llm_text = await llm_chat_func(_AUTO_EXTRACT_SYSTEM_PROMPT, user_prompt)
-        except Exception as e:
-            logger.warning(f"[LTM] auto_extract LLM 调用失败: {e}")
-            return []
-
-        try:
-            result = self._parse_llm_json(llm_text)
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"[LTM] auto_extract 解析 JSON 失败: {e}")
-            return []
-
-        intent = result.get("intent", "none")
-        memories_raw = result.get("memories", [])
-
-        if intent == "forget":
-            return []
-
-        summaries: list[str] = []
-        for i, mem in enumerate(memories_raw[:self.MAX_AUTO_EXTRACT_ITEMS]):
-            content = (mem.get("content") or "").strip()
-            tags = mem.get("tags", [])
-            keywords = mem.get("keywords", [])
-            if not content:
-                continue
-
-            item = MemoryItem(
-                device_id=device_id,
-                content=content,
-                tags=tags if isinstance(tags, list) else [],
-                keywords=keywords if isinstance(keywords, list) else [],
-                source="auto_llm",
-            )
-            try:
-                memory_id, changed = await self.store(item)
-                if changed:
-                    summaries.append(f"- {content[:60]} ({tags[:2]})")
-                    logger.info(f"[LTM] auto_extract 已存储: {memory_id}")
-                else:
-                    logger.info(f"[LTM] auto_extract 去重跳过: {content[:60]}...")
-            except Exception as e:
-                logger.warning(f"[LTM] auto_extract 存储失败[{i}]: {e}")
-
-        return summaries
-
-
-# ── 辅助函数 ──────────────────────────────────────────────
+    # ── 辅助函数 ──────────────────────────────────────────────
 
     def _normalize_tags(self, tags: list[str]) -> list[str]:
         seen: set[str] = set()
@@ -386,33 +329,6 @@ class LongTermMemoryServiceImpl:
                 seen.add(k)
                 result.append(k)
         return result if result else item.tags[:3]
-
-    @staticmethod
-    def _parse_llm_json(text: str) -> dict:
-        if not text:
-            raise ValueError("empty response")
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-        import re as _re
-        m = _re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, _re.DOTALL)
-        if m:
-            return json.loads(m.group(1))
-        start = text.find('{')
-        end = text.rfind('}')
-        if start >= 0 and end > start:
-            return json.loads(text[start:end + 1])
-        raise ValueError(f"无法从 LLM 回复中解析 JSON: {text[:200]}")
-        if not summaries:
-            return ""
-
-        lines = [
-            "Long-term memory summary label catalog (use exact labels with memory_recall):",
-        ]
-        for s in summaries:
-            lines.append(f"- {s['label']} (refs={s['ref_count']})")
-        return "\n".join(lines)
 
     # ── 自动提取（Auto-Extraction） ───────────────────────
 

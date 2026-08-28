@@ -6,8 +6,10 @@ import importlib
 import json
 import os
 import pkgutil
+import sys
 import time
 from enum import Enum
+from pathlib import Path
 import typing
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -1460,10 +1462,10 @@ class PerUserToolManager:
             plugin = None
 
         if plugin is None:
-            result = td.func(**kwargs)
-            if asyncio.iscoroutine(result):
-                return await result
-            return result
+            # 同步函数放到线程池执行，避免阻塞事件循环（协程函数照旧直接 await）
+            if asyncio.iscoroutinefunction(td.func):
+                return await td.func(**kwargs)
+            return await asyncio.to_thread(td.func, **kwargs)
 
         # 插件工具：注入权限上下文（permissions 来自 manifest）
         from src.infrastructure.plugin_security import reset_plugin_context, set_plugin_context
@@ -1478,10 +1480,10 @@ class PerUserToolManager:
             permissions = []
         token = set_plugin_context(plugin, permissions)
         try:
-            result = td.func(**kwargs)
-            if asyncio.iscoroutine(result):
-                result = await result
-            return result
+            if asyncio.iscoroutinefunction(td.func):
+                return await td.func(**kwargs)
+            # 同步函数放到线程池执行，避免阻塞事件循环
+            return await asyncio.to_thread(td.func, **kwargs)
         finally:
             reset_plugin_context(token)
 

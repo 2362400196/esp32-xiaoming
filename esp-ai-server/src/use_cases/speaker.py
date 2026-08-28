@@ -12,6 +12,7 @@ from typing import Any, List, Optional
 
 from src.infrastructure.config import get_settings, SID_TTS, SID_CONNECTED, SCREEN_WIDTH, SCREEN_HEIGHT
 from src.infrastructure.logging import get_logger
+from src.infrastructure.task_manager import background_task
 from src.interfaces.tts_gateways import create_tts_gateway, VoiceGenerator
 from src.domain.services import MemoryService
 from src.domain.entities import Conversation, Message
@@ -218,9 +219,7 @@ class Speaker:
             await channel.send_json({"type": "session_status", "status": "iat_start"})
             await asyncio.sleep(0.1)
 
-            _t = asyncio.create_task(session.start_auto_conversation())
-            self._bg_tasks.add(_t)
-            _t.add_done_callback(self._bg_tasks.discard)
+            background_task(session.start_auto_conversation(), name="auto_conversation")
             logger.info("[Wakeup] 唤醒完成，ASR 已启动")
             return True
 

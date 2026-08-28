@@ -75,6 +75,19 @@ def init_crypto(field_encryption_key: str = "") -> None:
         _fernet = Fernet(generated.encode("ascii"))
 
 
+def is_configured() -> bool:
+    """判断是否配置了固定的加密密钥（环境变量或显式传入）。
+
+    未配置时使用进程内临时密钥——加密的数据在重启后无法解密，
+    调用方（如 wechat_bot）应据此决定是否降级为明文存储。
+    """
+    if _fernet is not None:
+        # 已初始化：无法回溯判断是否外部配置，保守返回 True
+        # （调用方应在进程生命周期早期、init 之前做该判断）
+        return True
+    return bool((os.environ.get("FIELD_ENCRYPTION_KEY") or "").strip())
+
+
 def _get_fernet() -> "Fernet":  # type: ignore[name-defined]
     """获取已初始化的 Fernet 实例（懒初始化）"""
     global _fernet

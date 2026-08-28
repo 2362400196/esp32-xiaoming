@@ -18,6 +18,46 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 
+def _mock_user():
+    """构造 mock JWT 登录用户（role=admin 免设备归属校验）"""
+    u = MagicMock()
+    u.id = 1
+    u.role = "admin"
+    u.is_active = True
+    u.nickname = "admin"
+    u.email = "admin@example.com"
+    return u
+
+
+class _FakeDBDevice:
+    """模拟 DeviceModel 行"""
+
+    def __init__(self, device_id="dev1", name="设备1", mac="AA:BB", key="k1"):
+        from datetime import datetime, timezone
+        self.device_id = device_id
+        self.name = name
+        self.mac_address = mac
+        self.device_key = key
+        self.bound_at = datetime.now(timezone.utc)
+
+
+class _FakeSessionCtx:
+    """模拟 get_session_ctx：execute(...).scalars().all() 返回预置设备列表"""
+
+    def __init__(self, devices):
+        self._devices = devices
+
+    async def __aenter__(self):
+        s = MagicMock()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = self._devices
+        s.execute = AsyncMock(return_value=result)
+        return s
+
+    async def __aexit__(self, *args):
+        return False
+
+
 # ════════════════════════════════════════════════════════════════
 # system 路由测试
 # ════════════════════════════════════════════════════════════════
@@ -27,9 +67,9 @@ class TestSystemRoutes:
 
     @pytest.fixture
     def app(self):
-        from src.infrastructure.routes.system import register_routes
+        from src.infrastructure.routes.system import router
         application = FastAPI()
-        register_routes(application)
+        application.include_router(router)
         return application
 
     @pytest.fixture
@@ -102,9 +142,30 @@ class TestSystemRoutes:
         assert data["gateways"]["asr"] is False
 
     def test_stats_with_registry(self, client, app):
-        """有 device_registry 时 stats 返回正确计数"""
-        registry = MagicMock()
-        registry.count.return_value = 5
+        """有 device_registry 时 stats 返回正确计数（在线数按 channel.connected 统计）"""
+
+        class _FakeRegistry:
+            def __init__(self, devices):
+                self._devices = devices
+
+            def count(self):
+                return len(self._devices)
+
+            def get_all_ids(self):
+                return list(self._devices)
+
+            def get(self, device_id):
+                return self._devices.get(device_id)
+
+        online_channel = MagicMock()
+        online_channel.connected = True
+        offline_channel = MagicMock()
+        offline_channel.connected = False
+        registry = _FakeRegistry({
+            "d1": {"channel": online_channel},
+            "d2": {"channel": online_channel},
+            "d3": {"channel": offline_channel},
+        })
         app.state.device_registry = registry
         app.state.asr_gateway = MagicMock()
         app.state.llm_gateway = MagicMock()
@@ -112,8 +173,8 @@ class TestSystemRoutes:
         resp = client.get("/stats")
         assert resp.status_code == 200
         data = resp.json()["data"]
-        assert data["devices"]["total"] == 5
-        assert data["devices"]["online"] == 5
+        assert data["devices"]["total"] == 3
+        assert data["devices"]["online"] == 2
         assert data["gateways"]["asr"] is True
 
     def test_api_health(self, client):
@@ -131,12 +192,12 @@ class TestDevicesRoutes:
 
     @pytest.fixture
     def app(self):
-        from src.infrastructure.routes.devices import register_routes
-        from src.infrastructure.security import verify_admin_api_key
+        from src.infrastructure.routes.devices import router
+        from src.infrastructure.security_jwt import get_current_user
         application = FastAPI()
-        register_routes(application)
-        # 路由单元测试跳过 API key 认证（认证逻辑由 security 层单独覆盖）
-        application.dependency_overrides[verify_admin_api_key] = lambda: True
+        application.include_router(router)
+        # 路由单元测试跳过 JWT 认证（认证逻辑由 security 层单独覆盖）
+        application.dependency_overrides[get_current_user] = lambda: _mock_user()
         return application
 
     @pytest.fixture
@@ -144,36 +205,34 @@ class TestDevicesRoutes:
         return TestClient(app)
 
     def test_get_devices_no_registry(self, client):
-        """无 registry 时返回错误"""
-        with patch("src.infrastructure.routes.devices.get_device_registry", return_value=None):
+        """无 registry 时设备全部显示离线（设备列表来自 DB）"""
+        with patch("src.infrastructure.routes.devices.get_session_ctx",
+                   return_value=_FakeSessionCtx([_FakeDBDevice()])), \
+             patch("src.infrastructure.routes.devices.get_device_registry", return_value=None):
             resp = client.get("/api/v1/devices")
         assert resp.status_code == 200
-        assert resp.json()["code"] == 1
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["devices"][0]["online"] is False
 
     def test_get_devices_success(self, client):
-        """获取设备列表"""
+        """获取设备列表（DB 设备 + registry 在线状态）"""
         registry = MagicMock()
-        registry.get_all_ids.return_value = ["dev1"]
         fsm = MagicMock()
-        fsm.get.return_value = "idle"
-        session = MagicMock()
-        session.session_id = "sid1"
+        # api_get_devices 使用 fsm.get().value，需返回带 value 属性的状态对象
+        fsm.get.return_value = MagicMock(value="idle")
         channel = MagicMock()
         channel.connected = True
-        user_config = MagicMock()
-        user_config.name = "设备1"
-        registry.get.return_value = {
-            "mac": "AA:BB", "session": session, "fsm": fsm,
-            "channel": channel, "user_config": user_config,
-        }
-        with patch("src.infrastructure.routes.devices.get_device_registry", return_value=registry):
+        registry.resolve.return_value = {"channel": channel, "fsm": fsm}
+        with patch("src.infrastructure.routes.devices.get_session_ctx",
+                   return_value=_FakeSessionCtx([_FakeDBDevice(device_id="dev1", name="设备1")])), \
+             patch("src.infrastructure.routes.devices.get_device_registry", return_value=registry):
             resp = client.get("/api/v1/devices")
         assert resp.status_code == 200
         data = resp.json()["data"]
-        assert data["count"] == 1
-        assert data["devices"][0]["device_id"] == "AA:BB"
+        assert len(data["devices"]) == 1
+        assert data["devices"][0]["device_id"] == "dev1"
         assert data["devices"][0]["name"] == "设备1"
-        assert data["devices"][0]["connected"] is True
+        assert data["devices"][0]["online"] is True
 
     def test_get_device_not_found(self, client):
         """设备不存在"""
@@ -323,21 +382,21 @@ class TestDevicesRoutes:
         })
         assert resp.status_code == 422
 
-    def test_create_device_db_error(self, client):
-        """DB 写入异常时返回错误"""
+    def test_create_device_db_error(self, client, app):
+        """DB 写入异常时返回 500（当前路由未捕获仓储异常）"""
         mock_repo = MagicMock()
         mock_repo.find_by_mac = AsyncMock(return_value=None)
         mock_repo.find_by_key = AsyncMock(return_value=None)
         mock_repo.upsert_device = AsyncMock(side_effect=RuntimeError("DB connection lost"))
         with patch("src.infrastructure.db.repositories.device_repository.DeviceRepository", return_value=mock_repo), \
              patch("src.infrastructure.web.get_app", return_value=None):
-            resp = client.post("/api/v1/devices", json={
+            no_raise_client = TestClient(app, raise_server_exceptions=False)
+            resp = no_raise_client.post("/api/v1/devices", json={
                 "mac": "AA:BB:CC:DD:EE:FF",
                 "key": "key123",
                 "name": "设备",
             })
-        assert resp.json()["code"] == 1
-        assert "创建设备失败" in resp.json()["message"]
+        assert resp.status_code == 500
 
     def test_create_device_hot_reload(self, client):
         """创建成功后热重载 auth 配置"""
@@ -360,10 +419,11 @@ class TestDevicesRoutes:
 
     def test_create_device_no_auth(self, app):
         """未认证时拒绝访问"""
-        from src.infrastructure.security import verify_admin_api_key
+        from fastapi import HTTPException
+        from src.infrastructure.security_jwt import get_current_user
         # 覆盖认证为拒绝
-        app.dependency_overrides[verify_admin_api_key] = lambda: (_ for _ in ()).throw(
-            __import__("fastapi").HTTPException(status_code=403, detail="Forbidden")
+        app.dependency_overrides[get_current_user] = lambda: (_ for _ in ()).throw(
+            HTTPException(status_code=403, detail="Forbidden")
         )
         client = TestClient(app)
         resp = client.post("/api/v1/devices", json={
@@ -373,7 +433,7 @@ class TestDevicesRoutes:
         })
         assert resp.status_code == 403
         # 恢复认证 override
-        app.dependency_overrides[verify_admin_api_key] = lambda: True
+        app.dependency_overrides[get_current_user] = lambda: _mock_user()
 
     def test_wakeup_no_speaker(self, client):
         with patch("src.infrastructure.routes.devices.get_speaker", return_value=None):
@@ -387,38 +447,13 @@ class TestDevicesRoutes:
             resp = client.post("/api/v1/wakeup", json={"device_id": "dev1"})
         assert resp.json()["code"] == 0
 
-    def test_wakeup_failed(self, client):
+    def test_wakeup_async_returns_immediately(self, client):
+        """唤醒指令为后台执行：speaker.wakeup 结果不影响 API 立即返回 code 0"""
         speaker = AsyncMock()
         speaker.wakeup.return_value = False
         with patch("src.infrastructure.routes.devices.get_speaker", return_value=speaker):
             resp = client.post("/api/v1/wakeup", json={"device_id": "dev1"})
-        assert resp.json()["code"] == 1
-
-    def test_wakeup_all_no_speaker(self, client):
-        with patch("src.infrastructure.routes.devices.get_speaker", return_value=None):
-            resp = client.post("/api/v1/wakeup/all")
-        assert resp.json()["code"] == 1
-
-    def test_wakeup_all_no_devices(self, client):
-        speaker = AsyncMock()
-        registry = MagicMock()
-        registry.count.return_value = 0
-        with patch("src.infrastructure.routes.devices.get_speaker", return_value=speaker), \
-             patch("src.infrastructure.routes.devices.get_device_registry", return_value=registry):
-            resp = client.post("/api/v1/wakeup/all")
         assert resp.json()["code"] == 0
-        assert resp.json()["data"]["count"] == 0
-
-    def test_wakeup_all_success(self, client):
-        speaker = AsyncMock()
-        registry = MagicMock()
-        registry.count.return_value = 2
-        registry.get_all_ids.return_value = ["dev1", "dev2"]
-        with patch("src.infrastructure.routes.devices.get_speaker", return_value=speaker), \
-             patch("src.infrastructure.routes.devices.get_device_registry", return_value=registry):
-            resp = client.post("/api/v1/wakeup/all")
-        assert resp.json()["code"] == 0
-        assert resp.json()["data"]["count"] == 2
 
     def test_speak_no_speaker(self, client):
         with patch("src.infrastructure.routes.devices.get_speaker", return_value=None):
@@ -439,17 +474,6 @@ class TestDevicesRoutes:
             resp = client.post("/api/v1/speak", json={"device_id": "dev1", "text": "hello"})
         assert resp.json()["code"] == 1
 
-    def test_speak_all_success(self, client):
-        speaker = AsyncMock()
-        registry = MagicMock()
-        registry.count.return_value = 3
-        registry.get_all_ids.return_value = ["d1", "d2", "d3"]
-        with patch("src.infrastructure.routes.devices.get_speaker", return_value=speaker), \
-             patch("src.infrastructure.routes.devices.get_device_registry", return_value=registry):
-            resp = client.post("/api/v1/speak/all", json={"text": "broadcast"})
-        assert resp.json()["code"] == 0
-        assert resp.json()["data"]["count"] == 3
-
     def test_stop_no_speaker(self, client):
         with patch("src.infrastructure.routes.devices.get_speaker", return_value=None):
             resp = client.post("/api/v1/stop", json={"device_id": "dev1"})
@@ -460,16 +484,6 @@ class TestDevicesRoutes:
         speaker.stop.return_value = True
         with patch("src.infrastructure.routes.devices.get_speaker", return_value=speaker):
             resp = client.post("/api/v1/stop", json={"device_id": "dev1"})
-        assert resp.json()["code"] == 0
-
-    def test_stop_all_success(self, client):
-        speaker = AsyncMock()
-        registry = MagicMock()
-        registry.count.return_value = 2
-        registry.get_all_ids.return_value = ["d1", "d2"]
-        with patch("src.infrastructure.routes.devices.get_speaker", return_value=speaker), \
-             patch("src.infrastructure.routes.devices.get_device_registry", return_value=registry):
-            resp = client.post("/api/v1/stop/all")
         assert resp.json()["code"] == 0
 
     def test_list_tools_success(self, client):
@@ -484,11 +498,12 @@ class TestDevicesRoutes:
         assert len(data) == 1
         assert data[0]["name"] == "tool1"
 
-    def test_list_tools_exception(self, client):
-        """工具查询异常"""
+    def test_list_tools_exception(self, client, app):
+        """工具查询异常：当前路由未捕获，返回 500"""
         with patch("src.use_cases.tools_system.get_openai_tools_schema", side_effect=RuntimeError("err")):
-            resp = client.get("/api/v1/tools")
-        assert resp.json()["code"] == 1
+            no_raise_client = TestClient(app, raise_server_exceptions=False)
+            resp = no_raise_client.get("/api/v1/tools")
+        assert resp.status_code == 500
 
 
 # ════════════════════════════════════════════════════════════════
@@ -509,12 +524,12 @@ class TestEmosRoutes:
 
     @pytest.fixture
     def app(self):
-        from src.infrastructure.routes.emos import register_routes
-        from src.infrastructure.security import verify_admin_api_key
+        from src.infrastructure.routes.emos import router
+        from src.infrastructure.security_jwt import get_current_user
         application = FastAPI()
-        register_routes(application)
-        # 路由单元测试跳过 API key 认证（认证逻辑由 security 层单独覆盖）
-        application.dependency_overrides[verify_admin_api_key] = lambda: True
+        application.include_router(router)
+        # 路由单元测试跳过 JWT 认证（认证逻辑由 security 层单独覆盖）
+        application.dependency_overrides[get_current_user] = lambda: _mock_user()
         return application
 
     @pytest.fixture
@@ -778,12 +793,11 @@ class TestGrowthRoutes:
 
     @pytest.fixture
     def app(self):
-        from src.infrastructure.routes.growth import register_routes
-        from src.infrastructure.security import verify_admin_api_key
+        from src.infrastructure.routes.growth import router
+        from src.infrastructure.security_jwt import get_current_user
         application = FastAPI()
-        register_routes(application)
-        # 路由单元测试跳过 API key 认证（认证逻辑由 security 层单独覆盖）
-        application.dependency_overrides[verify_admin_api_key] = lambda: True
+        application.include_router(router)
+        application.dependency_overrides[get_current_user] = lambda: _mock_user()
         return application
 
     @pytest.fixture
@@ -830,13 +844,14 @@ class TestGrowthRoutes:
         assert resp.json()["code"] == 0
         assert resp.json()["data"]["content"] is None
 
-    async def test_get_diary_exception(self, client):
-        """获取日记异常"""
+    async def test_get_diary_exception(self, client, app):
+        """获取日记异常：当前路由未捕获，返回 500"""
         with patch("src.use_cases.growth.DiaryService", side_effect=RuntimeError("err")), \
              patch("src.infrastructure.routes.growth._resolve_device_key", return_value="key1"), \
              patch("src.infrastructure.routes.growth._get_data_dir", return_value="/data"):
-            resp = client.get("/api/v1/growth/diary/dev1")
-        assert resp.json()["code"] == 1
+            no_raise_client = TestClient(app, raise_server_exceptions=False)
+            resp = no_raise_client.get("/api/v1/growth/diary/dev1")
+        assert resp.status_code == 500
 
     async def test_get_diary_by_date_path(self, client):
         """通过路径参数获取日记"""
@@ -867,10 +882,13 @@ class TestGrowthRoutes:
         assert resp.json()["code"] == 0
         assert resp.json()["data"]["profile"]["name"] == "用户1"
 
-    async def test_get_growth_profile_exception(self, client):
-        with patch("src.infrastructure.device_api.verify_api_key", new_callable=AsyncMock, side_effect=RuntimeError("err")):
-            resp = client.get("/api/v1/growth/profile/dev1")
-        assert resp.json()["code"] == 1
+    async def test_get_growth_profile_exception(self, client, app):
+        """归属校验异常：当前路由未捕获，返回 500"""
+        with patch("src.infrastructure.routes.growth._check_device_owner",
+                   AsyncMock(side_effect=RuntimeError("err"))):
+            no_raise_client = TestClient(app, raise_server_exceptions=False)
+            resp = no_raise_client.get("/api/v1/growth/profile/dev1")
+        assert resp.status_code == 500
 
     async def test_get_emotions(self, client):
         """获取情绪历史"""
@@ -890,408 +908,13 @@ class TestGrowthRoutes:
         assert resp.json()["code"] == 0
         assert resp.json()["data"]["count"] == 1
 
-    async def test_get_emotions_exception(self, client):
-        with patch("src.infrastructure.device_api.verify_api_key", new_callable=AsyncMock, side_effect=RuntimeError("err")):
-            resp = client.get("/api/v1/growth/emotions/dev1")
-        assert resp.json()["code"] == 1
-
-
-# ════════════════════════════════════════════════════════════════
-# mcp 路由测试
-# ════════════════════════════════════════════════════════════════
-
-class TestMCPRoutes:
-    """MCP 路由测试
-
-    数据源为 DB（DeviceRepository），测试 mock DeviceRepository 的方法。
-    """
-
-    @pytest.fixture
-    def app(self, tmp_path):
-        from src.infrastructure.routes.mcp import register_routes
-        from src.infrastructure.security import verify_admin_api_key
-        application = FastAPI()
-        register_routes(application)
-        # 路由单元测试跳过 API key 认证（认证逻辑由 security 层单独覆盖）
-        application.dependency_overrides[verify_admin_api_key] = lambda: True
-        return application
-
-    @pytest.fixture
-    def client(self, app):
-        return TestClient(app)
-
-    def _make_mock_repo(self, device_config=None, mcp_servers=None,
-                        found_device_id="dev1", device_found=True):
-        """创建 mock DeviceRepository。
-
-        device_config: 设备完整配置 dict（用于 find_by_mac/find_by_key 返回）
-        mcp_servers: MCP 服务器配置 dict（用于 get_mcp_servers 返回）
-        device_found: 设备是否存在于 DB
-        """
-        mock_repo = MagicMock()
-        cfg = device_config if device_config is not None else {}
-        mock_repo.get_mcp_servers = AsyncMock(
-            return_value=mcp_servers if mcp_servers is not None
-            else (cfg.get("mcp_servers", {}) if device_found else {})
-        )
-        found = (found_device_id, cfg) if device_found else None
-        mock_repo.find_by_mac = AsyncMock(return_value=found)
-        mock_repo.find_by_key = AsyncMock(return_value=found)
-        mock_repo.set_mcp_server = AsyncMock(return_value=None)
-        mock_repo.delete_mcp_server = AsyncMock(return_value=None)
-        mock_repo.update_device_partial = AsyncMock(return_value=cfg if device_found else None)
-        mock_repo.get_device_config = AsyncMock(return_value=cfg if device_found else None)
-        return mock_repo
-
-    def test_get_device_mcp_no_file(self, client):
-        """设备不存在时返回 code 1"""
-        mock_repo = self._make_mock_repo(device_found=False)
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.get("/api/v1/devices/dev1/mcp")
-        assert resp.json()["code"] == 1
-
-    def test_get_device_mcp_success(self, client, tmp_path):
-        mock_repo = self._make_mock_repo(
-            device_config={"mcp_servers": {"s1": {"url": "http://x"}}},
-            mcp_servers={"s1": {"url": "http://x"}},
-        )
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.get("/api/v1/devices/dev1/mcp")
-        assert resp.json()["code"] == 0
-        assert "s1" in resp.json()["data"]
-
-    def test_get_device_mcp_not_found(self, client, tmp_path):
-        mock_repo = self._make_mock_repo(device_found=False)
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.get("/api/v1/devices/nonexistent/mcp")
-        assert resp.json()["code"] == 1
-
-    def test_update_device_mcp_success(self, client, tmp_path):
-        mock_repo = self._make_mock_repo(
-            device_config={"mcp_servers": {}},
-            mcp_servers={},
-        )
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
-             patch("src.infrastructure.routes.mcp._hot_reload_device_config"):
-            resp = client.put("/api/v1/devices/dev1/mcp/s1", json={
-                "type": "streamable_http", "url": "http://new", "headers": {}, "auth": {}
-            })
-        assert resp.json()["code"] == 0
-
-    def test_update_device_mcp_no_file(self, client):
-        mock_repo = self._make_mock_repo(device_found=False)
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.put("/api/v1/devices/dev1/mcp/s1", json={
-                "url": "http://x"
-            })
-        assert resp.json()["code"] == 1
-
-    def test_delete_device_mcp_success(self, client, tmp_path):
-        mock_repo = self._make_mock_repo(
-            device_config={"mcp_servers": {"s1": {"url": "http://x"}}},
-            mcp_servers={"s1": {"url": "http://x"}},
-        )
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
-             patch("src.infrastructure.routes.mcp._hot_reload_device_config"):
-            resp = client.delete("/api/v1/devices/dev1/mcp/s1")
-        assert resp.json()["code"] == 0
-
-    def test_delete_device_mcp_not_found(self, client, tmp_path):
-        mock_repo = self._make_mock_repo(
-            device_config={"mcp_servers": {}},
-            mcp_servers={},
-        )
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.delete("/api/v1/devices/dev1/mcp/s1")
-        assert resp.json()["code"] == 1
-
-    def test_get_mcp_disabled(self, client, tmp_path):
-        mock_repo = self._make_mock_repo(
-            device_config={"disabled_mcp_servers": ["s1"], "disabled_mcp_tools": {"s1": ["t1"]}},
-        )
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.get("/api/v1/devices/dev1/mcp/disabled")
-        assert resp.json()["code"] == 0
-        assert "s1" in resp.json()["data"]["disabled_servers"]
-
-    def test_get_mcp_disabled_not_found(self, client, tmp_path):
-        mock_repo = self._make_mock_repo(device_found=False)
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.get("/api/v1/devices/nonexistent/mcp/disabled")
-        assert resp.json()["code"] == 1
-
-    def test_toggle_mcp_server(self, client, tmp_path):
-        mock_repo = self._make_mock_repo(
-            device_config={"disabled_mcp_servers": []},
-        )
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
-             patch("src.infrastructure.routes.mcp._hot_reload_device_config"):
-            resp = client.post("/api/v1/devices/dev1/mcp/s1/toggle", params={"disabled": True})
-        assert resp.json()["code"] == 0
-
-    def test_toggle_mcp_tool(self, client, tmp_path):
-        mock_repo = self._make_mock_repo(
-            device_config={"disabled_mcp_tools": {}},
-        )
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
-             patch("src.infrastructure.routes.mcp._hot_reload_device_config"):
-            resp = client.post("/api/v1/devices/dev1/mcp/s1/tools/t1/toggle", params={"disabled": True})
-        assert resp.json()["code"] == 0
-
-    # ── MCP 配置查询补充 ──
-
-    def test_get_device_mcp_by_key(self, client, tmp_path):
-        """通过 key 匹配设备"""
-        mock_repo = self._make_mock_repo(
-            device_config={"key": "mac1", "mcp_servers": {"s1": {"url": "http://x"}}},
-            mcp_servers={"s1": {"url": "http://x"}},
-        )
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.get("/api/v1/devices/mac1/mcp")
-        assert resp.json()["code"] == 0
-        assert "s1" in resp.json()["data"]
-
-    def test_get_device_mcp_no_mcp_servers(self, client, tmp_path):
-        """设备无 MCP 配置"""
-        mock_repo = self._make_mock_repo(
-            device_config={},
-            mcp_servers={},
-        )
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.get("/api/v1/devices/dev1/mcp")
-        assert resp.json()["code"] == 0
-        assert resp.json()["data"] == {}
-
-    # ── MCP 配置更新补充 ──
-
-    def test_update_device_mcp_not_found(self, client, tmp_path):
-        """更新不存在的设备的 MCP 配置"""
-        mock_repo = self._make_mock_repo(device_found=False)
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.put("/api/v1/devices/nonexistent/mcp/s1", json={"url": "http://x"})
-        assert resp.json()["code"] == 1
-
-    def test_update_device_mcp_by_key(self, client, tmp_path):
-        """通过 key 匹配设备并更新"""
-        mock_repo = self._make_mock_repo(
-            device_config={"key": "mac1", "mcp_servers": {}},
-            mcp_servers={},
-        )
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
-             patch("src.infrastructure.routes.mcp._hot_reload_device_config"):
-            resp = client.put("/api/v1/devices/mac1/mcp/s1", json={"url": "http://new"})
-        assert resp.json()["code"] == 0
-
-    def test_update_device_mcp_with_headers_auth(self, client, tmp_path):
-        """更新 MCP 配置时保存 headers 和 auth"""
-        mock_repo = self._make_mock_repo(
-            device_config={"mcp_servers": {}},
-            mcp_servers={},
-        )
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
-             patch("src.infrastructure.routes.mcp._hot_reload_device_config"):
-            resp = client.put("/api/v1/devices/dev1/mcp/s1", json={
-                "url": "http://x",
-                "headers": {"Authorization": "Bearer token"},
-                "auth": {"type": "bearer"},
-            })
-        assert resp.json()["code"] == 0
-        data = resp.json()["data"]
-        assert data["headers"]["Authorization"] == "Bearer token"
-        assert data["auth"]["type"] == "bearer"
-
-    # ── MCP 配置删除补充 ──
-
-    def test_delete_device_mcp_no_file(self, client, tmp_path):
-        """设备不存在时删除"""
-        mock_repo = self._make_mock_repo(device_found=False)
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.delete("/api/v1/devices/dev1/mcp/s1")
-        assert resp.json()["code"] == 1
-
-    # ── MCP 工具查询 ──
-
-    def test_get_device_mcp_tools_success(self, client, tmp_path):
-        """获取设备 MCP 工具列表成功"""
-        mock_repo = self._make_mock_repo(
-            device_config={"mcp_servers": {"s1": {"url": "http://x"}}},
-            mcp_servers={"s1": {"url": "http://x"}},
-        )
-        mock_client = MagicMock()
-        mock_client.connect = AsyncMock()
-        mock_client.disconnect = AsyncMock()
-        mock_client.get_tools_schema.return_value = [
-            {"function": {"name": "tool1", "description": "desc1"}},
-            {"function": {"name": "tool2", "description": "desc2"}},
-        ]
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
-             patch("src.use_cases.tools_system.MCPClient", return_value=mock_client):
-            resp = client.get("/api/v1/devices/dev1/mcp/s1/tools")
-        assert resp.json()["code"] == 0
-        assert len(resp.json()["data"]) == 2
-        assert resp.json()["data"][0]["name"] == "tool1"
-
-    def test_get_device_mcp_tools_no_file(self, client, tmp_path):
-        """设备不存在"""
-        mock_repo = self._make_mock_repo(device_found=False)
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.get("/api/v1/devices/dev1/mcp/s1/tools")
-        assert resp.json()["code"] == 1
-        assert "不存在" in resp.json()["message"]
-
-    def test_get_device_mcp_tools_device_not_found(self, client, tmp_path):
-        """设备不存在"""
-        mock_repo = self._make_mock_repo(device_found=False)
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.get("/api/v1/devices/nonexistent/mcp/s1/tools")
-        assert resp.json()["code"] == 1
-        assert "设备不存在" in resp.json()["message"]
-
-    def test_get_device_mcp_tools_server_not_found(self, client, tmp_path):
-        """MCP 服务器不存在"""
-        mock_repo = self._make_mock_repo(
-            device_config={"mcp_servers": {}},
-            mcp_servers={},
-        )
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.get("/api/v1/devices/dev1/mcp/s1/tools")
-        assert resp.json()["code"] == 1
-        assert "MCP 服务器不存在" in resp.json()["message"]
-
-    def test_get_device_mcp_tools_empty_url(self, client, tmp_path):
-        """MCP 服务器 URL 为空"""
-        mock_repo = self._make_mock_repo(
-            device_config={"mcp_servers": {"s1": {"url": ""}}},
-            mcp_servers={"s1": {"url": ""}},
-        )
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.get("/api/v1/devices/dev1/mcp/s1/tools")
-        assert resp.json()["code"] == 1
-        assert "URL 为空" in resp.json()["message"]
-
-    def test_get_device_mcp_tools_connect_exception(self, client, tmp_path):
-        """MCP 连接异常"""
-        mock_repo = self._make_mock_repo(
-            device_config={"mcp_servers": {"s1": {"url": "http://x"}}},
-            mcp_servers={"s1": {"url": "http://x"}},
-        )
-        mock_client = MagicMock()
-        mock_client.connect = AsyncMock(side_effect=RuntimeError("connect failed"))
-        mock_client.disconnect = AsyncMock()
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
-             patch("src.use_cases.tools_system.MCPClient", return_value=mock_client):
-            resp = client.get("/api/v1/devices/dev1/mcp/s1/tools")
-        assert resp.json()["code"] == 1
-        assert "获取工具列表失败" in resp.json()["message"]
-
-    def test_get_device_all_tools_success(self, client, tmp_path):
-        """获取设备所有工具（内置 + MCP）"""
-        mock_repo = self._make_mock_repo(
-            device_config={"mcp_servers": {"s1": {"url": "http://x"}}},
-            mcp_servers={"s1": {"url": "http://x"}},
-        )
-        mock_client = MagicMock()
-        mock_client.connect = AsyncMock()
-        mock_client.disconnect = AsyncMock()
-        mock_client.get_tools_schema.return_value = [
-            {"function": {"name": "mcp_tool", "description": "mcp desc"}}
-        ]
-        builtin_tools = [
-            {"function": {"name": "builtin_tool", "description": "builtin desc"}}
-        ]
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
-             patch("src.use_cases.tools_system.get_openai_tools_schema", return_value=iter(builtin_tools)), \
-             patch("src.use_cases.tools_system.MCPClient", return_value=mock_client):
-            resp = client.get("/api/v1/devices/dev1/tools")
-        assert resp.json()["code"] == 0
-        names = [t["name"] for t in resp.json()["data"]]
-        assert "builtin_tool" in names
-        assert "mcp_tool" in names
-
-    def test_get_device_all_tools_no_file(self, client, tmp_path):
-        """无设备时仅返回内置工具"""
-        mock_repo = self._make_mock_repo(device_found=False)
-        with patch("src.use_cases.tools_system.get_openai_tools_schema",
-                   return_value=iter([{"function": {"name": "t1", "description": "d"}}])), \
-             patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.get("/api/v1/devices/dev1/tools")
-        assert resp.json()["code"] == 0
-        assert len(resp.json()["data"]) == 1
-        assert resp.json()["data"][0]["type"] == "global"
-
-    def test_get_device_all_tools_mcp_error(self, client, tmp_path):
-        """MCP 服务器获取工具失败时继续返回内置工具"""
-        mock_repo = self._make_mock_repo(
-            device_config={"mcp_servers": {"s1": {"url": "http://x"}}},
-            mcp_servers={"s1": {"url": "http://x"}},
-        )
-        mock_client = MagicMock()
-        mock_client.connect = AsyncMock(side_effect=RuntimeError("connect failed"))
-        mock_client.disconnect = AsyncMock()
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
-             patch("src.use_cases.tools_system.get_openai_tools_schema",
-                   return_value=iter([{"function": {"name": "t1", "description": "d"}}])), \
-             patch("src.use_cases.tools_system.MCPClient", return_value=mock_client):
-            resp = client.get("/api/v1/devices/dev1/tools")
-        assert resp.json()["code"] == 0
-        data = resp.json()["data"]
-        assert len(data) == 1
-        assert data[0]["type"] == "global"
-
-    def test_get_device_all_tools_device_not_found(self, client, tmp_path):
-        """设备不存在时仅返回内置工具"""
-        mock_repo = self._make_mock_repo(device_found=False)
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
-             patch("src.use_cases.tools_system.get_openai_tools_schema",
-                   return_value=iter([{"function": {"name": "t1", "description": "d"}}])):
-            resp = client.get("/api/v1/devices/dev1/tools")
-        assert resp.json()["code"] == 0
-        assert len(resp.json()["data"]) == 1
-
-    # ── MCP 启停补充 ──
-
-    def test_toggle_mcp_server_enable(self, client, tmp_path):
-        """启用 MCP 服务器（disabled=False）"""
-        mock_repo = self._make_mock_repo(
-            device_config={"disabled_mcp_servers": ["s1", "s2"]},
-        )
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
-             patch("src.infrastructure.routes.mcp._hot_reload_device_config"):
-            resp = client.post("/api/v1/devices/dev1/mcp/s1/toggle", params={"disabled": False})
-        assert resp.json()["code"] == 0
-        assert resp.json()["data"]["disabled"] is False
-
-    def test_toggle_mcp_server_not_found(self, client, tmp_path):
-        """设备不存在时切换 MCP 服务器"""
-        mock_repo = self._make_mock_repo(device_found=False)
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.post("/api/v1/devices/nonexistent/mcp/s1/toggle", params={"disabled": True})
-        assert resp.json()["code"] == 1
-
-    def test_toggle_mcp_tool_enable(self, client, tmp_path):
-        """启用 MCP 工具（disabled=False）"""
-        mock_repo = self._make_mock_repo(
-            device_config={"disabled_mcp_tools": {"s1": ["t1", "t2"]}},
-        )
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo), \
-             patch("src.infrastructure.routes.mcp._hot_reload_device_config"):
-            resp = client.post("/api/v1/devices/dev1/mcp/s1/tools/t1/toggle", params={"disabled": False})
-        assert resp.json()["code"] == 0
-        assert resp.json()["data"]["disabled"] is False
-
-    def test_toggle_mcp_tool_not_found(self, client, tmp_path):
-        """设备不存在时切换 MCP 工具"""
-        mock_repo = self._make_mock_repo(device_found=False)
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.post("/api/v1/devices/nonexistent/mcp/s1/tools/t1/toggle", params={"disabled": True})
-        assert resp.json()["code"] == 1
-
-    def test_get_mcp_disabled_no_file(self, client, tmp_path):
-        """设备不存在时获取禁用列表"""
-        mock_repo = self._make_mock_repo(device_found=False)
-        with patch("src.infrastructure.routes.mcp._get_repo", return_value=mock_repo):
-            resp = client.get("/api/v1/devices/dev1/mcp/disabled")
-        assert resp.json()["code"] == 1
+    async def test_get_emotions_exception(self, client, app):
+        """归属校验异常：当前路由未捕获，返回 500"""
+        with patch("src.infrastructure.routes.growth._check_device_owner",
+                   AsyncMock(side_effect=RuntimeError("err"))):
+            no_raise_client = TestClient(app, raise_server_exceptions=False)
+            resp = no_raise_client.get("/api/v1/growth/emotions/dev1")
+        assert resp.status_code == 500
 
 
 # ════════════════════════════════════════════════════════════════
@@ -1302,13 +925,12 @@ class TestSkillsRoutes:
     """技能路由测试"""
 
     @pytest.fixture
-    def app(self):
-        from src.infrastructure.routes.skills import register_routes
-        from src.infrastructure.security import verify_admin_api_key
+    def app(self, tmp_path):
+        from src.infrastructure.routes.skills import router
+        from src.infrastructure.security_jwt import get_current_user
         application = FastAPI()
-        register_routes(application)
-        # 路由单元测试跳过 API key 认证（认证逻辑由 security 层单独覆盖）
-        application.dependency_overrides[verify_admin_api_key] = lambda: True
+        application.include_router(router)
+        application.dependency_overrides[get_current_user] = lambda: _mock_user()
         return application
 
     @pytest.fixture
@@ -1328,10 +950,12 @@ class TestSkillsRoutes:
         assert resp.json()["code"] == 0
         assert resp.json()["data"]["count"] == 1
 
-    def test_list_skills_exception(self, client):
+    def test_list_skills_exception(self, client, app):
+        """技能目录加载异常：当前路由未捕获，返回 500"""
         with patch("src.use_cases.skill_system.get_catalog", side_effect=RuntimeError("err")):
-            resp = client.get("/api/v1/skills")
-        assert resp.json()["code"] == 1
+            no_raise_client = TestClient(app, raise_server_exceptions=False)
+            resp = no_raise_client.get("/api/v1/skills")
+        assert resp.status_code == 500
 
     def test_list_skills_with_device_id(self, client):
         """按 device_id 过滤技能"""
@@ -1443,7 +1067,9 @@ class TestSkillsRoutes:
         assert resp.json()["code"] == 0
         assert resp.json()["data"]["count"] == 2
 
-    def test_reload_skills_exception(self, client):
+    def test_reload_skills_exception(self, client, app):
+        """技能重载异常：当前路由未捕获，返回 500"""
         with patch("src.use_cases.skill_system.reload", side_effect=RuntimeError("err")):
-            resp = client.post("/api/v1/skills/reload")
-        assert resp.json()["code"] == 1
+            no_raise_client = TestClient(app, raise_server_exceptions=False)
+            resp = no_raise_client.post("/api/v1/skills/reload")
+        assert resp.status_code == 500

@@ -85,7 +85,7 @@ class TestSpeakCore:
 
         # mock create_tts_gateway
         mock_session = AsyncMock()
-        mock_session.synthesize = _make_synthesize([b"chunk1", b"chunk2"])
+        mock_session.synthesize_audio = _make_synthesize([b"chunk1", b"chunk2"])
         mock_session.close = AsyncMock()
         mock_gateway = AsyncMock()
         mock_gateway.create_session = AsyncMock(return_value=mock_session)
@@ -145,7 +145,7 @@ class TestSpeakCore:
         fsm.set = AsyncMock()
 
         mock_session = AsyncMock()
-        mock_session.synthesize = _make_synthesize([b"chunk1"])
+        mock_session.synthesize_audio = _make_synthesize([b"chunk1"])
         mock_session.close = AsyncMock()
         mock_gateway = AsyncMock()
         mock_gateway.create_session = AsyncMock(return_value=mock_session)
@@ -169,7 +169,7 @@ class TestSpeakCore:
 
         mock_session = AsyncMock()
         # 包含空 chunk
-        mock_session.synthesize = _make_synthesize([b"chunk1", b"", None, b"chunk2"])
+        mock_session.synthesize_audio = _make_synthesize([b"chunk1", b"", None, b"chunk2"])
         mock_session.close = AsyncMock()
         mock_gateway = AsyncMock()
         mock_gateway.create_session = AsyncMock(return_value=mock_session)
@@ -209,7 +209,7 @@ class TestSpeak:
         registry.get_by_mac.return_value = device
 
         mock_session = AsyncMock()
-        mock_session.synthesize = _make_synthesize([b"chunk"])
+        mock_session.synthesize_audio = _make_synthesize([b"chunk"])
         mock_session.close = AsyncMock()
         mock_gateway = AsyncMock()
         mock_gateway.create_session = AsyncMock(return_value=mock_session)
@@ -235,7 +235,7 @@ class TestSpeak:
         registry.get_by_mac.return_value = device
 
         mock_session = AsyncMock()
-        mock_session.synthesize = _make_synthesize([b"chunk"])
+        mock_session.synthesize_audio = _make_synthesize([b"chunk"])
         mock_session.close = AsyncMock()
         mock_gateway = AsyncMock()
         mock_gateway.create_session = AsyncMock(return_value=mock_session)
@@ -271,7 +271,7 @@ class TestSpeakDirect:
         session = MagicMock()
 
         mock_tts_session = AsyncMock()
-        mock_tts_session.synthesize = _make_synthesize([b"chunk"])
+        mock_tts_session.synthesize_audio = _make_synthesize([b"chunk"])
         mock_tts_session.close = AsyncMock()
         mock_gateway = AsyncMock()
         mock_gateway.create_session = AsyncMock(return_value=mock_tts_session)
@@ -603,7 +603,7 @@ class TestDeviceManagement:
 
 
 def _make_synthesize(chunks):
-    """构造一个可调用的异步生成器（模拟 session.synthesize(text)）"""
+    """构造一个可调用的异步生成器（模拟 session.synthesize_audio(text)）"""
     async def _gen(*args, **kwargs):
         for chunk in chunks:
             yield chunk

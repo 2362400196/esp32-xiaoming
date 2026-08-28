@@ -1,6 +1,7 @@
 """插件管理路由：热加载、插件列表、设备级插件启用控制、插件包安装/卸载/更新"""
 
 import asyncio
+import inspect
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
@@ -8,6 +9,7 @@ from pydantic import BaseModel
 
 from src.infrastructure.logging import get_logger
 from src.infrastructure.security_jwt import get_current_user, get_current_user_optional, require_admin
+from src.infrastructure.routes._deps import check_device_owner as _check_device_owner
 
 logger = get_logger(__name__)
 
@@ -76,60 +78,32 @@ def _available_plugins() -> list[dict]:
     return out
 
 
-async def _check_device_owner(device_id: str, user) -> bool:
-    """校验设备归属当前用户（兼容 mac_address / device_id / device_key 查找）"""
-    from src.infrastructure.db.session import get_session_ctx
-    from src.infrastructure.db.models.device import DeviceModel
-    from sqlalchemy import select, or_
-
-    async with get_session_ctx() as session:
-        result = await session.execute(
-            select(DeviceModel).where(
-                or_(
-                    DeviceModel.device_id == device_id,
-                    DeviceModel.mac_address == device_id,
-                    DeviceModel.device_key == device_id,
-                ),
-                DeviceModel.user_id == user.id,
-            )
-        )
-        return result.scalar_one_or_none() is not None
-
-
 @router.get("/api/v1/plugins")
 async def list_plugins(user=Depends(get_current_user)):
     """列出所有已加载插件（名称、工具列表、能力要求）。"""
-    try:
-        return {"code": 0, "message": "ok", "data": _available_plugins()}
-    except Exception as e:
-        return {"code": 1, "message": str(e), "data": None}
+    return {"code": 0, "message": "ok", "data": _available_plugins()}
 
 
 @router.get("/api/v1/devices/{device_id}/plugins")
 async def get_device_plugins(device_id: str, user=Depends(get_current_user)):
     """查询设备当前启用的插件白名单。
     返回 enabled_plugins（null/空 = 全部启用）及可用插件列表。"""
-    try:
-        if not await _check_device_owner(device_id, user):
-            raise HTTPException(403, "Device not bound to you")
-        from src.infrastructure.db.repositories.device_repository import DeviceRepository
-        config = await DeviceRepository().get_device_config(device_id)
-        if config is None:
-            return {"code": 1, "message": f"设备不存在: {device_id}", "data": None}
-        return {
-            "code": 0,
-            "message": "ok",
-            "data": {
-                "device_id": device_id,
-                "enabled_plugins": config.get("enabled_plugins"),
-                "plugin_configs": config.get("plugin_configs") or {},
-                "available_plugins": _available_plugins(),
-            },
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        return {"code": 1, "message": str(e), "data": None}
+    if not await _check_device_owner(device_id, user):
+        raise HTTPException(403, "Device not bound to you")
+    from src.infrastructure.db.repositories.device_repository import DeviceRepository
+    config = await DeviceRepository().get_device_config(device_id)
+    if config is None:
+        return {"code": 1, "message": f"设备不存在: {device_id}", "data": None}
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "device_id": device_id,
+            "enabled_plugins": config.get("enabled_plugins"),
+            "plugin_configs": config.get("plugin_configs") or {},
+            "available_plugins": _available_plugins(),
+        },
+    }
 
 
 class PluginConfigRequest(BaseModel):
@@ -147,50 +121,45 @@ async def set_plugin_config(
     """保存设备级插件配置（如天气插件的高德 API Key）。
     用法: PUT /api/v1/devices/<device_id>/plugins/weather/config
       {"config": {"amap_key": "xxx"}}"""
-    try:
-        if not await _check_device_owner(device_id, user):
-            raise HTTPException(403, "Device not bound to you")
+    if not await _check_device_owner(device_id, user):
+        raise HTTPException(403, "Device not bound to you")
 
-        # 校验插件存在 + 只接受声明过的配置字段
-        plugins = {p["name"]: p for p in _available_plugins()}
-        if plugin_name not in plugins:
-            return {"code": 1, "message": f"未知插件: {plugin_name}", "data": None}
-        declared = {f["key"] for f in plugins[plugin_name].get("config_fields", [])}
-        unknown = [k for k in body.config.keys() if k not in declared]
-        # 仅当插件声明了 config_fields 才做白名单校验；
-        # 未声明的插件接受任意键，避免开发者漏配 config_fields 后配置存不进去
-        if declared and unknown:
-            return {"code": 1, "message": f"未知配置项: {unknown}（本插件支持: {sorted(declared)}）", "data": None}
+    # 校验插件存在 + 只接受声明过的配置字段
+    plugins = {p["name"]: p for p in _available_plugins()}
+    if plugin_name not in plugins:
+        return {"code": 1, "message": f"未知插件: {plugin_name}", "data": None}
+    declared = {f["key"] for f in plugins[plugin_name].get("config_fields", [])}
+    unknown = [k for k in body.config.keys() if k not in declared]
+    # 仅当插件声明了 config_fields 才做白名单校验；
+    # 未声明的插件接受任意键，避免开发者漏配 config_fields 后配置存不进去
+    if declared and unknown:
+        return {"code": 1, "message": f"未知配置项: {unknown}（本插件支持: {sorted(declared)}）", "data": None}
 
-        from src.infrastructure.db.repositories.device_repository import DeviceRepository
-        repo = DeviceRepository()
-        found = await repo.find_by_mac(device_id)
-        if found is None:
-            found = await repo.find_by_key(device_id)
-        if found is None:
-            return {"code": 1, "message": f"设备不存在: {device_id}", "data": None}
-        real_device_id = found[0]
+    from src.infrastructure.db.repositories.device_repository import DeviceRepository
+    repo = DeviceRepository()
+    found = await repo.find_by_mac(device_id)
+    if found is None:
+        found = await repo.find_by_key(device_id)
+    if found is None:
+        return {"code": 1, "message": f"设备不存在: {device_id}", "data": None}
+    real_device_id = found[0]
 
-        # 合并到该插件的配置（保留其他插件的配置）
-        config_dict = await repo.get_device_config(real_device_id) or {}
-        merged_plugin_configs = dict(config_dict.get("plugin_configs") or {})
-        merged_plugin_configs[plugin_name] = {**merged_plugin_configs.get(plugin_name, {}), **body.config}
-        updated = await repo.update_device_partial(
-            real_device_id, {"plugin_configs": merged_plugin_configs}
-        )
-        if updated is None:
-            return {"code": 1, "message": f"设备不存在: {device_id}", "data": None}
+    # 合并到该插件的配置（保留其他插件的配置）
+    config_dict = await repo.get_device_config(real_device_id) or {}
+    merged_plugin_configs = dict(config_dict.get("plugin_configs") or {})
+    merged_plugin_configs[plugin_name] = {**merged_plugin_configs.get(plugin_name, {}), **body.config}
+    updated = await repo.update_device_partial(
+        real_device_id, {"plugin_configs": merged_plugin_configs}
+    )
+    if updated is None:
+        return {"code": 1, "message": f"设备不存在: {device_id}", "data": None}
 
-        # 热重载在线设备（同步 tool_mgr.plugin_configs，立即生效）
-        from src.infrastructure.web import _hot_reload_device_config
-        _hot_reload_device_config(device_id)
+    # 热重载在线设备（同步 tool_mgr.plugin_configs，立即生效）
+    from src.infrastructure.web import _hot_reload_device_config
+    _hot_reload_device_config(device_id)
 
-        logger.info(f"[插件] 设备 {device_id} 插件「{plugin_name}」配置已保存: {body.config} -> DB: {merged_plugin_configs.get(plugin_name)}")
-        return {"code": 0, "message": "ok", "data": {"plugin": plugin_name, "saved_keys": sorted(body.config.keys())}}
-    except HTTPException:
-        raise
-    except Exception as e:
-        return {"code": 1, "message": str(e), "data": None}
+    logger.info(f"[插件] 设备 {device_id} 插件「{plugin_name}」配置已保存: {body.config} -> DB: {merged_plugin_configs.get(plugin_name)}")
+    return {"code": 0, "message": "ok", "data": {"plugin": plugin_name, "saved_keys": sorted(body.config.keys())}}
 
 
 class PluginToolCallRequest(BaseModel):
@@ -212,68 +181,89 @@ async def call_plugin_tool(
     用法: POST /api/v1/plugins/weather/tool/test_weather_query
       {"args": {"city": "北京"}, "device_id": "D8:3B:DA:6D:D9:3C"}
     """
+    from src.use_cases.tools_system import get_tool
+    td = get_tool(tool_name)
+    if td is None:
+        return {"code": 1, "message": f"插件 {plugin_name} 未找到工具 {tool_name}", "data": None}
+
+    # 构建 tool_manager 上下文（注入设备 ID 和设备插件配置，用于 KV 按设备隔离）
+    class _MockToolManager:
+        """模拟 PerUserToolManager.get_plugin_config，让插件 SDK 读到配置"""
+        def __init__(self):
+            self.plugin_configs = {}
+            self.device_id = ""
+        def get_plugin_config(self, plugin: str, key: str, default: str = "") -> str:
+            return str((self.plugin_configs.get(plugin) or {}).get(key) or default)
+
+    tool_manager = _MockToolManager()
+
+    device_id = body.device_id or ""
+    if device_id:
+        tool_manager.device_id = device_id  # 注入设备 ID，使 KV 存储按设备隔离
+        if not await _check_device_owner(device_id, user):
+            raise HTTPException(403, "Device not bound to you")
+        from src.infrastructure.db.repositories.device_repository import DeviceRepository
+        repo = DeviceRepository()
+        found = await repo.find_by_mac(device_id)
+        if found is None:
+            found = await repo.find_by_key(device_id)
+        if found:
+            real_device_id = found[0]
+            config_dict = await repo.get_device_config(real_device_id) or {}
+            tool_manager.plugin_configs = config_dict.get("plugin_configs") or {}
+
+    # 调用插件工具函数（注入插件上下文，使 kv_set/kv_get 能找到正确的插件 ID）
+    from src.infrastructure.plugin_security import set_plugin_context, reset_plugin_context
+    from src.infrastructure.plugin_loader import _plugin_meta
+    # 从 manifest 读取插件权限，用于设置上下文
+    meta = _plugin_meta.get(plugin_name, {})
+    perms = meta.get("permissions") or []
+    if not isinstance(perms, list):
+        perms = []
+    perm_token = set_plugin_context(plugin_name, perms)
+
+    # 参数白名单过滤：只保留工具函数签名中声明的参数，防止参数注入。
+    # tool_manager/channel/ctx/fsm 等框架保留参数由服务端注入，禁止通过 body.args 覆盖
     try:
-        from src.use_cases.tools_system import get_tool
-        td = get_tool(tool_name)
-        if td is None:
-            return {"code": 1, "message": f"插件 {plugin_name} 未找到工具 {tool_name}", "data": None}
-
-        # 构建 tool_manager 上下文（注入设备 ID 和设备插件配置，用于 KV 按设备隔离）
-        class _MockToolManager:
-            """模拟 PerUserToolManager.get_plugin_config，让插件 SDK 读到配置"""
-            def __init__(self):
-                self.plugin_configs = {}
-                self.device_id = ""
-            def get_plugin_config(self, plugin: str, key: str, default: str = "") -> str:
-                return str((self.plugin_configs.get(plugin) or {}).get(key) or default)
-
-        tool_manager = _MockToolManager()
-
-        device_id = body.device_id or ""
-        if device_id:
-            tool_manager.device_id = device_id  # 注入设备 ID，使 KV 存储按设备隔离
-            if not await _check_device_owner(device_id, user):
-                raise HTTPException(403, "Device not bound to you")
-            from src.infrastructure.db.repositories.device_repository import DeviceRepository
-            repo = DeviceRepository()
-            found = await repo.find_by_mac(device_id)
-            if found is None:
-                found = await repo.find_by_key(device_id)
-            if found:
-                real_device_id = found[0]
-                config_dict = await repo.get_device_config(real_device_id) or {}
-                tool_manager.plugin_configs = config_dict.get("plugin_configs") or {}
-
-        # 调用插件工具函数（注入插件上下文，使 kv_set/kv_get 能找到正确的插件 ID）
-        from src.infrastructure.plugin_security import set_plugin_context, reset_plugin_context
-        from src.infrastructure.plugin_loader import _plugin_meta
-        # 从 manifest 读取插件权限，用于设置上下文
-        meta = _plugin_meta.get(plugin_name, {})
-        perms = meta.get("permissions") or []
-        if not isinstance(perms, list):
-            perms = []
-        perm_token = set_plugin_context(plugin_name, perms)
-
-        kwargs = dict(body.args)
+        sig = inspect.signature(td.func)
+    except (TypeError, ValueError):
+        sig = None
+    reserved = {"self", "cls", "tool_manager", "channel", "ctx", "fsm"}
+    if sig is not None:
+        sig_params = set(sig.parameters)
+        has_var_kw = any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        )
+        extra = [
+            k for k in body.args
+            if k in reserved or (not has_var_kw and k not in sig_params)
+        ]
+        if extra:
+            logger.debug(f"[插件工具调用] {plugin_name}/{tool_name} 丢弃未声明的参数: {extra}")
+        kwargs = {
+            k: v for k, v in body.args.items()
+            if k not in reserved and (has_var_kw or k in sig_params)
+        }
+        # 框架注入的上下文参数：仅当函数声明了对应形参时才传入
+        if "tool_manager" in sig_params:
+            kwargs["tool_manager"] = tool_manager
+    else:
+        # 无法内省签名时退回原始行为（保守起见仍剔除保留参数）
+        kwargs = {k: v for k, v in body.args.items() if k not in reserved}
         kwargs["tool_manager"] = tool_manager
-        try:
-            result = td.func(**kwargs)
-            if asyncio.iscoroutine(result):
-                result = await result
-        finally:
-            reset_plugin_context(perm_token)
+    try:
+        result = td.func(**kwargs)
+        if asyncio.iscoroutine(result):
+            result = await result
+    finally:
+        reset_plugin_context(perm_token)
 
-        import json
-        try:
-            data = json.loads(result)
-            return {"code": 0, "message": "ok", "data": data}
-        except (json.JSONDecodeError, TypeError):
-            return {"code": 0, "message": "ok", "data": result}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[插件工具调用] {plugin_name}/{tool_name} 异常: type={type(e).__name__} msg={e}")
-        return {"code": 1, "message": str(e), "data": None}
+    import json
+    try:
+        data = json.loads(result)
+        return {"code": 0, "message": "ok", "data": data}
+    except (json.JSONDecodeError, TypeError):
+        return {"code": 0, "message": "ok", "data": result}
 
 
 @router.put("/api/v1/devices/{device_id}/plugins")
@@ -287,43 +277,38 @@ async def set_device_plugins(
       {"enabled_plugins": ["weather", "system_basic"]}   # 只启用这两个插件
       {"enabled_plugins": []}                            # 全部启用（清除白名单）
     校验插件名存在；设置后在线设备立即生效（热重载）。"""
-    try:
-        if not await _check_device_owner(device_id, user):
-            raise HTTPException(403, "Device not bound to you")
+    if not await _check_device_owner(device_id, user):
+        raise HTTPException(403, "Device not bound to you")
 
-        # 校验插件名是否真实存在（空列表 = 清除白名单，跳过校验）
-        if body.enabled_plugins:
-            loaded = {p["name"] for p in _available_plugins()}
-            unknown = [p for p in body.enabled_plugins if p not in loaded]
-            if unknown:
-                return {"code": 1, "message": f"未知插件: {unknown}（可用: {sorted(loaded)}）", "data": None}
+    # 校验插件名是否真实存在（空列表 = 清除白名单，跳过校验）
+    if body.enabled_plugins:
+        loaded = {p["name"] for p in _available_plugins()}
+        unknown = [p for p in body.enabled_plugins if p not in loaded]
+        if unknown:
+            return {"code": 1, "message": f"未知插件: {unknown}（可用: {sorted(loaded)}）", "data": None}
 
-        from src.infrastructure.db.repositories.device_repository import DeviceRepository
-        repo = DeviceRepository()
-        # 兼容 mac / device_key / device_id 查找，解析出 DB 真实 device_id 再更新
-        found = await repo.find_by_mac(device_id)
-        if found is None:
-            found = await repo.find_by_key(device_id)
-        if found is None:
-            return {"code": 1, "message": f"设备不存在: {device_id}", "data": None}
-        real_device_id = found[0]
-        # 空列表写 []（不能用 None——_deep_merge 会跳过 None 导致卸载全部不生效）
-        updated = await repo.update_device_partial(
-            real_device_id, {"enabled_plugins": body.enabled_plugins or []}
-        )
-        if updated is None:
-            return {"code": 1, "message": f"设备不存在: {device_id}", "data": None}
+    from src.infrastructure.db.repositories.device_repository import DeviceRepository
+    repo = DeviceRepository()
+    # 兼容 mac / device_key / device_id 查找，解析出 DB 真实 device_id 再更新
+    found = await repo.find_by_mac(device_id)
+    if found is None:
+        found = await repo.find_by_key(device_id)
+    if found is None:
+        return {"code": 1, "message": f"设备不存在: {device_id}", "data": None}
+    real_device_id = found[0]
+    # 空列表写 []（不能用 None——_deep_merge 会跳过 None 导致卸载全部不生效）
+    updated = await repo.update_device_partial(
+        real_device_id, {"enabled_plugins": body.enabled_plugins or []}
+    )
+    if updated is None:
+        return {"code": 1, "message": f"设备不存在: {device_id}", "data": None}
 
-        # 热重载在线设备（更新 tool_manager 白名单，立即生效）
-        from src.infrastructure.web import _hot_reload_device_config
-        _hot_reload_device_config(device_id)
+    # 热重载在线设备（更新 tool_manager 白名单，立即生效）
+    from src.infrastructure.web import _hot_reload_device_config
+    _hot_reload_device_config(device_id)
 
-        logger.info(f"[插件] 设备 {device_id} 启用插件白名单: {body.enabled_plugins}")
-        return {"code": 0, "message": "ok", "data": {"device_id": device_id, "enabled_plugins": body.enabled_plugins}}
-    except HTTPException:
-        raise
-    except Exception as e:
-        return {"code": 1, "message": str(e), "data": None}
+    logger.info(f"[插件] 设备 {device_id} 启用插件白名单: {body.enabled_plugins}")
+    return {"code": 0, "message": "ok", "data": {"device_id": device_id, "enabled_plugins": body.enabled_plugins}}
 
 
 # ════════════════════════════════════════════════════════════
@@ -368,13 +353,10 @@ async def list_installed_plugins(_admin=Depends(require_admin)):
     扫描 data/plugins/installed/ 目录，读取每个插件的 manifest.json。
     返回 data 为数组，每项含 name/version/source/tools/loaded 等字段。
     """
-    try:
-        from src.infrastructure.plugin_manager import get_plugin_manager
-        manager = get_plugin_manager()
-        installed = manager.list_installed()
-        return {"code": 0, "message": "ok", "data": installed}
-    except Exception as e:
-        return {"code": 1, "message": str(e), "data": None}
+    from src.infrastructure.plugin_manager import get_plugin_manager
+    manager = get_plugin_manager()
+    installed = manager.list_installed()
+    return {"code": 0, "message": "ok", "data": installed}
 
 
 @router.get("/api/v1/plugins/updates")
@@ -384,13 +366,10 @@ async def check_plugin_updates(_admin=Depends(require_admin)):
     向市场 API 查询每个已安装插件的最新版本，与本地版本比较。
     返回 data 为数组，每项含 name/current_version/latest_version/has_update。
     """
-    try:
-        from src.infrastructure.plugin_manager import get_plugin_manager
-        manager = get_plugin_manager()
-        updates = await manager.check_updates()
-        return {"code": 0, "message": "ok", "data": updates}
-    except Exception as e:
-        return {"code": 1, "message": str(e), "data": None}
+    from src.infrastructure.plugin_manager import get_plugin_manager
+    manager = get_plugin_manager()
+    updates = await manager.check_updates()
+    return {"code": 0, "message": "ok", "data": updates}
 
 
 @router.post("/api/v1/plugins/install")
@@ -411,51 +390,47 @@ async def install_plugin(
 
     用法: curl -X POST -F "file=@weather.zip" http://<server>:8088/api/v1/plugins/install
     """
+    from src.infrastructure.plugin_manager import get_plugin_manager
+    from src.infrastructure.plugin_loader import PLUGINS_CACHE_DIR
+
+    if not file.filename or not file.filename.lower().endswith(".zip"):
+        return {"code": 1, "message": "请上传 .zip 格式的插件包", "data": None}
+
+    # 1. 保存上传的 zip 到缓存目录（限大小，防 zip 炸弹）
+    from src.infrastructure.plugin_manager import MAX_PLUGIN_ZIP_BYTES
+    PLUGINS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    # 使用原始文件名，避免冲突加时间戳后缀
+    import time
+    safe_name = Path(file.filename).name  # 防路径穿越
+    cache_path = PLUGINS_CACHE_DIR / f"{int(time.time())}_{safe_name}"
+
+    content = await file.read(MAX_PLUGIN_ZIP_BYTES + 1)
+    if len(content) > MAX_PLUGIN_ZIP_BYTES:
+        return {
+            "code": 1,
+            "message": f"插件包过大（>{MAX_PLUGIN_ZIP_BYTES // (1024 * 1024)}MB），拒绝安装",
+            "data": None,
+        }
+    cache_path.write_bytes(content)
+    logger.info(f"[插件] 上传 zip 已保存: {cache_path}（{len(content)} 字节）")
+
+    # 2. 安装
+    manager = get_plugin_manager()
+    result = await manager.install_from_zip(cache_path)
+
+    # 3. 清理缓存 zip
     try:
-        from src.infrastructure.plugin_manager import get_plugin_manager
-        from src.infrastructure.plugin_loader import PLUGINS_CACHE_DIR
+        if cache_path.exists():
+            cache_path.unlink()
+    except OSError:
+        pass
 
-        if not file.filename or not file.filename.lower().endswith(".zip"):
-            return {"code": 1, "message": "请上传 .zip 格式的插件包", "data": None}
-
-        # 1. 保存上传的 zip 到缓存目录（限大小，防 zip 炸弹）
-        from src.infrastructure.plugin_manager import MAX_PLUGIN_ZIP_BYTES
-        PLUGINS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        # 使用原始文件名，避免冲突加时间戳后缀
-        import time
-        safe_name = Path(file.filename).name  # 防路径穿越
-        cache_path = PLUGINS_CACHE_DIR / f"{int(time.time())}_{safe_name}"
-
-        content = await file.read(MAX_PLUGIN_ZIP_BYTES + 1)
-        if len(content) > MAX_PLUGIN_ZIP_BYTES:
-            return {
-                "code": 1,
-                "message": f"插件包过大（>{MAX_PLUGIN_ZIP_BYTES // (1024 * 1024)}MB），拒绝安装",
-                "data": None,
-            }
-        cache_path.write_bytes(content)
-        logger.info(f"[插件] 上传 zip 已保存: {cache_path}（{len(content)} 字节）")
-
-        # 2. 安装
-        manager = get_plugin_manager()
-        result = await manager.install_from_zip(cache_path)
-
-        # 3. 清理缓存 zip
-        try:
-            if cache_path.exists():
-                cache_path.unlink()
-        except OSError:
-            pass
-
-        if result.get("success"):
-            # 失效工具 schema 缓存
-            _invalidate_tool_schema_cache(request)
-            return {"code": 0, "message": result.get("message", "安装成功"), "data": result}
-        else:
-            return {"code": 1, "message": result.get("message", "安装失败"), "data": result}
-    except Exception as e:
-        logger.error(f"[插件] 安装异常: {e}")
-        return {"code": 1, "message": str(e), "data": None}
+    if result.get("success"):
+        # 失效工具 schema 缓存
+        _invalidate_tool_schema_cache(request)
+        return {"code": 0, "message": result.get("message", "安装成功"), "data": result}
+    else:
+        return {"code": 1, "message": result.get("message", "安装失败"), "data": result}
 
 
 @router.delete("/api/v1/plugins/{name}")
@@ -469,20 +444,16 @@ async def uninstall_plugin(name: str, request: Request, _admin=Depends(require_a
 
     用法: curl -X DELETE http://<server>:8088/api/v1/plugins/weather
     """
-    try:
-        from src.infrastructure.plugin_manager import get_plugin_manager
-        manager = get_plugin_manager()
-        result = await manager.uninstall(name)
+    from src.infrastructure.plugin_manager import get_plugin_manager
+    manager = get_plugin_manager()
+    result = await manager.uninstall(name)
 
-        if result.get("success"):
-            # 失效工具 schema 缓存
-            _invalidate_tool_schema_cache(request)
-            return {"code": 0, "message": result.get("message", "卸载成功"), "data": result}
-        else:
-            return {"code": 1, "message": result.get("message", "卸载失败"), "data": result}
-    except Exception as e:
-        logger.error(f"[插件] 卸载异常: {e}")
-        return {"code": 1, "message": str(e), "data": None}
+    if result.get("success"):
+        # 失效工具 schema 缓存
+        _invalidate_tool_schema_cache(request)
+        return {"code": 0, "message": result.get("message", "卸载成功"), "data": result}
+    else:
+        return {"code": 1, "message": result.get("message", "卸载失败"), "data": result}
 
 
 @router.post("/api/v1/plugins/{name}/update")
@@ -494,20 +465,16 @@ async def update_plugin(
     从市场下载最新版 zip → 卸载旧版 → 安装新版。
     用法: curl -X POST http://<server>:8088/api/v1/plugins/weather/update
     """
-    try:
-        from src.infrastructure.plugin_manager import get_plugin_manager
-        manager = get_plugin_manager()
-        result = await manager.update_plugin(name)
+    from src.infrastructure.plugin_manager import get_plugin_manager
+    manager = get_plugin_manager()
+    result = await manager.update_plugin(name)
 
-        if result.get("success"):
-            # 失效工具 schema 缓存
-            _invalidate_tool_schema_cache(request)
-            return {"code": 0, "message": result.get("message", "更新成功"), "data": result}
-        else:
-            return {"code": 1, "message": result.get("message", "更新失败"), "data": result}
-    except Exception as e:
-        logger.error(f"[插件] 更新异常: {e}")
-        return {"code": 1, "message": str(e), "data": None}
+    if result.get("success"):
+        # 失效工具 schema 缓存
+        _invalidate_tool_schema_cache(request)
+        return {"code": 0, "message": result.get("message", "更新成功"), "data": result}
+    else:
+        return {"code": 1, "message": result.get("message", "更新失败"), "data": result}
 
 
 class PluginCodeReq(BaseModel):
@@ -519,57 +486,53 @@ class PluginCodeReq(BaseModel):
 @router.get("/api/v1/plugins/{name}/source")
 async def get_local_plugin_source(name: str, _admin=Depends(require_admin)):
     """获取本地插件的源码（所有文本文件，含 plugin.py 和 manifest.json）。"""
-    try:
-        from src.infrastructure.plugin_loader import _resolve_plugin_dir
+    from src.infrastructure.plugin_loader import _resolve_plugin_dir
 
-        plugin_dir, source = _resolve_plugin_dir(name)
-        if plugin_dir is None:
-            return {"code": 1, "message": f"插件不存在: {name}", "data": None}
+    plugin_dir, source = _resolve_plugin_dir(name)
+    if plugin_dir is None:
+        return {"code": 1, "message": f"插件不存在: {name}", "data": None}
 
-        files = []
-        for f in sorted(plugin_dir.rglob("*")):
-            if not f.is_file():
-                continue
-            rel = f.relative_to(plugin_dir).as_posix()
-            try:
-                content = f.read_text(encoding="utf-8")
-                files.append({"name": rel, "content": content})
-            except UnicodeDecodeError:
-                # 二进制文件（如图标 png/jpg）以 base64 返回，编辑后重新打包时保留
-                import base64
-                files.append({
-                    "name": rel,
-                    "content": base64.b64encode(f.read_bytes()).decode("ascii"),
-                    "binary": True,
-                })
-
-        plugin_file = plugin_dir / "plugin.py"
-        manifest_file = plugin_dir / "manifest.json"
-
-        plugin_code = plugin_file.read_text(encoding="utf-8") if plugin_file.is_file() else ""
-        manifest_raw = manifest_file.read_text(encoding="utf-8") if manifest_file.is_file() else "{}"
-
+    files = []
+    for f in sorted(plugin_dir.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(plugin_dir).as_posix()
         try:
-            import json
-            manifest = json.loads(manifest_raw)
-        except Exception:
-            manifest = {}
+            content = f.read_text(encoding="utf-8")
+            files.append({"name": rel, "content": content})
+        except UnicodeDecodeError:
+            # 二进制文件（如图标 png/jpg）以 base64 返回，编辑后重新打包时保留
+            import base64
+            files.append({
+                "name": rel,
+                "content": base64.b64encode(f.read_bytes()).decode("ascii"),
+                "binary": True,
+            })
 
-        return {
-            "code": 0,
-            "message": "ok",
-            "data": {
-                "name": name,
-                "source": source,
-                "files": files,
-                "plugin_code": plugin_code,
-                "manifest_raw": manifest_raw,
-                "manifest": manifest,
-            },
-        }
-    except Exception as e:
-        logger.error(f"[插件] 获取源码失败: {e}")
-        return {"code": 1, "message": str(e), "data": None}
+    plugin_file = plugin_dir / "plugin.py"
+    manifest_file = plugin_dir / "manifest.json"
+
+    plugin_code = plugin_file.read_text(encoding="utf-8") if plugin_file.is_file() else ""
+    manifest_raw = manifest_file.read_text(encoding="utf-8") if manifest_file.is_file() else "{}"
+
+    try:
+        import json
+        manifest = json.loads(manifest_raw)
+    except Exception:
+        manifest = {}
+
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "name": name,
+            "source": source,
+            "files": files,
+            "plugin_code": plugin_code,
+            "manifest_raw": manifest_raw,
+            "manifest": manifest,
+        },
+    }
 
 
 @router.put("/api/v1/plugins/{name}/source")
@@ -584,55 +547,49 @@ async def update_local_plugin_source(
     仅支持已安装插件（data/plugins/installed/），不支持修改内置插件源码。
     修改后自动热重载，无需重启服务器。
     """
+    from src.infrastructure.plugin_loader import INSTALLED_PLUGINS_DIR, reload_single_plugin
+
+    plugin_dir = INSTALLED_PLUGINS_DIR / name
+    if not plugin_dir.is_dir():
+        return {"code": 1, "message": f"已安装插件不存在: {name}（仅支持修改已安装插件）", "data": None}
+
+    # 兼容旧调用：只有 plugin_code 时视为仅更新 plugin.py
+    if body.files:
+        plugin_dir.mkdir(parents=True, exist_ok=True)
+        for item in body.files:
+            fname = str(item.get("name") or "").strip().lstrip("/")
+            if not fname or ".." in Path(fname).parts:
+                return {"code": 1, "message": f"非法文件名: {fname}", "data": None}
+            target = (plugin_dir / fname).resolve()
+            if not str(target).startswith(str(plugin_dir.resolve())):
+                return {"code": 1, "message": f"非法文件名: {fname}", "data": None}
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if item.get("binary"):
+                import base64
+                try:
+                    target.write_bytes(base64.b64decode(str(item.get("content") or "")))
+                except Exception:
+                    continue
+            else:
+                target.write_text(str(item.get("content") or ""), encoding="utf-8")
+    elif body.plugin_code:
+        plugin_file = plugin_dir / "plugin.py"
+        plugin_file.write_text(body.plugin_code, encoding="utf-8")
+    else:
+        return {"code": 1, "message": "没有可写入的内容", "data": None}
+
+    success = await reload_single_plugin(name)
     try:
-        from src.infrastructure.plugin_loader import INSTALLED_PLUGINS_DIR, reload_single_plugin
+        _invalidate_tool_schema_cache(request)
+    except Exception as cache_e:
+        logger.warning(f"[插件] 失效缓存异常: {cache_e}")
 
-        plugin_dir = INSTALLED_PLUGINS_DIR / name
-        if not plugin_dir.is_dir():
-            return {"code": 1, "message": f"已安装插件不存在: {name}（仅支持修改已安装插件）", "data": None}
-
-        # 兼容旧调用：只有 plugin_code 时视为仅更新 plugin.py
-        if body.files:
-            plugin_dir.mkdir(parents=True, exist_ok=True)
-            for item in body.files:
-                fname = str(item.get("name") or "").strip().lstrip("/")
-                if not fname or ".." in Path(fname).parts:
-                    return {"code": 1, "message": f"非法文件名: {fname}", "data": None}
-                target = (plugin_dir / fname).resolve()
-                if not str(target).startswith(str(plugin_dir.resolve())):
-                    return {"code": 1, "message": f"非法文件名: {fname}", "data": None}
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if item.get("binary"):
-                    import base64
-                    try:
-                        target.write_bytes(base64.b64decode(str(item.get("content") or "")))
-                    except Exception:
-                        continue
-                else:
-                    target.write_text(str(item.get("content") or ""), encoding="utf-8")
-        elif body.plugin_code:
-            plugin_file = plugin_dir / "plugin.py"
-            plugin_file.write_text(body.plugin_code, encoding="utf-8")
-        else:
-            return {"code": 1, "message": "没有可写入的内容", "data": None}
-
-        success = await reload_single_plugin(name)
-        try:
-            _invalidate_tool_schema_cache(request)
-        except Exception as cache_e:
-            logger.warning(f"[插件] 失效缓存异常: {cache_e}")
-
-        logger.info(f"[插件] 源码已更新: {name}, 热重载: {'成功' if success else '失败'}")
-        return {
-            "code": 0,
-            "message": "源码已保存并热重载" if success else "源码已保存，但热重载失败，请检查代码语法",
-            "data": {"name": name, "reloaded": success},
-        }
-    except Exception as e:
-        logger.error(f"[插件] 更新源码失败: type={type(e).__name__} msg={e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return {"code": 1, "message": str(e) or str(type(e).__name__), "data": None}
+    logger.info(f"[插件] 源码已更新: {name}, 热重载: {'成功' if success else '失败'}")
+    return {
+        "code": 0,
+        "message": "源码已保存并热重载" if success else "源码已保存，但热重载失败，请检查代码语法",
+        "data": {"name": name, "reloaded": success},
+    }
 
 
 class CreateLocalPluginReq(BaseModel):
@@ -657,80 +614,76 @@ async def create_local_plugin(
     在 data/plugins/installed/{slug}/ 下创建目录，写入 manifest.json 和 plugin.py，
     然后热重载。适用于开发者先本地测试，测试完毕后再上架市场。
     """
+    import json
+    import re
+
+    from src.infrastructure.plugin_loader import INSTALLED_PLUGINS_DIR, reload_single_plugin
+    from src.infrastructure.plugin_manifest import PluginManifest
+
+    slug = body.slug.lower().strip()
+    if not re.match(r'^[a-z][a-z0-9_-]*$', slug):
+        return {"code": 1, "message": f"slug 非法（需以字母开头，仅含小写字母/数字/_/-）: {body.slug}", "data": None}
+
+    if not body.name.strip():
+        return {"code": 1, "message": "插件名称不能为空", "data": None}
+
+    if not body.plugin_code.strip() and not body.files:
+        return {"code": 1, "message": "plugin.py 代码不能为空", "data": None}
+
+    plugin_dir = INSTALLED_PLUGINS_DIR / slug
+    if plugin_dir.exists():
+        return {"code": 1, "message": f"插件已存在: {slug}（如需更新请使用编辑功能）", "data": None}
+
+    # 构建 manifest
+    manifest = body.manifest or {}
+    manifest["id"] = slug
+    manifest["name"] = body.name.strip()
+    manifest["version"] = body.version or "1.0.0"
+    manifest["description"] = body.description or ""
+    manifest.setdefault("api_version", "1.0")
+
+    # 校验 manifest（校验失败属客户端输入问题 → 400）
     try:
-        import json
-        import re
-
-        from src.infrastructure.plugin_loader import INSTALLED_PLUGINS_DIR, reload_single_plugin
-        from src.infrastructure.plugin_manifest import PluginManifest
-
-        slug = body.slug.lower().strip()
-        if not re.match(r'^[a-z][a-z0-9_-]*$', slug):
-            return {"code": 1, "message": f"slug 非法（需以字母开头，仅含小写字母/数字/_/-）: {body.slug}", "data": None}
-
-        if not body.name.strip():
-            return {"code": 1, "message": "插件名称不能为空", "data": None}
-
-        if not body.plugin_code.strip() and not body.files:
-            return {"code": 1, "message": "plugin.py 代码不能为空", "data": None}
-
-        plugin_dir = INSTALLED_PLUGINS_DIR / slug
-        if plugin_dir.exists():
-            return {"code": 1, "message": f"插件已存在: {slug}（如需更新请使用编辑功能）", "data": None}
-
-        # 构建 manifest
-        manifest = body.manifest or {}
-        manifest["id"] = slug
-        manifest["name"] = body.name.strip()
-        manifest["version"] = body.version or "1.0.0"
-        manifest["description"] = body.description or ""
-        manifest.setdefault("api_version", "1.0")
-
-        # 校验 manifest
-        try:
-            m = PluginManifest(**manifest)
-            m.validate_compatibility()
-        except Exception as e:
-            return {"code": 1, "message": f"manifest 校验失败: {e}", "data": None}
-
-        # 创建目录和文件
-        plugin_dir.mkdir(parents=True, exist_ok=True)
-        (plugin_dir / "manifest.json").write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        if body.files:
-            for item in body.files:
-                fname = str(item.get("name") or "").strip().lstrip("/")
-                if not fname or ".." in Path(fname).parts:
-                    return {"code": 1, "message": f"非法文件名: {fname}", "data": None}
-                target = (plugin_dir / fname).resolve()
-                if not str(target).startswith(str(plugin_dir.resolve())):
-                    return {"code": 1, "message": f"非法文件名: {fname}", "data": None}
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if item.get("binary"):
-                    import base64
-                    try:
-                        target.write_bytes(base64.b64decode(str(item.get("content") or "")))
-                    except Exception:
-                        continue
-                else:
-                    target.write_text(str(item.get("content") or ""), encoding="utf-8")
-        else:
-            (plugin_dir / "plugin.py").write_text(body.plugin_code, encoding="utf-8")
-
-        # 热重载
-        success = await reload_single_plugin(slug)
-        _invalidate_tool_schema_cache(request)
-
-        logger.info(f"[插件] 本地创建: {slug}, 热重载: {'成功' if success else '失败'}")
-        return {
-            "code": 0,
-            "message": f"插件已创建并{'热重载成功' if success else '已创建（热重载失败，请检查代码语法）'}",
-            "data": {"slug": slug, "name": body.name, "reloaded": success},
-        }
+        m = PluginManifest(**manifest)
+        m.validate_compatibility()
     except Exception as e:
-        logger.error(f"[插件] 本地创建失败: {e}")
-        return {"code": 1, "message": str(e), "data": None}
+        raise HTTPException(400, f"manifest 校验失败: {e}")
+
+    # 创建目录和文件
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    if body.files:
+        for item in body.files:
+            fname = str(item.get("name") or "").strip().lstrip("/")
+            if not fname or ".." in Path(fname).parts:
+                return {"code": 1, "message": f"非法文件名: {fname}", "data": None}
+            target = (plugin_dir / fname).resolve()
+            if not str(target).startswith(str(plugin_dir.resolve())):
+                return {"code": 1, "message": f"非法文件名: {fname}", "data": None}
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if item.get("binary"):
+                import base64
+                try:
+                    target.write_bytes(base64.b64decode(str(item.get("content") or "")))
+                except Exception:
+                    continue
+            else:
+                target.write_text(str(item.get("content") or ""), encoding="utf-8")
+    else:
+        (plugin_dir / "plugin.py").write_text(body.plugin_code, encoding="utf-8")
+
+    # 热重载
+    success = await reload_single_plugin(slug)
+    _invalidate_tool_schema_cache(request)
+
+    logger.info(f"[插件] 本地创建: {slug}, 热重载: {'成功' if success else '失败'}")
+    return {
+        "code": 0,
+        "message": f"插件已创建并{'热重载成功' if success else '已创建（热重载失败，请检查代码语法）'}",
+        "data": {"slug": slug, "name": body.name, "reloaded": success},
+    }
 
 
 # ════════════════════════════════════════════════════════════
@@ -749,23 +702,17 @@ async def get_plugin_logs(
 
     用法: GET /api/v1/plugins/weather/logs?limit=50&level=error
     """
-    try:
-        from src.infrastructure.plugin_log_store import get_logs
-        entries = get_logs(name, limit=limit, level=level)
-        return {"code": 0, "message": "ok", "data": entries}
-    except Exception as e:
-        return {"code": 1, "message": str(e), "data": None}
+    from src.infrastructure.plugin_log_store import get_logs
+    entries = get_logs(name, limit=limit, level=level)
+    return {"code": 0, "message": "ok", "data": entries}
 
 
 @router.delete("/api/v1/plugins/{name}/logs")
 async def clear_plugin_logs(name: str, _admin=Depends(require_admin)):
     """清空插件日志。"""
-    try:
-        from src.infrastructure.plugin_log_store import clear_logs
-        count = clear_logs(name)
-        return {"code": 0, "message": f"已清除 {count} 条日志", "data": {"cleared": count}}
-    except Exception as e:
-        return {"code": 1, "message": str(e), "data": None}
+    from src.infrastructure.plugin_log_store import clear_logs
+    count = clear_logs(name)
+    return {"code": 0, "message": f"已清除 {count} 条日志", "data": {"cleared": count}}
 
 
 # ════════════════════════════════════════════════════════════
@@ -779,21 +726,18 @@ async def list_optional_plugins(user=Depends(get_current_user_optional)):
 
     可选插件是内置但默认不启用的插件，需用户从商店安装后使用。
     """
-    try:
-        from src.infrastructure.plugin_loader import get_optional_plugins_info, is_optional_plugin
+    from src.infrastructure.plugin_loader import get_optional_plugins_info
 
-        plugins = get_optional_plugins_info()
+    plugins = get_optional_plugins_info()
 
-        # 获取用户第一个设备的 enabled_plugins（未登录时返回空集合）
-        enabled_set = set()
-        if user:
-            enabled_set = await _get_user_enabled_plugins(user)
-        for p in plugins:
-            p["installed"] = p["name"] in enabled_set
+    # 获取用户第一个设备的 enabled_plugins（未登录时返回空集合）
+    enabled_set = set()
+    if user:
+        enabled_set = await _get_user_enabled_plugins(user)
+    for p in plugins:
+        p["installed"] = p["name"] in enabled_set
 
-        return {"code": 0, "message": "ok", "data": plugins}
-    except Exception as e:
-        return {"code": 1, "message": str(e), "data": None}
+    return {"code": 0, "message": "ok", "data": plugins}
 
 
 @router.post("/api/v1/plugins/optional/{name}/install")
@@ -806,20 +750,15 @@ async def install_optional_plugin(
 
     可选参数 device_id 指定目标设备，默认使用用户第一个设备。
     """
-    try:
-        from src.infrastructure.plugin_loader import is_optional_plugin, is_system_plugin
+    from src.infrastructure.plugin_loader import is_optional_plugin, is_system_plugin
 
-        if not is_optional_plugin(name):
-            return {"code": 1, "message": f"插件「{name}」不是可选插件", "data": None}
-        if is_system_plugin(name):
-            return {"code": 1, "message": f"「{name}」是系统核心插件，随服务器提供，无需安装", "data": None}
+    if not is_optional_plugin(name):
+        return {"code": 1, "message": f"插件「{name}」不是可选插件", "data": None}
+    if is_system_plugin(name):
+        return {"code": 1, "message": f"「{name}」是系统核心插件，随服务器提供，无需安装", "data": None}
 
-        enabled = await _update_device_plugins(user, name, install=True, device_id=device_id)
-        return {"code": 0, "message": f"「{name}」已安装", "data": {"enabled_plugins": sorted(enabled)}}
-    except HTTPException:
-        raise
-    except Exception as e:
-        return {"code": 1, "message": str(e), "data": None}
+    enabled = await _update_device_plugins(user, name, install=True, device_id=device_id)
+    return {"code": 0, "message": f"「{name}」已安装", "data": {"enabled_plugins": sorted(enabled)}}
 
 
 def _clear_plugin_data(plugin_name: str) -> None:
@@ -890,53 +829,48 @@ async def uninstall_optional_plugin(
     系统插件（author=system 或提供 asr/llm/tts 核心服务）→ 拒绝卸载（核心服务，随服务器提供）。
     用户安装的插件 → 禁用 + 停止子进程 + 删除插件目录。
     """
-    try:
-        from src.infrastructure.plugin_loader import (
-            is_optional_plugin,
-            is_system_plugin,
-            get_plugin_source,
-            _unload_plugin,
-        )
-        from src.infrastructure.plugin_loader import INSTALLED_PLUGINS_DIR
-        import shutil
+    from src.infrastructure.plugin_loader import (
+        is_optional_plugin,
+        is_system_plugin,
+        get_plugin_source,
+        _unload_plugin,
+    )
+    from src.infrastructure.plugin_loader import INSTALLED_PLUGINS_DIR
+    import shutil
 
-        if not is_optional_plugin(name):
-            return {"code": 1, "message": f"插件「{name}」不是可选插件", "data": None}
-        if is_system_plugin(name):
-            return {"code": 1, "message": f"「{name}」是系统核心插件，不可卸载", "data": None}
+    if not is_optional_plugin(name):
+        return {"code": 1, "message": f"插件「{name}」不是可选插件", "data": None}
+    if is_system_plugin(name):
+        return {"code": 1, "message": f"「{name}」是系统核心插件，不可卸载", "data": None}
 
-        # 先从设备禁用
-        enabled = await _update_device_plugins(user, name, install=False, device_id=device_id)
+    # 先从设备禁用
+    enabled = await _update_device_plugins(user, name, install=False, device_id=device_id)
 
-        # 用户安装的插件：禁用 + 停止子进程 + 删除插件目录
-        source = get_plugin_source(name)
-        deleted = False
-        if source == "installed":
-            # 先停止插件子进程，避免 Windows 文件占用（WinError 32）
-            await _unload_plugin(name)
-            # 清空插件配置数据（KV + 数据目录）
-            _clear_plugin_data(name)
-            plugin_dir = INSTALLED_PLUGINS_DIR / name
-            if plugin_dir.is_dir():
-                # Windows 下文件句柄释放可能有延迟，重试删除
-                for _attempt in range(5):
-                    try:
-                        shutil.rmtree(plugin_dir)
-                        deleted = True
-                        break
-                    except OSError:
-                        await asyncio.sleep(0.3)
-                if not deleted:
-                    logger.warning(f"[卸载] 插件目录删除失败（文件占用）: {plugin_dir}")
+    # 用户安装的插件：禁用 + 停止子进程 + 删除插件目录
+    source = get_plugin_source(name)
+    deleted = False
+    if source == "installed":
+        # 先停止插件子进程，避免 Windows 文件占用（WinError 32）
+        await _unload_plugin(name)
+        # 清空插件配置数据（KV + 数据目录）
+        _clear_plugin_data(name)
+        plugin_dir = INSTALLED_PLUGINS_DIR / name
+        if plugin_dir.is_dir():
+            # Windows 下文件句柄释放可能有延迟，重试删除
+            for _attempt in range(5):
+                try:
+                    shutil.rmtree(plugin_dir)
+                    deleted = True
+                    break
+                except OSError:
+                    await asyncio.sleep(0.3)
+            if not deleted:
+                logger.warning(f"[卸载] 插件目录删除失败（文件占用）: {plugin_dir}")
 
-        msg = f"「{name}」已卸载"
-        if deleted:
-            msg += "（插件目录已删除）"
-        return {"code": 0, "message": msg, "data": {"enabled_plugins": sorted(enabled), "deleted": deleted}}
-    except HTTPException:
-        raise
-    except Exception as e:
-        return {"code": 1, "message": str(e), "data": None}
+    msg = f"「{name}」已卸载"
+    if deleted:
+        msg += "（插件目录已删除）"
+    return {"code": 0, "message": msg, "data": {"enabled_plugins": sorted(enabled), "deleted": deleted}}
 
 
 async def _get_user_enabled_plugins(user) -> set[str]:

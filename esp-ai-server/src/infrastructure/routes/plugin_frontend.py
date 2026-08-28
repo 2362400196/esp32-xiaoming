@@ -23,6 +23,8 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from src.infrastructure.logging import get_logger
+from src.infrastructure.security_jwt import get_current_user
+from src.infrastructure.db.models.user import UserModel
 from src.infrastructure.plugin_loader import (
     PLUGINS_DIR,
     INSTALLED_PLUGINS_DIR,
@@ -86,12 +88,8 @@ def _get_frontend_plugins() -> list[dict]:
 @router.get("/api/v1/plugins/frontend-pages", tags=["plugin-frontend"])
 async def list_frontend_pages():
     """列出所有注册了前端页面的插件。"""
-    try:
-        pages = _get_frontend_plugins()
-        return {"code": 0, "message": "ok", "data": pages}
-    except Exception as e:
-        logger.error(f"[插件前端] 获取页面列表失败: {e}")
-        return {"code": 1, "message": str(e), "data": None}
+    pages = _get_frontend_plugins()
+    return {"code": 0, "message": "ok", "data": pages}
 
 
 @router.get("/api/v1/plugins/{name}/frontend/{path:path}", tags=["plugin-frontend"])
@@ -170,29 +168,30 @@ class ExecRequest(BaseModel):
 
 
 @router.post("/api/v1/plugins/{name}/exec", tags=["plugin-frontend"])
-async def plugin_exec(name: str, body: ExecRequest):
+async def plugin_exec(
+    name: str,
+    body: ExecRequest,
+    user: UserModel = Depends(get_current_user),  # 鉴权：exec 可执行插件后端方法，必须登录
+):
     """通用插件 exec 桥梁 — 前端调用插件后端能力。
 
     插件通过在 plugin.py 中定义 ``frontend_api`` 字典来暴露方法给前端。
     前端通过此接口调用插件后端方法，无需为每个插件注册独立 HTTP 路由。
+    需 JWT 用户认证（前端页面调用时携带 Bearer Token）。
     """
     import importlib
-    try:
-        from src.infrastructure.plugin_loader import _loaded_tools
-        if name not in _loaded_tools:
-            return {"code": 1, "message": f"插件不存在: {name}", "data": None}
+    from src.infrastructure.plugin_loader import _loaded_tools
+    if name not in _loaded_tools:
+        return {"code": 1, "message": f"插件不存在: {name}", "data": None}
 
-        plugin_module = importlib.import_module(f"src.plugins.{name}.plugin")
-        if not hasattr(plugin_module, 'frontend_api'):
-            return {"code": 1, "message": "该插件没有暴露前端 API", "data": None}
+    plugin_module = importlib.import_module(f"src.plugins.{name}.plugin")
+    if not hasattr(plugin_module, 'frontend_api'):
+        return {"code": 1, "message": "该插件没有暴露前端 API", "data": None}
 
-        frontend_api = plugin_module.frontend_api
-        if body.method not in frontend_api:
-            return {"code": 1, "message": f"方法 '{body.method}' 不存在", "data": None}
+    frontend_api = plugin_module.frontend_api
+    if body.method not in frontend_api:
+        return {"code": 1, "message": f"方法 '{body.method}' 不存在", "data": None}
 
-        fn = frontend_api[body.method]
-        result = await fn(**body.args)
-        return {"code": 0, "message": "ok", "data": result}
-    except Exception as e:
-        logger.error(f"[PluginExec] {name}.{body.method} 失败: {e}")
-        return {"code": 1, "message": str(e), "data": None}
+    fn = frontend_api[body.method]
+    result = await fn(**body.args)
+    return {"code": 0, "message": "ok", "data": result}

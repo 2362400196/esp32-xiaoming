@@ -358,6 +358,10 @@ class Settings(BaseSettings):
     auth_api_key: str = Field(default="")
     admin_api_key: str = Field(default="")
     jwt_secret: str = Field(default="")
+    field_encryption_key: str = Field(
+        default="",
+        description="敏感字段落盘加密密钥（base64 编码的 Fernet 密钥）；未配置时敏感字段以明文存储",
+    )
     debug_log: bool = Field(default=False)
     log_format: str = Field(default="")
     debug_log_level: str = Field(default="")

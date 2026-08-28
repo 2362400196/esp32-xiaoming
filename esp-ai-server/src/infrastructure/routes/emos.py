@@ -11,13 +11,11 @@ from __future__ import annotations
 import json
 
 from fastapi import Depends, APIRouter, Form, Request, UploadFile, File, HTTPException, Response
-from sqlalchemy import select
 
 from src.infrastructure.logging import get_logger
 from src.infrastructure.security_jwt import get_current_user
 from src.infrastructure.db.models.user import UserModel
-from src.infrastructure.db.models.device import DeviceModel
-from src.infrastructure.db.session import get_session_ctx
+from src.infrastructure.routes._deps import check_device_owner as _check_device_owner
 from src.infrastructure.emo_pack import (
     list_packs, get_pack_dir, create_pack, delete_pack,
     get_active_pack, set_active_pack, list_pack_emos,
@@ -34,23 +32,6 @@ logger = get_logger(__name__)
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
 
 router = APIRouter(tags=["emos"])
-
-
-async def _check_device_owner(device_id: str, user: UserModel) -> bool:
-    """校验设备归属当前用户（兼容 mac_address / device_id / device_key 查找）"""
-    from sqlalchemy import or_
-    async with get_session_ctx() as session:
-        result = await session.execute(
-            select(DeviceModel).where(
-                or_(
-                    DeviceModel.device_id == device_id,
-                    DeviceModel.mac_address == device_id,
-                    DeviceModel.device_key == device_id,
-                ),
-                DeviceModel.user_id == user.id,
-            )
-        )
-        return result.scalar_one_or_none() is not None
 
 
 # ── 兼容旧接口：GET /api/v1/emos/{device_id} ──

@@ -33,6 +33,87 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+# 流内控制信号常量：LLM 网关（src/interfaces/llm_gateways.py）以这些字面量在 token 流中
+# 传递停止/错误信号，两侧必须保持一致，不要在流中新增裸字符串信号。
+STOP_PIPELINE_SENTINEL = "__STOP_PIPELINE__"  # LLM 发出此 token 表示工具请求停止 Pipeline
+LLM_ERROR_PREFIX = "LLM error"  # LLM 产出以此前缀开头的 token 表示流式生成出错
+
+# 记忆检索默认关键词（历史遗留：偏向特定用户场景），
+# 可通过 ConversationPipeline(memory_search_keywords=[...]) 按用户配置覆盖
+DEFAULT_MEMORY_SEARCH_KEYWORDS: list[str] = [
+    "工作", "累", "职业", "上班", "外卖", "代码", "顾客", "编程",
+    "猫", "宠物", "玩具", "天气", "下雨", "送餐", "跑外卖",
+]
+
+
+# ============================================================
+# Prompt 组装素材缓存（按 device_id，模块级）
+#
+# pipeline 每轮对话新建实例，实例级缓存无法跨轮次；放到模块级注册表后：
+# 1) 同设备 60s 内的后续轮次直接命中，省去每轮 2-3 次 DB 读；
+# 2) 设备唤醒时（用户开口前 1-2 秒）可通过 prewarm_prompt_caches()
+#    在唤醒提示音播放的空档里预取，首轮对话也能全量命中。
+# 这些都是低频变化数据，60s 陈旧窗口对回复质量无可感知影响。
+# ============================================================
+PROMPT_CACHE_TTL = 60.0
+
+
+@dataclass
+class _PromptCache:
+    ltm_catalog: Optional[str] = None
+    ltm_catalog_ts: float = 0.0
+    profile_summary: Optional[str] = None
+    profile_ts: float = 0.0
+    ltm_items: Optional[list] = None
+    ltm_items_ts: float = 0.0
+
+
+_prompt_caches: dict[str, _PromptCache] = {}
+
+
+def _get_prompt_cache(device_id: str) -> _PromptCache:
+    cache = _prompt_caches.get(device_id)
+    if cache is None:
+        cache = _prompt_caches[device_id] = _PromptCache()
+    return cache
+
+
+async def _fetch_profile_summary(device_id: str) -> str:
+    """获取用户画像摘要（get_profile_summary 内部已含 get_profile，勿拆开重复调用）"""
+    from src.use_cases.growth.user_profile import UserProfileService
+    return await UserProfileService("").get_profile_summary(device_id)
+
+
+async def prewarm_prompt_caches(device_id: str, ltm_service) -> None:
+    """唤醒预热：在用户开口前并行预取 LTM 目录、记忆条目与用户画像。
+
+    在 _do_wake_start 里以后台任务调用——设备播放唤醒提示音的 1-2 秒
+    足够完成全部预取，使首轮对话的 prompt 组装接近 0ms。
+    """
+    try:
+        cache = _get_prompt_cache(device_id)
+        now = time.time()
+
+        async def _catalog():
+            if cache.ltm_catalog is None or (now - cache.ltm_catalog_ts) >= PROMPT_CACHE_TTL:
+                cache.ltm_catalog = await ltm_service.get_summary_catalog(device_id)
+                cache.ltm_catalog_ts = time.time()
+
+        async def _items():
+            if cache.ltm_items is None or (now - cache.ltm_items_ts) >= PROMPT_CACHE_TTL:
+                cache.ltm_items = await ltm_service.list_all(device_id)
+                cache.ltm_items_ts = time.time()
+
+        async def _profile():
+            if cache.profile_summary is None or (now - cache.profile_ts) >= PROMPT_CACHE_TTL:
+                cache.profile_summary = await _fetch_profile_summary(device_id)
+                cache.profile_ts = time.time()
+
+        await asyncio.gather(_catalog(), _items(), _profile(), return_exceptions=True)
+    except Exception as e:
+        logger.debug(f"[Pipeline] 唤醒预热失败: {e}")
+
+
 # MP3 帧头解析：按比特率表计算每帧时长，累加得到总时长（支持 CBR/VBR）
 # 注意：MPEG2/2.5 Layer III 的比特率仅为 MPEG1 的一半（8~160kbps）
 _MP3_BITRATE = {
@@ -178,15 +259,21 @@ class SentenceSplitter:
                     tmp = ""
             self.buffer = tmp
 
-        # 软切分点：逗号、分号（子句长度 >= 2 时切分，让首句更快产出送入 TTS）
-        # 性能优化：从 4 字符降到 2 字符，首句 TTS 提前 ~500ms 启动
-        if not sentences and any(p in self.buffer for p in ["，", "；", ","]):
-            # 找最后一个软切分点
+        # 软切分点：逗号、分号、顿号、冒号、省略号、破折号
+        # （子句长度 >= 2 时切分，让首句更快产出送入 TTS）
+        # 性能优化：从 4 字符降到 2 字符，首句 TTS 提前 ~500ms 启动；
+        # 扩充软切分符（"——" 等口语停顿）避免首句等到很远的逗号才切出
+        # （如"正数着呢——你今天…"要等 20 字后的逗号，白等 ~600ms）
+        if not sentences:
             last_soft = -1
             for i, ch in enumerate(self.buffer):
-                if ch in "，；,":
+                if ch in "，；,、：…":
                     last_soft = i
-            if last_soft >= 0 and last_soft >= 1:  # 子句至少 2 个字符（索引>=1）
+            # 破折号"——"是双字符：切分点算在第二个"-"上（连同符号一起送 TTS）
+            dash = self.buffer.find("——")
+            if dash >= 0:
+                last_soft = max(last_soft, dash + 1)
+            if last_soft >= 1:  # 子句至少 2 个字符（索引>=1）
                 sentence = self.buffer[:last_soft + 1].strip()
                 if sentence and len(sentence) > 1:
                     sentences.append(sentence)
@@ -263,6 +350,8 @@ class ConversationPipeline:
         cancel_event: Optional[asyncio.Event] = None,
         device_id: str = "",
         ltm_service: Optional["LongTermMemoryServiceImpl"] = None,
+        precomputed_skill_catalog: Optional[str] = None,
+        memory_search_keywords: Optional[list[str]] = None,
         max_sentences: int = 100,
     ) -> None:
         self.llm_processor = llm_processor
@@ -275,6 +364,8 @@ class ConversationPipeline:
         self.user_config = user_config
         self.device_id = device_id
         self.ltm_service = ltm_service
+        # 记忆检索关键词：None 时使用 DEFAULT_MEMORY_SEARCH_KEYWORDS
+        self.memory_search_keywords = memory_search_keywords
 
         self.queues = BackpressureQueues()
         self.splitter = SentenceSplitter()
@@ -298,12 +389,14 @@ class ConversationPipeline:
         self._cumulative_duration_ms = 0.0  # 已合成句子累计实际时长，用于字级时间戳换算绝对流位置
         self._perf: dict = {}  # 性能分析计时数据（LLM/TTS 各环节耗时）
 
-        # system prompt 缓存：回复要求基本不变，避免每次 run() 都重新拼接
+        # system prompt 缓存：skill 目录和回复要求基本不变，避免每次 run() 都重新拼接
+        # 优先使用外部预计算的 catalog（从 Session 传入，避免首轮阻塞）
+        self._cached_skill_catalog: Optional[str] = precomputed_skill_catalog
+        self._skill_cache_key: str = "__precomputed__" if precomputed_skill_catalog is not None else ""
         self._cached_reply_style: str = ""
-        # 性能优化：缓存 LTM summary catalog，避免每次 run() 都查 DB
-        self._cached_ltm_catalog: Optional[str] = None
-        self._ltm_catalog_cache_time: float = 0.0
-        self._ltm_catalog_ttl: float = 60.0  # 缓存 60 秒
+        # 性能优化：prompt 组装素材（LTM catalog/画像/记忆条目）缓存在模块级注册表
+        # （按 device_id），因为 pipeline 每轮新建、实例缓存无法跨轮次；
+        # 并在设备唤醒时通过 prewarm_prompt_caches() 预热，见下方说明。
         self._reply_style = (
             "\n\n[回复要求]\n"
             "- 日常闲聊时回复要简短自然，像真人聊天一样，一般 1-2 句话说完，不要长篇大论\n"
@@ -385,6 +478,14 @@ class ConversationPipeline:
         _llm_sp = llm.system_prompt if hasattr(llm, "system_prompt") else ""
         sp = system_prompt or _user_sp or _llm_sp
 
+        # === 静态块前置 ===
+        # system prompt 的拼装顺序对 LLM 供应商的前缀缓存（如 DeepSeek 上下文缓存）
+        # 至关重要：所有逐字节稳定的内容（回复风格/工具规则、设备能力边界、设备 ID）
+        # 必须在最前，多轮对话间才能命中缓存，显著降低 TTFT 与费用。
+        # 动态内容（skill/记忆/画像）放在后部，也更贴近对话消息、利于模型注意力。
+        # 注入回复风格要求（静态字符串）
+        sp = sp + self._reply_style
+
         # 注入设备能力边界（插件商店语义）：设置过插件白名单的设备，未列入的插件功能不可用
         try:
             _tm = getattr(llm, "tool_manager", None)
@@ -395,111 +496,136 @@ class ConversationPipeline:
                                  "用户询问的功能如果不在上述插件能力或系统自带能力范围内，"
                                  "直接回答\"该功能未安装/设备暂不支持\"，"
                                  "绝不可以用猜测、编造或历史经验回答，也不要假装执行了操作。")
-                sp = (sp + _cap_note) if sp else _cap_note
+                    sp = sp + _cap_note
         except Exception:
             pass
 
-        # 注入 Skill 目录（按用户输入动态检索，控制提示词体积）
-        try:
-            from src.use_cases import skill_system
-            _skills = getattr(self.user_config, 'skills', None) if self.user_config else None
-            _disabled = getattr(self.user_config, 'disabled_skills', None) if self.user_config else None
-            skill_catalog = skill_system.render_skills_catalog(
-                device_id=self.device_id,
-                skills=_skills,
-                disabled_skills=_disabled,
-                query=iat_text,
-            )
-            if skill_catalog:
-                sp = sp + "\n\n" + skill_catalog if sp else skill_catalog
-        except Exception as e:
-            logger.debug(f"[Pipeline] 注入 Skill 目录失败: {e}")
+        # 设备 ID（静态）
+        sp = sp + f"\nDevice ID: {self.device_id}"
 
-        # 注入长期记忆摘要标签目录 + 设备 ID
-        try:
-            _device_info = f"\nDevice ID: {self.device_id}"
-            if self.ltm_service:
-                # 性能优化：使用缓存的 LTM catalog，避免每次 run() 都查 DB
-                _now = time.time()
-                _catalog = None
-                if self._cached_ltm_catalog is not None and (_now - self._ltm_catalog_cache_time) < self._ltm_catalog_ttl:
-                    _catalog = self._cached_ltm_catalog
-                else:
-                    _catalog = await self.ltm_service.get_summary_catalog(self.device_id)
-                    self._cached_ltm_catalog = _catalog
-                    self._ltm_catalog_cache_time = _now
-                if _catalog:
-                    _ltm_block = (
-                        "\n\n[Long-term Memory Summary Labels]\n"
-                        "用户提到相关话题时，主动调用 memory_recall 回忆（标签见下）：\n"
-                        f"{_catalog}\n"
-                        "[/Long-term Memory]"
-                        f"{_device_info}"
+        # === 动态块：skill 目录/长期记忆/画像/相关记忆四路并行获取 ===
+        # 串行执行时这段是 ASR 完成→LLM 请求发出之间的主要额外延迟。
+        _prompt_t0 = time.time()
+
+        _pcache = _get_prompt_cache(self.device_id)
+
+        async def _skill_catalog_block() -> str:
+            """Skill 目录（按用户输入动态检索；缓存键含 query，逐查询重渲染）"""
+            try:
+                from src.use_cases import skill_system
+                _skills = getattr(self.user_config, 'skills', None) if self.user_config else None
+                _disabled = getattr(self.user_config, 'disabled_skills', None) if self.user_config else None
+                _skill_key = f"{self.device_id}:{_skills}:{_disabled}:{iat_text}"
+                if self._cached_skill_catalog is None or getattr(self, '_skill_cache_key', '') != _skill_key:
+                    catalog = skill_system.render_skills_catalog(
+                        device_id=self.device_id,
+                        skills=_skills,
+                        disabled_skills=_disabled,
+                        query=iat_text,
                     )
-                    sp = sp + _ltm_block
+                    self._cached_skill_catalog = catalog
+                    self._skill_cache_key = _skill_key
                 else:
-                    sp = sp + _device_info
+                    catalog = self._cached_skill_catalog
+                return ("\n\n" + catalog) if (catalog and sp) else catalog
+            except Exception as e:
+                logger.debug(f"[Pipeline] 注入 Skill 目录失败: {e}")
+                return ""
+
+        async def _ltm_catalog_block() -> str:
+            if not self.ltm_service:
+                return ""
+            _now = time.time()
+            if _pcache.ltm_catalog is not None and (_now - _pcache.ltm_catalog_ts) < PROMPT_CACHE_TTL:
+                _catalog = _pcache.ltm_catalog
             else:
-                sp = sp + _device_info
-        except Exception as e:
-            logger.debug(f"[Pipeline] LTM 注入失败: {e}")
+                _catalog = await self.ltm_service.get_summary_catalog(self.device_id)
+                _pcache.ltm_catalog = _catalog
+                _pcache.ltm_catalog_ts = _now
+            if not _catalog:
+                return ""
+            return (
+                "\n\n[Long-term Memory Summary Labels]\n"
+                "用户提到相关话题时，主动调用 memory_recall 回忆（标签见下）：\n"
+                f"{_catalog}\n"
+                "[/Long-term Memory]"
+            )
 
-        # 注入用户画像（让 LLM 了解用户的背景信息）
-        try:
-            from src.use_cases.growth.user_profile import UserProfileService
-            _profile_svc = UserProfileService("")
-            _profile = await _profile_svc.get_profile(self.device_id)
-            _profile_summary = await _profile_svc.get_profile_summary(self.device_id)
-            if _profile_summary and _profile_summary != "暂无用户信息":
-                _profile_block = (
-                    "\n\n[User Profile]\n"
-                    "以下是该用户的画像信息，帮助你在回答时更个性化：\n"
-                    f"{_profile_summary}\n"
-                    "[/User Profile]"
-                )
-                sp = sp + _profile_block
-        except Exception as e:
-            logger.debug(f"[Pipeline] 用户画像注入失败: {e}")
+        async def _profile_block() -> str:
+            _now = time.time()
+            if _pcache.profile_summary is not None and (_now - _pcache.profile_ts) < PROMPT_CACHE_TTL:
+                _profile_summary = _pcache.profile_summary
+            else:
+                _profile_summary = await _fetch_profile_summary(self.device_id)
+                _pcache.profile_summary = _profile_summary
+                _pcache.profile_ts = _now
+            if not _profile_summary or _profile_summary == "暂无用户信息":
+                return ""
+            return (
+                "\n\n[User Profile]\n"
+                "以下是该用户的画像信息，帮助你在回答时更个性化：\n"
+                f"{_profile_summary}\n"
+                "[/User Profile]"
+            )
 
-        # 注入回复风格要求（使用缓存的静态字符串）
-        sp = sp + self._reply_style
-
-        # 根据用户输入自动搜索相关记忆，注入上下文
-        try:
-            if self.ltm_service and iat_text and len(iat_text) > 3:
+        async def _memory_block() -> str:
+            if not (self.ltm_service and iat_text and len(iat_text) > 3):
+                return ""
+            _now = time.time()
+            if _pcache.ltm_items is not None and (_now - _pcache.ltm_items_ts) < PROMPT_CACHE_TTL:
+                _all_items = _pcache.ltm_items
+            else:
                 _all_items = await self.ltm_service.list_all(self.device_id)
-                if _all_items:
-                    _search = iat_text.lower()
-                    _matched = []
-                    for _item in _all_items:
-                        _content = _item.content.lower()
-                        _score = 0
-                        # 整词匹配（中文按字符连续匹配）
-                        for w in ["工作", "累", "职业", "上班", "外卖", "代码", "顾客", "编程",
-                                   "猫", "宠物", "玩具", "天气", "下雨", "送餐", "跑外卖"]:
-                            if w in _search or w in _content:
-                                _score += 1
-                        # 关键词字段匹配
-                        if _item.keywords:
-                            for kw in _item.keywords:
-                                if kw.lower() in _search:
-                                    _score += 2
-                                if kw.lower() in _content:
-                                    _score += 1
-                        if _score > 0:
-                            _matched.append((_score, _item))
-                    _matched.sort(key=lambda x: -x[0])
-                    if _matched:
-                        _mem_block = "\n\n[Relevant Memories]\n以下是和你当前话题相关的记忆，回答时可以自然联系：\n"
-                        for _score, _m in _matched[:3]:
-                            _mem_block += f"- {_m.content}\n"
-                        _mem_block += "[/Relevant Memories]"
-                        sp = sp + _mem_block
-                        logger.info(f"[Pipeline] 自动注入 {len(_matched)} 条相关记忆")
-                    else:
-                        logger.info(f"[Pipeline] 无匹配记忆 (len={len(_all_items)}, search='{iat_text[:30]}')")
-        except Exception as e:
-            logger.warning(f"[Pipeline] 记忆搜索注入失败: {e}")
+                _pcache.ltm_items = _all_items
+                _pcache.ltm_items_ts = _now
+            if not _all_items:
+                return ""
+            _search = iat_text.lower()
+            _matched = []
+            for _item in _all_items:
+                _content = _item.content.lower()
+                _score = 0
+                # 整词匹配（中文按字符连续匹配）
+                for w in (self.memory_search_keywords or DEFAULT_MEMORY_SEARCH_KEYWORDS):
+                    if w in _search or w in _content:
+                        _score += 1
+                # 关键词字段匹配
+                if _item.keywords:
+                    for kw in _item.keywords:
+                        if kw.lower() in _search:
+                            _score += 2
+                        if kw.lower() in _content:
+                            _score += 1
+                if _score > 0:
+                    _matched.append((_score, _item))
+            _matched.sort(key=lambda x: -x[0])
+            if not _matched:
+                logger.info(f"[Pipeline] 无匹配记忆 (len={len(_all_items)}, search='{iat_text[:30]}')")
+                return ""
+            logger.info(f"[Pipeline] 自动注入 {len(_matched)} 条相关记忆")
+            _mem_block = "\n\n[Relevant Memories]\n以下是和你当前话题相关的记忆，回答时可以自然联系：\n"
+            for _score, _m in _matched[:3]:
+                _mem_block += f"- {_m.content}\n"
+            return _mem_block + "[/Relevant Memories]"
+
+        _ltm_result, _profile_result, _skill_result, _memory_result = await asyncio.gather(
+            _ltm_catalog_block(), _profile_block(), _skill_catalog_block(), _memory_block(),
+            return_exceptions=True,
+        )
+        # 拼装顺序（与获取并行解耦）：稳定块（LTM/画像）在前扩大前缀缓存命中面，
+        # 逐查询变化的块（skill/相关记忆）最后，贴近对话消息
+        for _name, _res in (("LTM", _ltm_result), ("画像", _profile_result),
+                            ("Skill", _skill_result), ("记忆", _memory_result)):
+            if isinstance(_res, asyncio.CancelledError):
+                # 中断打断 prompt 组装时保持取消语义（gather 会吞掉 CancelledError）
+                raise _res
+            if isinstance(_res, BaseException):
+                logger.debug(f"[Pipeline] {_name} 注入失败: {_res}")
+            elif _res:
+                sp = sp + _res
+
+        self._perf["prompt_assembly_ms"] = int((time.time() - _prompt_t0) * 1000)
+        logger.info(f"[Pipeline] prompt 组装完成: {self._perf['prompt_assembly_ms']}ms（含 skill/记忆/画像目录）")
 
         if memory_enabled and self.conversation_memory:
             self.conversation_memory.max_messages = memory_max
@@ -512,8 +638,16 @@ class ConversationPipeline:
                 {"role": "user", "content": iat_text},
             ]
 
-        # 调试：打印完整系统提示词到终端，便于人工检查提示词体积与内容
-        logger.info(f"[Prompt] ===== 系统提示词开始 ({len(sp)} 字符) =====\n{sp}\n===== 系统提示词结束 =====")
+        # 诊断：prompt 体积（TTFT 与 prompt 大小强相关，体积随会话/记忆增长时
+        # 会在性能报告里直接暴露出来）
+        self._perf["prompt_chars"] = len(sp)
+        self._perf["history_chars"] = sum(
+            len(m.get("content") or "") for m in messages if isinstance(m, dict)
+        )
+
+        # 调试：system prompt 含长期记忆、用户画像等隐私内容，仅 debug 级别打印前 500 字符，
+        # 避免隐私泄露和每轮全量打印导致日志暴涨
+        logger.debug(f"[Prompt] system prompt 共 {len(sp)} 字符: {sp[:500]}...")
 
         await self.fsm.set(SessionState.TTS)
         # play_audio 和 tts_chunk_start 延迟到第一帧音频数据到达时再发送
@@ -661,11 +795,11 @@ class ConversationPipeline:
                     logger.info("[Pipeline] LLM 收到取消信号")
                     break
 
-                if token == "__STOP_PIPELINE__":
+                if token == STOP_PIPELINE_SENTINEL:
                     logger.info("[Pipeline] LLM 发出 StopPipeline 信号")
                     raise StopPipeline()
 
-                if token.startswith("LLM error"):
+                if token.startswith(LLM_ERROR_PREFIX):
                     logger.error(f"[Pipeline] LLM 错误: {token}")
                     break
 
@@ -1189,7 +1323,10 @@ def create_pipeline(
     conversation_memory=None,
     user_config=None,
 ) -> ConversationPipeline:
-    pipeline_config = PipelineConfig(**(config or {}))
+    config = dict(config or {})
+    # memory_search_keywords 不是 PipelineConfig 字段，从 config dict 中取出透传给管线
+    memory_search_keywords = config.pop("memory_search_keywords", None)
+    pipeline_config = PipelineConfig(**config)
     return ConversationPipeline(
         llm_processor=llm_processor,
         tts_processor=tts_processor,
@@ -1199,6 +1336,7 @@ def create_pipeline(
         config=pipeline_config,
         conversation_memory=conversation_memory,
         user_config=user_config,
+        memory_search_keywords=memory_search_keywords,
     )
 
 
@@ -1208,5 +1346,8 @@ __all__ = [
     "PipelineConfig",
     "PipelineResult",
     "PipelineState",
+    "STOP_PIPELINE_SENTINEL",
+    "LLM_ERROR_PREFIX",
+    "DEFAULT_MEMORY_SEARCH_KEYWORDS",
     "create_pipeline",
 ]

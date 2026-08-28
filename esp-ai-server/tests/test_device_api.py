@@ -32,7 +32,8 @@ from src.infrastructure import device_api
 # ════════════════════════════════════════════════════════════════
 
 API_KEY = "test-api-key"
-AUTH_HEADERS = {"X-API-Key": API_KEY}
+# 认证已从 X-API-Key 迁移到 Bearer JWT（decode_token 在测试中被 mock）
+AUTH_HEADERS = {"Authorization": "Bearer test-access-token"}
 
 
 def _make_mock_settings():
@@ -62,6 +63,22 @@ def mock_settings():
     with patch.object(device_api, "get_settings", return_value=settings), \
          patch("src.infrastructure.config.get_settings", return_value=settings):
         yield settings
+
+
+@pytest.fixture(autouse=True)
+def mock_jwt():
+    """Mock JWT 解码（autouse）：所有请求视为携带有效 access token 的登录用户"""
+    with patch("src.infrastructure.security_jwt.decode_token",
+               return_value={"sub": "user-1", "type": "access"}):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def mock_device_owner():
+    """Mock 设备归属校验（autouse）：require_device_owner 依赖 DB 查询，测试中直接放行"""
+    with patch.object(device_api, "require_device_owner",
+                      AsyncMock(return_value="db-device-id")):
+        yield
 
 
 @pytest.fixture
@@ -198,6 +215,10 @@ def app(mock_get_app):
     application = FastAPI()
     application.include_router(device_api.router)
     application.include_router(device_api.sdk_router)
+    # require_admin 依赖 DB 查询用户，测试中直接返回 admin 用户
+    application.dependency_overrides[device_api.require_admin] = lambda: MagicMock(
+        role="admin", is_active=True
+    )
     return application
 
 
@@ -211,38 +232,39 @@ def client(app):
 # ════════════════════════════════════════════════════════════════
 
 class TestVerifyApiKey:
-    """API Key 验证测试"""
+    """Bearer JWT 验证测试（verify_api_key 已改为 Request + Authorization header）"""
 
-    async def test_no_api_key_raises_401(self, mock_settings):
-        """无 API Key 时抛 401"""
+    @staticmethod
+    def _request(auth=""):
+        req = MagicMock()
+        req.headers = {"authorization": auth} if auth else {}
+        return req
+
+    async def test_no_token_raises_401(self, mock_settings):
+        """无 Authorization header 时抛 401"""
         from fastapi import HTTPException
         with pytest.raises(HTTPException) as exc_info:
-            await device_api.verify_api_key(None)
+            await device_api.verify_api_key(self._request())
         assert exc_info.value.status_code == 401
 
-    async def test_invalid_api_key_raises_403(self, mock_settings):
-        """无效 API Key 时抛 403"""
+    async def test_non_bearer_raises_401(self, mock_settings):
+        """非 Bearer 格式的 Authorization 抛 401"""
         from fastapi import HTTPException
         with pytest.raises(HTTPException) as exc_info:
-            await device_api.verify_api_key("wrong-key")
+            await device_api.verify_api_key(self._request("Basic abc"))
+        assert exc_info.value.status_code == 401
+
+    async def test_invalid_token_raises_403(self, mock_settings):
+        """无效 token 抛 403"""
+        from fastapi import HTTPException
+        with patch("src.infrastructure.security_jwt.decode_token", side_effect=Exception("bad token")):
+            with pytest.raises(HTTPException) as exc_info:
+                await device_api.verify_api_key(self._request("Bearer bad-token"))
         assert exc_info.value.status_code == 403
 
-    async def test_valid_api_key(self, mock_settings):
-        """有效 API Key 时返回 True"""
-        result = await device_api.verify_api_key(API_KEY)
-        assert result is True
-
-    async def test_no_keys_configured_allows_access(self, mock_settings):
-        """无配置 key 时允许访问"""
-        mock_settings.auth.admin_api_key = ""
-        mock_settings.auth.api_key = ""
-        result = await device_api.verify_api_key("anything")
-        assert result is True
-
-    async def test_admin_key_accepted(self, mock_settings):
-        """admin key 也应被接受"""
-        mock_settings.auth.admin_api_key = "admin-secret"
-        result = await device_api.verify_api_key("admin-secret")
+    async def test_valid_access_token(self, mock_settings):
+        """有效 access token 返回 True"""
+        result = await device_api.verify_api_key(self._request(AUTH_HEADERS["Authorization"]))
         assert result is True
 
 
@@ -374,10 +396,15 @@ class TestDeviceStatsAPI:
         assert resp.json()["code"] == 0
         assert resp.json()["data"]["count"] == 2
 
-    def test_get_device_history_not_found(self, client, mock_get_app):
-        with patch.object(device_api, "resolve_device_id", return_value=None):
+    def test_get_device_history_not_found(self, client, mock_get_app, mock_registry):
+        """设备不在注册表时离线回退：仍返回 code=0（空历史）"""
+        mock_registry.resolve.return_value = None
+        with patch.object(device_api, "resolve_device_id", return_value=None), \
+             patch("src.infrastructure.db.repositories.short_term_memory_repo.SqlShortTermMemoryRepository") as mock_repo:
+            mock_repo.return_value.load.return_value = []
             resp = client.get("/api/v1/devices/AA:BB/history", headers=AUTH_HEADERS)
-        assert resp.json()["code"] == 1
+        assert resp.json()["code"] == 0
+        assert resp.json()["data"]["messages"] == []
 
     def test_get_device_history_no_session(self, client, mock_get_app, mock_registry):
         """设备无 session"""
@@ -479,7 +506,12 @@ class TestDeviceConfigAPI:
     """设备配置管理 API 测试"""
 
     def test_get_config_not_found(self, client, mock_get_app):
-        with patch.object(device_api, "resolve_device_id", return_value=None):
+        """设备不在注册表且 DB 无记录时返回 code=1"""
+        mock_repo = MagicMock()
+        mock_repo.find_by_mac = AsyncMock(return_value=None)
+        mock_repo.find_by_key = AsyncMock(return_value=None)
+        with patch.object(device_api, "resolve_device_id", return_value=None), \
+             patch("src.infrastructure.db.repositories.device_repository.DeviceRepository", return_value=mock_repo):
             resp = client.get("/api/v1/devices/AA:BB/config", headers=AUTH_HEADERS)
         assert resp.json()["code"] == 1
 
@@ -515,7 +547,12 @@ class TestDeviceConfigAPI:
         assert resp.json()["code"] == 1
 
     def test_update_config_not_found(self, client, mock_get_app):
-        with patch.object(device_api, "resolve_device_id", return_value=None):
+        """设备不在注册表且 DB 无记录时返回 code=1"""
+        mock_repo = MagicMock()
+        mock_repo.find_by_mac = AsyncMock(return_value=None)
+        mock_repo.find_by_key = AsyncMock(return_value=None)
+        with patch.object(device_api, "resolve_device_id", return_value=None), \
+             patch("src.infrastructure.db.repositories.device_repository.DeviceRepository", return_value=mock_repo):
             resp = client.post("/api/v1/devices/AA:BB/config", json={"name": "new"}, headers=AUTH_HEADERS)
         assert resp.json()["code"] == 1
 
@@ -737,8 +774,8 @@ class TestFirmwareAPI:
         with patch.object(device_api, "get_firmware_info", return_value=None):
             result = await device_api.set_default_firmware(
                 filename="nonexistent.bin",
+                request=MagicMock(headers={"authorization": AUTH_HEADERS["Authorization"]}),
                 version=None,
-                x_api_key="test-api-key",
             )
         assert result.code == 1
 
@@ -750,8 +787,8 @@ class TestFirmwareAPI:
         with patch.object(device_api, "get_firmware_info", return_value=mock_info):
             result = await device_api.set_default_firmware(
                 filename="test.bin",
+                request=MagicMock(headers={"authorization": AUTH_HEADERS["Authorization"]}),
                 version="2.0",
-                x_api_key="test-api-key",
             )
         assert result.code == 0
         assert mock_settings.ota.bin_url == "http://x/firmware/test.bin"

@@ -6,7 +6,7 @@
 
 - system_basic：get_current_time / get_current_date / set_volume / volume_down /
   volume_up / set_brightness / standby / get_volume / get_brightness
-- media_player：parse_lrc / fetch_lyrics / play_music
+- media_player：_fetch_lyrics_sdk（LRC 下载与解析，已从插件迁移至 SDK）/ play_music
 - device_control：test_device / execute_lua / stop_lua / clear_screen
 - memory：memory_store / memory_recall / memory_list / memory_update / memory_forget
 
@@ -21,7 +21,8 @@ import pytest
 
 from src.infrastructure.plugin_security import reset_plugin_context, set_plugin_context
 from src.plugins.device_control.plugin import clear_screen, execute_lua, stop_lua, test_device
-from src.plugins.media_player.plugin import fetch_lyrics, parse_lrc, play_music
+from src.plugins.media_player.plugin import play_music
+from src.use_cases.sdk.music import _fetch_lyrics_sdk
 from src.plugins.memory.plugin import (
     memory_forget,
     memory_list,
@@ -289,69 +290,7 @@ class TestGetBrightness:
 
 
 # ============================================================
-# parse_lrc 歌词解析（media_player）
-# ============================================================
-
-
-class TestParseLrc:
-    """parse_lrc：解析 LRC 歌词文本"""
-
-    def test_basic_line(self):
-        lrc = "[01:23.45]这是一句歌词"
-        result = parse_lrc(lrc)
-        assert len(result) == 1
-        assert result[0]["text"] == "这是一句歌词"
-        # 1分23秒450毫秒
-        assert result[0]["time"] == 1 * 60000 + 23 * 1000 + 450
-
-    def test_without_fraction(self):
-        lrc = "[01:23]歌词"
-        result = parse_lrc(lrc)
-        assert len(result) == 1
-        assert result[0]["time"] == 83000
-
-    def test_multiple_lines(self):
-        lrc = "[00:01.00]第一行\n[00:03.00]第二行\n[00:02.00]第三行"
-        result = parse_lrc(lrc)
-        assert len(result) == 3
-        # 应按时间排序
-        assert result[0]["text"] == "第一行"
-        assert result[1]["text"] == "第三行"
-        assert result[2]["text"] == "第二行"
-
-    def test_empty_lines_skipped(self):
-        lrc = "[00:01.00]有内容\n\n[00:02.00]也有内容"
-        result = parse_lrc(lrc)
-        assert len(result) == 2
-
-    def test_empty_text_skipped(self):
-        lrc = "[00:01.00]\n[00:02.00]有内容"
-        result = parse_lrc(lrc)
-        assert len(result) == 1
-        assert result[0]["text"] == "有内容"
-
-    def test_empty_input(self):
-        assert parse_lrc("") == []
-
-    def test_no_timestamp_lines(self):
-        lrc = "没有时间戳的行\n[00:01.00]有时间戳"
-        result = parse_lrc(lrc)
-        assert len(result) == 1
-
-    def test_three_digit_fraction(self):
-        lrc = "[00:01.123]测试"
-        result = parse_lrc(lrc)
-        assert len(result) == 1
-        assert result[0]["time"] == 1000 + 123
-
-    def test_whitespace_after_timestamp_stripped(self):
-        lrc = "[00:01.00]   带空格的歌词"
-        result = parse_lrc(lrc)
-        assert result[0]["text"] == "带空格的歌词"
-
-
-# ============================================================
-# fetch_lyrics 歌词下载（media_player）
+# _fetch_lyrics_sdk 歌词下载与 LRC 解析（media_player -> SDK）
 # ============================================================
 
 
@@ -361,22 +300,89 @@ def _fake_http_response(text=""):
     return resp
 
 
+async def _parse_lrc(lrc_text: str) -> list:
+    """通过 SDK 的 _fetch_lyrics_sdk 解析 LRC 文本（原插件 parse_lrc 已迁移至此）。"""
+    with patch("src.use_cases.sdk.music.http_request",
+               AsyncMock(return_value=(_fake_http_response(lrc_text), None))):
+        return await _fetch_lyrics_sdk("http://example.com/lyrics.lrc")
+
+
+class TestParseLrc:
+    """_fetch_lyrics_sdk：解析 LRC 歌词文本（原插件 parse_lrc 功能已迁移至 SDK）"""
+
+    async def test_basic_line(self):
+        result = await _parse_lrc("[01:23.45]这是一句歌词")
+        assert len(result) == 1
+        assert result[0]["text"] == "这是一句歌词"
+        # 1分23秒450毫秒
+        assert result[0]["time"] == 1 * 60000 + 23 * 1000 + 450
+
+    async def test_without_fraction(self):
+        result = await _parse_lrc("[01:23]歌词")
+        assert len(result) == 1
+        assert result[0]["time"] == 83000
+
+    async def test_multiple_lines(self):
+        lrc = "[00:01.00]第一行\n[00:03.00]第二行\n[00:02.00]第三行"
+        result = await _parse_lrc(lrc)
+        assert len(result) == 3
+        # 应按时间排序
+        assert result[0]["text"] == "第一行"
+        assert result[1]["text"] == "第三行"
+        assert result[2]["text"] == "第二行"
+
+    async def test_empty_lines_skipped(self):
+        lrc = "[00:01.00]有内容\n\n[00:02.00]也有内容"
+        result = await _parse_lrc(lrc)
+        assert len(result) == 2
+
+    async def test_empty_text_skipped(self):
+        lrc = "[00:01.00]\n[00:02.00]有内容"
+        result = await _parse_lrc(lrc)
+        assert len(result) == 1
+        assert result[0]["text"] == "有内容"
+
+    async def test_empty_input(self):
+        assert await _parse_lrc("") == []
+
+    async def test_no_timestamp_lines(self):
+        lrc = "没有时间戳的行\n[00:01.00]有时间戳"
+        result = await _parse_lrc(lrc)
+        assert len(result) == 1
+
+    async def test_three_digit_fraction(self):
+        result = await _parse_lrc("[00:01.123]测试")
+        assert len(result) == 1
+        assert result[0]["time"] == 1000 + 123
+
+    async def test_whitespace_after_timestamp_stripped(self):
+        result = await _parse_lrc("[00:01.00]   带空格的歌词")
+        assert result[0]["text"] == "带空格的歌词"
+
+
+# ============================================================
+# _fetch_lyrics_sdk 歌词下载（media_player -> SDK）
+# ============================================================
+
+
 class TestFetchLyrics:
-    """fetch_lyrics：下载并解析歌词"""
+    """_fetch_lyrics_sdk：下载并解析歌词"""
 
     async def test_success(self):
         lrc_text = "[00:01.00]第一行\n[00:02.00]第二行"
-        with _plugin_ctx("media_player", ["network"]), \
-                patch("src.plugins.media_player.plugin.http_request",
-                      AsyncMock(return_value=(_fake_http_response(lrc_text), None))):
-            result = await fetch_lyrics("http://example.com/lyrics.lrc")
+        result = await _parse_lrc(lrc_text)
         assert len(result) == 2
 
     async def test_failure_returns_empty(self):
-        with _plugin_ctx("media_player", ["network"]), \
-                patch("src.plugins.media_player.plugin.http_request",
-                      AsyncMock(return_value=(None, RuntimeError("network error")))):
-            result = await fetch_lyrics("http://example.com/bad")
+        with patch("src.use_cases.sdk.music.http_request",
+                   AsyncMock(return_value=(None, RuntimeError("network error")))):
+            result = await _fetch_lyrics_sdk("http://example.com/bad")
+        assert result == []
+
+    async def test_exception_returns_empty(self):
+        with patch("src.use_cases.sdk.music.http_request",
+                   AsyncMock(side_effect=RuntimeError("boom"))):
+            result = await _fetch_lyrics_sdk("http://example.com/bad")
         assert result == []
 
 
@@ -386,16 +392,25 @@ class TestFetchLyrics:
 
 
 class TestPlayMusic:
-    """play_music：搜索并播放歌曲"""
+    """play_music：搜索并播放歌曲
 
-    def _make_tm_with_music_config(self):
+    重构后的 play_music 通过 SDK 的 play_music_url 下发播放指令
+    （歌词下载/逐行推送也由 SDK 完成），成功后抛出 StopPipeline。
+    """
+
+    def _make_tm(self):
         tm = MagicMock()
         tm.channel = MagicMock()
         tm.channel.send_json = AsyncMock()
         tm.user_config = MagicMock()
-        tm.user_config.music_config = {"api_url": "http://music.api"}
-        tm.get_plugin_config = MagicMock(return_value="http://music.api")
+        tm.user_config.key = "bound_d1"
         return tm
+
+    def _settings(self, api_url="http://music.api"):
+        settings = MagicMock()
+        settings.music.api_url = api_url
+        settings.music.lyrics_offset = 0
+        return settings
 
     def _patch_api(self, data):
         resp = MagicMock()
@@ -404,40 +419,43 @@ class TestPlayMusic:
                      AsyncMock(return_value=(resp, None)))
 
     async def test_no_api_url_returns_message(self):
-        tm = MagicMock()
-        tm.channel = None
-        tm.user_config = None
-        tm.get_plugin_config = MagicMock(return_value="")
-        settings = MagicMock()
-        settings.music.api_url = ""
-        settings.music.lyrics_offset = 0
-        with patch("src.plugins.media_player.plugin.get_settings", return_value=settings):
+        tm = self._make_tm()
+        with patch("src.plugins.media_player.plugin.kv_get", MagicMock(return_value="")), \
+                patch("src.plugins.media_player.plugin.get_settings",
+                      return_value=self._settings("")):
             result = await play_music("歌", tool_manager=tm)
         assert "音乐服务" in result
 
     async def test_api_request_failure_returns_message(self):
-        tm = self._make_tm_with_music_config()
-        with patch("src.plugins.media_player.plugin.http_request",
-                   AsyncMock(return_value=(None, Exception("network error")))), \
-                _plugin_ctx("media_player", ["network"]):
+        tm = self._make_tm()
+        with patch("src.plugins.media_player.plugin.kv_get", MagicMock(return_value="")), \
+                patch("src.plugins.media_player.plugin.get_settings",
+                      return_value=self._settings()), \
+                patch("src.plugins.media_player.plugin.http_request",
+                      AsyncMock(return_value=(None, Exception("network error")))):
             result = await play_music("歌", tool_manager=tm)
         assert "不可用" in result
 
     async def test_song_not_found(self):
-        tm = self._make_tm_with_music_config()
-        with self._patch_api({"success": False}), _plugin_ctx("media_player", ["network"]):
+        tm = self._make_tm()
+        with patch("src.plugins.media_player.plugin.kv_get", MagicMock(return_value="")), \
+                patch("src.plugins.media_player.plugin.get_settings",
+                      return_value=self._settings()), \
+                self._patch_api({"success": False}):
             result = await play_music("不存在的歌", tool_manager=tm)
         assert "未找到" in result
 
     async def test_no_audio_url(self):
-        tm = self._make_tm_with_music_config()
-        with self._patch_api({"success": True, "audio_url": ""}), \
-                _plugin_ctx("media_player", ["network"]):
+        tm = self._make_tm()
+        with patch("src.plugins.media_player.plugin.kv_get", MagicMock(return_value="")), \
+                patch("src.plugins.media_player.plugin.get_settings",
+                      return_value=self._settings()), \
+                self._patch_api({"success": True, "audio_url": ""}):
             result = await play_music("歌", tool_manager=tm)
         assert "没有可播放" in result
 
     async def test_success_with_channel_raises_stop_pipeline(self):
-        tm = self._make_tm_with_music_config()
+        tm = self._make_tm()
         api_data = {
             "success": True,
             "audio_url": "http://audio.url",
@@ -446,17 +464,25 @@ class TestPlayMusic:
             "lyric_url": "",
             "duration": 180,
         }
-        with self._patch_api(api_data), _plugin_ctx("media_player", ["network", "device"]), \
-                patch("src.plugins.media_player.plugin.fetch_lyrics", AsyncMock(return_value=[])):
+        pmu = AsyncMock(return_value="ok")
+        with patch("src.plugins.media_player.plugin.kv_get", MagicMock(return_value="")), \
+                patch("src.plugins.media_player.plugin.get_settings",
+                      return_value=self._settings()), \
+                self._patch_api(api_data), \
+                patch("src.plugins.media_player.plugin.play_music_url", pmu):
             with pytest.raises(StopPipeline):
                 await play_music("歌", tool_manager=tm)
-        # 应发送 play_music 和 music_meta 指令
-        sent_commands = [c.args[0]["command_id"] for c in tm.channel.send_json.call_args_list]
-        assert "play_music" in sent_commands
-        assert "music_meta" in sent_commands
+        # 应通过 SDK 下发播放指令（播放指令与 music_meta 由 SDK 组装发送）
+        pmu.assert_awaited_once()
+        kwargs = pmu.call_args.kwargs
+        assert kwargs["url"] == "http://audio.url"
+        assert kwargs["title"] == "歌名"
+        assert kwargs["artist"] == "歌手"
+        assert kwargs["duration"] == 180
+        assert kwargs["device_key"] == "bound_d1"
 
-    async def test_success_with_lyrics(self):
-        tm = self._make_tm_with_music_config()
+    async def test_success_with_lyrics_passes_lyric_url(self):
+        tm = self._make_tm()
         api_data = {
             "success": True,
             "audio_url": "http://audio.url",
@@ -465,35 +491,18 @@ class TestPlayMusic:
             "lyric_url": "http://lyric.url",
             "duration": 180,
         }
-        lyrics = [{"time": 1000, "text": "第一行"}, {"time": 2000, "text": "第二行"}]
-        with self._patch_api(api_data), _plugin_ctx("media_player", ["network", "device"]), \
-                patch("src.plugins.media_player.plugin.fetch_lyrics", AsyncMock(return_value=lyrics)):
+        pmu = AsyncMock(return_value="ok")
+        with patch("src.plugins.media_player.plugin.kv_get", MagicMock(return_value="")), \
+                patch("src.plugins.media_player.plugin.get_settings",
+                      return_value=self._settings()), \
+                self._patch_api(api_data), \
+                patch("src.plugins.media_player.plugin.play_music_url", pmu):
             with pytest.raises(StopPipeline):
                 await play_music("歌", tool_manager=tm)
-        # 应发送 lyric_line 指令
-        sent_commands = [c.args[0]["command_id"] for c in tm.channel.send_json.call_args_list]
-        assert "lyric_line" in sent_commands
-
-    async def test_success_without_channel_returns_message(self):
-        tm = MagicMock()
-        tm.channel = None
-        tm.user_config = None
-        tm.get_plugin_config = MagicMock(return_value="")
-        settings = MagicMock()
-        settings.music.api_url = "http://music.api"
-        settings.music.lyrics_offset = 0
-        api_data = {
-            "success": True,
-            "audio_url": "http://audio.url",
-            "title": "歌名",
-            "artist": "歌手",
-            "lyric_url": "",
-            "duration": 180,
-        }
-        with patch("src.plugins.media_player.plugin.get_settings", return_value=settings), \
-                self._patch_api(api_data), _plugin_ctx("media_player", ["network"]):
-            result = await play_music("歌", tool_manager=tm)
-        assert "未连接设备" in result
+        # 歌词 URL 与偏移应透传给 SDK（下载与 lyric_line 推送由 SDK 完成）
+        kwargs = pmu.call_args.kwargs
+        assert kwargs["lyric_url"] == "http://lyric.url"
+        assert kwargs["lyrics_offset"] == 0
 
 
 # ============================================================

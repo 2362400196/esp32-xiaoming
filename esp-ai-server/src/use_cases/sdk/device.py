@@ -12,6 +12,21 @@ async def send_instruct(channel, command_id, data="") -> None:
     await channel.send_json({"type": "instruct", "command_id": command_id, "data": data})
 
 
+def _discard_stale_future(tool_manager, future_attr: str) -> None:
+    """主动失败旧的未完成回执 Future。
+
+    单槽 pending future 被新指令覆盖时，旧等待方将永远收不到结果、
+    只能干等到超时；这里在覆盖前主动给它一个失败结果，让旧调用立即返回。
+    """
+    old = getattr(tool_manager, future_attr, None)
+    if old is not None and not old.done():
+        try:
+            old.set_result("[Error] 有更新的设备指令发出，本次结果已被丢弃")
+        except Exception:
+            pass
+    setattr(tool_manager, future_attr, None)
+
+
 async def send_device_command(tool_manager, command_id, data="") -> str | None:
     """向设备发送一条 instruct 指令。
 
@@ -38,6 +53,7 @@ async def send_device_command_ack(tool_manager, command_id, data="", timeout=8.0
     if not tool_manager or not tool_manager.channel:
         return None, "offline", "设备未连接"
     loop = asyncio.get_running_loop()
+    _discard_stale_future(tool_manager, "_pending_command_ack_future")
     future = loop.create_future()
     tool_manager._pending_command_ack_future = future
     try:
@@ -71,6 +87,7 @@ async def request_device_result(tool_manager, command_id, future_attr, timeout=8
         if busy_future is not None and not busy_future.done():
             return None, "busy", if_busy
     loop = asyncio.get_running_loop()
+    _discard_stale_future(tool_manager, future_attr)
     future = loop.create_future()
     setattr(tool_manager, future_attr, future)
     try:

@@ -229,13 +229,13 @@ class TestTtsSynthesize:
 
         # mock TTS 网关和 session
         mock_session = MagicMock()
-        mock_session.synthesize = MagicMock()
+        mock_session.synthesize_audio = MagicMock()
 
         async def fake_synthesize(text):
             yield b"c" * 1500
             yield b"c" * 1500
 
-        mock_session.synthesize = fake_synthesize
+        mock_session.synthesize_audio = fake_synthesize
         mock_session.close = AsyncMock()
 
         mock_gateway = MagicMock()
@@ -263,7 +263,7 @@ class TestTtsSynthesize:
         async def fake_synthesize(text):
             yield b"d" * 3000
 
-        mock_session.synthesize = fake_synthesize
+        mock_session.synthesize_audio = fake_synthesize
         mock_session.close = AsyncMock()
         existing_gateway.create_session = AsyncMock(return_value=mock_session)
 
@@ -286,7 +286,7 @@ class TestTtsSynthesize:
         async def fake_synthesize(text):
             yield b"x" * 3000
 
-        mock_session.synthesize = fake_synthesize
+        mock_session.synthesize_audio = fake_synthesize
         mock_session.close = AsyncMock()
 
         mock_gateway = MagicMock()
@@ -326,7 +326,7 @@ class TestTtsSynthesize:
             yield b"r" * 3000
             yield None
 
-        mock_session.synthesize = fake_synthesize
+        mock_session.synthesize_audio = fake_synthesize
         mock_session.close = AsyncMock()
 
         mock_gateway = MagicMock()
@@ -349,7 +349,7 @@ class TestTtsSynthesize:
             # 模拟火山 TTS 中途失败提前 return：只收到极短片段
             yield b"truncated"
 
-        mock_session.synthesize = fake_synthesize
+        mock_session.synthesize_audio = fake_synthesize
         mock_session.close = AsyncMock()
 
         mock_gateway = MagicMock()

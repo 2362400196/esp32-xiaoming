@@ -168,9 +168,10 @@ async def main() -> None:
         logger.info("[DB] 数据库初始化完成")
 
         # 一次性历史数据迁移（首次启动时从 JSON 迁移到 DB）
+        # init_schema=False：schema 已在上面 init_db() 初始化，避免重复执行迁移日志
         try:
             from src.infrastructure.db.migrations.data_migration import run_migration
-            reports = await run_migration(project_root=PROJECT_ROOT, dry_run=False, force=False)
+            reports = await run_migration(project_root=PROJECT_ROOT, dry_run=False, force=False, init_schema=False)
             total = sum(r.inserted for r in reports)
             if total > 0:
                 logger.info(f"[DB] 历史数据迁移完成: 共 {total} 条记录")

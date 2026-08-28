@@ -157,8 +157,10 @@ async def validate_url(url: str, allowlist: set[str]) -> tuple[str | None, str |
     host = (parsed.hostname or "").lower()
     if not host:
         return f"URL 缺少主机名: {url}", None
-    if host in allowlist or host.endswith(tuple("." + h for h in allowlist if h)):
-        return None, None
+    # 注意：白名单命中也不能短路返回——白名单只表示业务上允许访问该域名，
+    # 不能豁免 SSRF 防护。所有域名（含白名单）都必须经过 DNS 解析 +
+    # 内网/保留 IP 校验，并返回 pin_ip 供 DNS pinning 使用，
+    # 保证 169.254.0.0/16（云元数据）等地址对白名单域名同样被拦截。
     ips = await _hostname_to_ips(host)
     if not ips:
         return f"无法解析主机名: {host}", None

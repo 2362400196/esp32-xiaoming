@@ -334,7 +334,7 @@ def make_mock_tts(audio_chunks: list[bytes] | None = None):
     tts = MagicMock()
     session_holder = _MockTTSSession()
 
-    async def _create_session(cancel_event=None):
+    async def _create_session(cancel_event=None, tool_manager=None):
         return session_holder
 
     tts.create_session = _create_session
@@ -355,6 +355,7 @@ def make_pipeline(
     device_id="dev-1",
     ltm_service=None,
     precomputed_skill_catalog=None,
+    memory_search_keywords=None,
 ) -> ConversationPipeline:
     """快速构造 ConversationPipeline，所有依赖使用 mock"""
     return ConversationPipeline(
@@ -370,6 +371,7 @@ def make_pipeline(
         device_id=device_id,
         ltm_service=ltm_service,
         precomputed_skill_catalog=precomputed_skill_catalog,
+        memory_search_keywords=memory_search_keywords,
     )
 
 
@@ -773,7 +775,7 @@ class TestConversationPipelineRun:
 
         tts = MagicMock()
 
-        async def _failing_create_session(cancel_event=None):
+        async def _failing_create_session(cancel_event=None, tool_manager=None):
             raise RuntimeError("TTS connection failed")
 
         tts.create_session = _failing_create_session
@@ -942,3 +944,64 @@ class TestCreatePipeline:
         uc.llm_system_prompt = "custom prompt"
         p = create_pipeline(llm, tts, MagicMock(), MagicMock(), user_config=uc)
         assert p.user_config is uc
+
+
+# ════════════════════════════════════════════════════════════
+# 流信号常量 / 记忆关键词配置
+# ════════════════════════════════════════════════════════════
+class TestStreamSignalConstants:
+    """流内控制信号常量测试（与 llm_gateways.py 的字面量保持一致）"""
+
+    def test_stop_pipeline_sentinel_value(self):
+        from src.use_cases.pipeline import STOP_PIPELINE_SENTINEL
+        assert STOP_PIPELINE_SENTINEL == "__STOP_PIPELINE__"
+
+    def test_llm_error_prefix_value(self):
+        from src.use_cases.pipeline import LLM_ERROR_PREFIX
+        assert LLM_ERROR_PREFIX == "LLM error"
+
+    async def test_run_stop_pipeline_uses_constant(self):
+        # LLM 产出常量信号 token 时触发 StopPipeline
+        from src.use_cases.pipeline import STOP_PIPELINE_SENTINEL
+        channel = MagicMock()
+        channel.send_json = AsyncMock()
+        channel.send_bytes = AsyncMock()
+        fsm = MagicMock()
+        fsm.set = AsyncMock()
+        llm = make_mock_llm([STOP_PIPELINE_SENTINEL])
+        p = make_pipeline(llm=llm, channel=channel, fsm=fsm)
+        result = await p.run("hi")
+        assert result.stop_pipeline is True
+
+
+class TestMemorySearchKeywords:
+    """记忆检索关键词可配置测试"""
+
+    def test_default_constant_keeps_original_words(self):
+        from src.use_cases.pipeline import DEFAULT_MEMORY_SEARCH_KEYWORDS
+        # 行为兼容：默认列表保留原有全部关键词
+        assert DEFAULT_MEMORY_SEARCH_KEYWORDS == [
+            "工作", "累", "职业", "上班", "外卖", "代码", "顾客", "编程",
+            "猫", "宠物", "玩具", "天气", "下雨", "送餐", "跑外卖",
+        ]
+
+    def test_init_default_is_none(self):
+        p = make_pipeline()
+        assert p.memory_search_keywords is None
+
+    def test_init_custom_keywords(self):
+        p = make_pipeline(memory_search_keywords=["音乐", "电影"])
+        assert p.memory_search_keywords == ["音乐", "电影"]
+
+    def test_create_pipeline_passthrough_from_config_dict(self):
+        # config dict 中的 memory_search_keywords 被透传，且不会误传给 PipelineConfig
+        p = create_pipeline(
+            make_mock_llm(["hi"]), make_mock_tts(), MagicMock(), MagicMock(),
+            config={"tts_session_id": "abcd", "memory_search_keywords": ["天气"]},
+        )
+        assert p.memory_search_keywords == ["天气"]
+        assert p.config.tts_session_id == "abcd"
+
+    def test_create_pipeline_default_keywords_none(self):
+        p = create_pipeline(make_mock_llm(["hi"]), make_mock_tts(), MagicMock(), MagicMock())
+        assert p.memory_search_keywords is None

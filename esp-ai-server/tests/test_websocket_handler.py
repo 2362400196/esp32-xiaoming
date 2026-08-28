@@ -4,16 +4,52 @@
 - 插槽可用时：正常进入 handler 流程，退出时释放插槽
 - 插槽不可用（try_acquire 返回 False）时：以 1013 关闭连接，不创建 handler
 - handler 抛异常 / 客户端断开时：finally 仍释放插槽
-- 缺 key / 鉴权失败时：不获取插槽（提前 return）
+- 缺 key（进入绑定模式）/ 鉴权失败时：不获取插槽（提前 return）
+- 已绑定但无 key 连接：以 4004 拒绝（不得自动发 key 放行）
+- 带 key 连接：封禁检查对 DB 中 is_banned 设备生效（4003）
 """
 from __future__ import annotations
 
 import asyncio
+import inspect
+import string
+from contextlib import asynccontextmanager, contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.interfaces import websocket_handler
+
+
+@pytest.fixture(autouse=True)
+def fake_db_not_found():
+    """默认隔离真实 DB：按 key / mac 查询设备一律返回 None（单个测试可自行覆盖）"""
+    sync_result = MagicMock()
+    sync_result.scalar_one_or_none.return_value = None
+    sync_session = MagicMock()
+    sync_session.execute = MagicMock(return_value=sync_result)
+    sync_session.flush = MagicMock()
+    sync_session.commit = MagicMock()
+
+    @contextmanager
+    def _sync_ctx():
+        yield sync_session
+
+    async_result = MagicMock()
+    async_result.scalar_one_or_none.return_value = None
+    async_session = MagicMock()
+    async_session.execute = AsyncMock(return_value=async_result)
+    async_session.commit = AsyncMock()
+    async_session.flush = AsyncMock()
+    async_session.delete = AsyncMock()
+
+    @asynccontextmanager
+    async def _async_ctx():
+        yield async_session
+
+    with patch("src.infrastructure.db.compat.sync_session.get_sync_session", _sync_ctx), \
+         patch("src.infrastructure.db.session.get_session_ctx", _async_ctx):
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -205,8 +241,10 @@ class TestHandleWebsocketOverload:
 class TestHandleWebsocketAuthBypass:
     """鉴权失败 / 缺 key 时应提前 return，不获取并发插槽"""
 
-    async def test_missing_key_closes_4001_without_acquiring_slot(self, stub_session_handler_cls):
-        """缺少 device key 时应以 4001 关闭，不获取插槽"""
+    async def test_missing_key_enters_bind_mode_without_acquiring_slot(
+        self, stub_session_handler_cls
+    ):
+        """缺少 device key 且设备未绑定时：进入绑定模式（发送绑定码后关闭），不获取插槽"""
         acquire_called = False
 
         async def _fake_try_acquire(timeout=0.0):
@@ -215,14 +253,16 @@ class TestHandleWebsocketAuthBypass:
             return True
 
         ws = _make_ws(query_key="")
-        with patch("src.interfaces.websocket_handler.try_acquire_global_slot", new=_fake_try_acquire), \
+        with patch.object(
+            websocket_handler, "_send_bind_code_and_close", new=AsyncMock()
+        ) as mock_bind, \
+             patch("src.interfaces.websocket_handler.try_acquire_global_slot", new=_fake_try_acquire), \
              patch("src.interfaces.websocket_handler.get_settings") as mock_settings:
             mock_settings.return_value.deploy_mode = "single"
             await websocket_handler.handle_websocket(ws)
 
-        ws.close.assert_called_once()
-        args, kwargs = ws.close.call_args
-        assert kwargs.get("code") == 4001 or (args and args[0] == 4001)
+        # 应进入绑定模式，而不是直接关闭
+        mock_bind.assert_awaited_once()
         assert acquire_called is False
 
     async def test_auth_failure_closes_4003_without_acquiring_slot(
@@ -249,3 +289,181 @@ class TestHandleWebsocketAuthBypass:
         args, kwargs = ws.close.call_args
         assert kwargs.get("code") == 4003 or (args and args[0] == 4003)
         assert acquire_called is False
+
+
+# ─── 安全修复回归测试 ────────────────────────────────────────
+
+def _make_sync_db(device):
+    """构造假的同步 DB 会话（get_sync_session），execute 一律返回 device"""
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = device
+    session = MagicMock()
+    session.execute = MagicMock(return_value=result)
+    session.flush = MagicMock()
+    session.commit = MagicMock()
+
+    @contextmanager
+    def _ctx():
+        yield session
+
+    return _ctx
+
+
+def _make_async_db(device):
+    """构造假的异步 DB 会话（get_session_ctx），execute 一律返回 device"""
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = device
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=result)
+    session.commit = AsyncMock()
+    session.flush = AsyncMock()
+    session.delete = AsyncMock()
+
+    @asynccontextmanager
+    async def _ctx():
+        yield session
+
+    return _ctx
+
+
+class TestSecurityFixes:
+    """安全漏洞修复回归测试"""
+
+    async def test_key_connection_runs_ban_check(
+        self, stub_auth_ok, stub_session_handler_cls
+    ):
+        """带 key 连接：device 记录按 device_key 查询，封禁检查正常执行（修复 UnboundLocalError）"""
+        device = MagicMock()
+        device.is_banned = False
+        device.user_id = "user-1"
+        device.device_key = "test-key"
+
+        ws = _make_ws()
+        with patch(
+            "src.infrastructure.db.compat.sync_session.get_sync_session",
+            _make_sync_db(device),
+        ), \
+             patch("src.interfaces.websocket_handler.get_settings") as mock_settings:
+            mock_settings.return_value.deploy_mode = "single"
+            await websocket_handler.handle_websocket(ws)
+
+        # 不应被封禁拒绝，正常进入 handler 流程
+        ws.close.assert_not_called()
+        _, handler_inst = stub_session_handler_cls
+        handler_inst.initialize.assert_called_once()
+
+    async def test_banned_device_with_key_rejected_4003(
+        self, stub_auth_ok, stub_session_handler_cls
+    ):
+        """带 key 连接且设备已封禁：应以 4003 拒绝，不创建 handler、不获取插槽"""
+        acquire_called = False
+
+        async def _fake_try_acquire(timeout=0.0):
+            nonlocal acquire_called
+            acquire_called = True
+            return True
+
+        device = MagicMock()
+        device.is_banned = True
+        device.ban_reason = "测试封禁"
+        device.device_id = "dev-1"
+        device.user_id = "user-1"
+        device.device_key = "test-key"
+
+        ws = _make_ws()
+        with patch(
+            "src.infrastructure.db.compat.sync_session.get_sync_session",
+            _make_sync_db(device),
+        ), \
+             patch("src.interfaces.websocket_handler.try_acquire_global_slot", new=_fake_try_acquire), \
+             patch("src.interfaces.websocket_handler.get_settings") as mock_settings:
+            mock_settings.return_value.deploy_mode = "single"
+            await websocket_handler.handle_websocket(ws)
+
+        ws.close.assert_called_once()
+        args, kwargs = ws.close.call_args
+        code = kwargs.get("code", args[0] if args else None)
+        reason = kwargs.get("reason", args[1] if len(args) > 1 else "")
+        assert code == 4003
+        assert "Device banned" in reason
+        assert acquire_called is False
+        _, handler_inst = stub_session_handler_cls
+        handler_inst.initialize.assert_not_called()
+
+    async def test_bound_device_without_key_rejected_4004(self, stub_session_handler_cls):
+        """已绑定用户但无 key 连接：不得自动发 key 放行，应以 4004 拒绝（防 MAC 嗅探接管）"""
+        acquire_called = False
+
+        async def _fake_try_acquire(timeout=0.0):
+            nonlocal acquire_called
+            acquire_called = True
+            return True
+
+        device = MagicMock()
+        device.user_id = "user-1"
+        device.device_key = None
+        device.mac_address = "AA:BB:CC:DD:EE:FF"
+        device.device_id = "AA:BB:CC:DD:EE:FF"
+        device.is_banned = False
+
+        ws = _make_ws(query_key="")
+        with patch(
+            "src.infrastructure.db.session.get_session_ctx",
+            _make_async_db(device),
+        ), \
+             patch.object(
+                 websocket_handler, "_send_bind_code_and_close", new=AsyncMock()
+             ) as mock_bind, \
+             patch("src.interfaces.websocket_handler.try_acquire_global_slot", new=_fake_try_acquire), \
+             patch("src.interfaces.websocket_handler.get_settings") as mock_settings:
+            mock_settings.return_value.deploy_mode = "single"
+            await websocket_handler.handle_websocket(ws)
+
+        ws.close.assert_called_once()
+        args, kwargs = ws.close.call_args
+        code = kwargs.get("code", args[0] if args else None)
+        assert code == 4004
+        # 不应进入绑定模式，也不应获取插槽
+        mock_bind.assert_not_called()
+        assert acquire_called is False
+
+    async def test_unbound_device_without_key_still_gets_bind_code(
+        self, stub_session_handler_cls
+    ):
+        """未绑定用户（首次配网）且无 key 连接：保留自动发绑定码行为"""
+        device = MagicMock()
+        device.user_id = None
+        device.device_key = None
+        device.mac_address = "AA:BB:CC:DD:EE:FF"
+
+        ws = _make_ws(query_key="", device_id="AA:BB:CC:DD:EE:FF")
+        with patch(
+            "src.infrastructure.db.session.get_session_ctx",
+            _make_async_db(device),
+        ), \
+             patch.object(
+                 websocket_handler, "_send_bind_code_and_close", new=AsyncMock()
+             ) as mock_bind, \
+             patch("src.interfaces.websocket_handler.get_settings") as mock_settings:
+            mock_settings.return_value.deploy_mode = "single"
+            await websocket_handler.handle_websocket(ws)
+
+        mock_bind.assert_awaited_once()
+        args, _ = mock_bind.call_args
+        assert args[1] == "AA:BB:CC:DD:EE:FF"
+
+    def test_device_key_not_derivable_from_mac(self):
+        """自动注册的 device_key 不应由 MAC 推导（不应再出现 'auto_' + mac[-8:] 模式）"""
+        src = inspect.getsource(websocket_handler)
+        assert "device_mac[-8:]" not in src
+        # 绑定码与自动 key 均应使用 secrets（密码学安全随机数）
+        assert "secrets" in src
+        assert "random.choices" not in src
+
+    def test_bind_code_uses_secure_random(self):
+        """绑定码使用 secrets 生成：6 位、字符集正确、多次生成不同"""
+        code = websocket_handler._generate_bind_code()
+        assert len(code) == 6
+        assert all(c in string.ascii_uppercase + string.digits for c in code)
+        codes = {websocket_handler._generate_bind_code() for _ in range(20)}
+        assert len(codes) > 1

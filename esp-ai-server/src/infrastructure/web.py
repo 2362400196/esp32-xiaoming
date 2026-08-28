@@ -33,6 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from src.infrastructure.api_response import init_rate_limiter
 from src.infrastructure.config import get_settings
 from src.infrastructure.logging import get_logger, trace_id_var
+from src.infrastructure.task_manager import background_task
 
 logger = get_logger(__name__)
 
@@ -51,7 +52,12 @@ async def lifespan(app: FastAPI):
     # 初始化并发控制
     init_concurrency_control()
     logger.info("[Concurrency] 并发控制模块初始化成功")
-    
+
+    # 初始化敏感字段落盘加密（FIELD_ENCRYPTION_KEY，未配置时由调用方降级明文）
+    from src.infrastructure.crypto import init_crypto
+    init_crypto(get_settings().field_encryption_key)
+    logger.info("[Crypto] 字段加密模块已初始化")
+
     logger.info("[Trace] Trace ID middleware enabled")
     logger.info("[Metrics] Prometheus /metrics endpoint exposed")
 
@@ -475,10 +481,11 @@ async def lifespan(app: FastAPI):
                         if need_speak:
                             speaker = getattr(app.state, 'speaker', None)
                             if speaker and device_channel:
-                                asyncio.create_task(speaker.speak(
+                                # TTS 播报为后台任务，通过 task_manager 持有引用，失败记 ERROR 日志
+                                background_task(speaker.speak(
                                     binding.device_key, clean_reply,
                                     user_config=device_model,
-                                ))
+                                ), name="wechat_device_tts")
                                 logger.info(f"[WeChat] 已触发设备 TTS 播放")
                     except Exception as tts_err:
                         logger.warning(f"[WeChat] 设备 TTS 播放失败: {tts_err}")
@@ -942,12 +949,13 @@ def _hot_reload_device_config(device_id: str, force: bool = False) -> None:
                         tool_mgr = d["tool_manager"]
                         for client in getattr(tool_mgr, '_mcp_clients', []):
                             try:
-                                asyncio.create_task(client.disconnect())
+                                # 清理任务通过 task_manager 持有引用，失败记 ERROR 日志
+                                background_task(client.disconnect(), name="mcp_client_disconnect")
                             except Exception as e:
                                 logger.debug(f"[Config] 关闭 MCP client 异常: {e}")
                         for pool in getattr(tool_mgr, '_mcp_pools', {}).values():
                             try:
-                                asyncio.create_task(pool.close())
+                                background_task(pool.close(), name="mcp_pool_close")
                             except Exception as e:
                                 logger.debug(f"[Config] 关闭 MCP pool 异常: {e}")
                         
@@ -959,20 +967,15 @@ def _hot_reload_device_config(device_id: str, force: bool = False) -> None:
                         
                         # 重新初始化 MCP（_hot_reload_device_config 由 async HTTP 路由调用，loop 必然在运行）
                         loop = asyncio.get_running_loop()
-                        _t = asyncio.create_task(
+                        # task_manager 持有任务引用防止 GC，失败记 ERROR 日志
+                        background_task(
                             tool_mgr.initialize_mcp(
                                 user_mcp_servers,
                                 disabled_servers=disabled_mcp_servers,
                                 disabled_tools=disabled_mcp_tools
-                            )
+                            ),
+                            name="mcp_reinit",
                         )
-                        # 保留任务引用防止 GC
-                        _app = get_app()
-                        if _app is not None:
-                            if not hasattr(_app, '_bg_tasks'):
-                                _app._bg_tasks = set()
-                            _app._bg_tasks.add(_t)
-                            _t.add_done_callback(_app._bg_tasks.discard)
                         from src.infrastructure.logging import get_logger
                         logger = get_logger(__name__)
                         logger.info(f"[HotReload] MCP 配置已重新加载: {device_id}, servers={list(user_mcp_servers.keys())}")

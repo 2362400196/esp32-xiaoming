@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Query
-from sqlalchemy import select, or_
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.infrastructure.logging import get_logger
-from src.infrastructure.db.models.device import DeviceModel
-from src.infrastructure.db.compat.sync_session import get_sync_session
+from src.infrastructure.security_jwt import get_current_user
+from src.infrastructure.db.models.user import UserModel
+from src.infrastructure.routes._deps import check_device_owner as _check_device_access
+from src.infrastructure.routes._deps import resolve_device_key as _resolve_device_key
 from src.use_cases.alarm_manager import get_alarm_manager
 
 logger = get_logger(__name__)
@@ -19,30 +20,14 @@ TYPE_MAP = {"alarm": "闹钟", "reminder": "提醒", "sleep_timer": "睡眠定�
 REPEAT_MAP = {"once": "单次", "daily": "每天", "weekly": "每周", "monthly": "每月"}
 
 
-def _resolve_device_key(device_id: str) -> str:
-    """将 device_id（MAC/device_key）解析为统一的 device_key"""
-    try:
-        with get_sync_session() as session:
-            result = session.execute(
-                select(DeviceModel).where(
-                    or_(
-                        DeviceModel.device_id == device_id,
-                        DeviceModel.device_key == device_id,
-                        DeviceModel.mac_address == device_id,
-                    )
-                )
-            )
-            model = result.scalars().first()
-            if model is not None and model.device_key:
-                return model.device_key
-    except Exception as e:
-        logger.error(f"[Alarm] DB 解析 device_key 失败: {e}")
-    return ""
-
-
 @router.get("/list")
-async def get_alarm_list(device_id: str = Query(..., description="设备MAC地址或device_key")):
-    """获取设备的闹钟、提醒和睡眠定时器列表"""
+async def get_alarm_list(
+    device_id: str = Query(..., description="设备MAC地址或device_key"),
+    user: UserModel = Depends(get_current_user),
+):
+    """获取设备的闹钟、提醒和睡眠定时器列表（JWT 认证 + 设备归属校验）"""
+    if not await _check_device_access(device_id, user):
+        raise HTTPException(403, "Device not bound to you")
     device_key = _resolve_device_key(device_id)
     if not device_key:
         return {"code": 1, "message": "设备未找到", "data": []}
@@ -98,7 +83,13 @@ async def get_alarm_list(device_id: str = Query(..., description="设备MAC地�
 
 
 @router.post("/cancel")
-async def cancel_alarm(alarm_id: str = Query(...)):
-    """取消闹钟/提醒"""
+async def cancel_alarm(alarm_id: str = Query(...), user: UserModel = Depends(get_current_user)):
+    """取消闹钟/提醒（JWT 认证 + 设备归属校验）"""
+    # 先通过 alarm_id 找到所属设备的 device_key，再校验归属
+    alarm_item = get_alarm_manager()._alarms.get(alarm_id)
+    if alarm_item is None:
+        return {"code": 1, "message": "未找到"}
+    if not await _check_device_access(alarm_item.device_key, user):
+        raise HTTPException(403, "Device not bound to you")
     ok = get_alarm_manager().remove_alarm(alarm_id)
     return {"code": 0 if ok else 1, "message": "已取消" if ok else "未找到"}

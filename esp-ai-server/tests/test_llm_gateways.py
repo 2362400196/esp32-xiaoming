@@ -170,8 +170,10 @@ class TestOpenAILLMGatewayInit:
         assert gw.temperature == 0.3
         assert gw.max_tokens == 500
         assert gw.client is not None
-        # AsyncOpenAI 应以传入的 api_key 与 base_url 被调用
-        patched_llm["AsyncOpenAI"].assert_called_with(api_key="abc", base_url="http://x")
+        # AsyncOpenAI 应以传入的 api_key 与 base_url 被调用（含统一超时/禁用SDK内置重试）
+        patched_llm["AsyncOpenAI"].assert_called_with(
+            api_key="abc", base_url="http://x", timeout=120.0, max_retries=0
+        )
 
     def test_init_falls_back_to_settings(self, patched_llm):
         # config 为空时回退到 settings
@@ -222,7 +224,9 @@ class TestResolveConfig:
         assert client is not None
         assert model == "gpt-new"
         assert system_prompt == "sp"
-        patched_llm["AsyncOpenAI"].assert_called_with(api_key="new", base_url="http://new")
+        patched_llm["AsyncOpenAI"].assert_called_with(
+            api_key="new", base_url="http://new", timeout=120.0, max_retries=0
+        )
 
     def test_resolve_dict_device_overrides(self, patched_llm):
         gw = OpenAILLMGateway(config={"api_key": "k"})

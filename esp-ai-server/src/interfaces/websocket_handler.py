@@ -7,7 +7,7 @@ WebSocketSessionHandler（见 ws_session_handler.py）。
 from __future__ import annotations
 
 import asyncio
-import random
+import secrets
 import string
 import time
 import uuid
@@ -27,9 +27,9 @@ _WS_GLOBAL_SLOT_ACQUIRE_TIMEOUT = 5.0
 
 
 def _generate_bind_code() -> str:
-    """生成 6 位大写字母+数字绑定码"""
+    """生成 6 位大写字母+数字绑定码（使用密码学安全随机数）"""
     chars = string.ascii_uppercase + string.digits
-    return ''.join(random.choices(chars, k=6))
+    return ''.join(secrets.choice(chars) for _ in range(6))
 
 
 async def _send_bind_code_and_close(websocket: WebSocket, device_mac: str) -> None:
@@ -75,7 +75,8 @@ async def _send_bind_code_and_close(websocket: WebSocket, device_mac: str) -> No
             device = DeviceModel(
                 device_id=device_mac,
                 name=f"Device-{device_mac[-6:]}",
-                device_key="auto_" + device_mac[-8:],
+                # device_key 使用密码学安全随机数生成，不可由 MAC 推导
+                device_key="auto_" + secrets.token_hex(16),
                 mac_address=device_mac,
             )
             session.add(device)
@@ -133,6 +134,9 @@ async def handle_websocket(websocket: WebSocket):
         pass
 
     logger.info(f"[WS] New connection: path={ws_path}, device_id={device_mac or 'N/A'}, version={device_firmware_version or 'N/A'}, trace_id={trace_id}")
+
+    # 当前连接对应的设备记录（带 key / 不带 key 两条路径都必须赋值，供后续封禁检查使用）
+    device = None
 
     # 无 key 连接：查 DB 补全 device_key
     if not device_key:
@@ -203,11 +207,17 @@ async def handle_websocket(websocket: WebSocket):
                 device_key = device.device_key
                 logger.info(f"[WS] 设备 {device_mac} 已绑定，从 DB 获取 device_key 进行认证")
             else:
-                # 已绑定但无 key：自动生成新 key 并继续（修复旧绑定数据无 key 的问题）
-                import secrets
-                device.device_key = "bound_" + secrets.token_hex(8)
-                device_key = device.device_key
-                logger.warning(f"[WS] 设备 {device_mac} 已绑定但无 device_key，已自动生成: {device_key}")
+                # 安全修复：已绑定但无 key 的连接不得自动生成 key 放行认证。
+                # MAC 地址可被嗅探，若仅凭 MAC 即接管已绑定设备会话，攻击者可冒充设备。
+                # 拒绝连接，让用户走重新配网/绑定流程。
+                logger.warning(
+                    f"[WS][安全] 设备 {device_mac} 已绑定用户但连接未携带 device_key，"
+                    f"拒绝连接，请走重新配网/绑定流程"
+                )
+                await websocket.close(
+                    code=4004, reason="Device bound but missing key, please re-bind"
+                )
+                return
 
         await session.commit()  # 确保 device_key 立即持久化
 
@@ -241,6 +251,20 @@ async def handle_websocket(websocket: WebSocket):
         await websocket.close(code=4003, reason="Authentication failed")
         return
 
+    # 带 key 连接路径：无 key 分支未加载 device 记录，此处按 device_key 查询，
+    # 确保封禁检查对两条路径都生效（放在鉴权之后，避免未认证请求触发 DB 查询）
+    if device is None:
+        from src.infrastructure.db.compat.sync_session import get_sync_session
+        from src.infrastructure.db.models.device import DeviceModel
+        from sqlalchemy import select
+
+        def _lookup_device_by_key():
+            with get_sync_session() as sess:
+                r = sess.execute(select(DeviceModel).where(DeviceModel.device_key == device_key))
+                return r.scalar_one_or_none()
+
+        device = await asyncio.to_thread(_lookup_device_by_key)
+
     # 检查设备是否被封禁
     if device:
         if device.is_banned:
@@ -251,6 +275,9 @@ async def handle_websocket(websocket: WebSocket):
     else:
         # 尝试从 DB 查设备封禁状态
         from src.infrastructure.db.compat.sync_session import get_sync_session
+        from src.infrastructure.db.models.device import DeviceModel
+        from sqlalchemy import select
+
         def _ban_check():
             with get_sync_session() as sess:
                 r = sess.execute(select(DeviceModel).where(

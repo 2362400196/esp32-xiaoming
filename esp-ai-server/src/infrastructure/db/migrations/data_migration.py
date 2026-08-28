@@ -675,11 +675,12 @@ async def run_migration(
     project_root: Optional[Path] = None,
     dry_run: bool = False,
     force: bool = False,
+    init_schema: bool = True,
 ) -> list[MigrationReport]:
     """运行完整迁移流程
 
     迁移流程（按顺序）：
-        a. 初始化 DB schema（调用 ``init_db()``）
+        a. 初始化 DB schema（调用 ``init_db()``，可用 ``init_schema=False`` 跳过）
         b. 检查 DB 是否已有数据，有则跳过对应表迁移（除非 ``force=True``）
         c-h. 依次迁移各表
         i. 输出报告
@@ -688,6 +689,8 @@ async def run_migration(
         project_root: 项目根目录（None = 自动检测）
         dry_run: 只报告不执行
         force: 强制重新迁移（忽略已有数据）
+        init_schema: 是否先执行 init_db()（调用方已初始化过 schema 时传 False，
+            避免启动流程重复执行迁移）
 
     Returns:
         各表的迁移报告列表
@@ -697,7 +700,8 @@ async def run_migration(
     ctx = MigrationContext.from_root(project_root)
 
     # a. 初始化 DB schema（幂等，已存在的表不会被重建）
-    await init_db()
+    if init_schema:
+        await init_db()
 
     reports: list[MigrationReport] = []
     for table_name, model_cls, migrate_fn in _MIGRATIONS:

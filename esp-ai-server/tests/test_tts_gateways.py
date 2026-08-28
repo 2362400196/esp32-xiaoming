@@ -86,12 +86,12 @@ def patched_tts():
 
 @pytest.fixture(autouse=True)
 def reset_tts_pool():
-    """每个测试前后重置类级连接池，避免相互影响"""
-    VolcEngineTTSGateway._pool = None
-    VolcEngineTTSGateway._pool_initialized = False
+    """每个测试前后重置类级连接池字典，避免相互影响"""
+    VolcEngineTTSGateway._pools.clear()
+    VolcEngineTTSGateway._pool_warmed.clear()
     yield
-    VolcEngineTTSGateway._pool = None
-    VolcEngineTTSGateway._pool_initialized = False
+    VolcEngineTTSGateway._pools.clear()
+    VolcEngineTTSGateway._pool_warmed.clear()
 
 
 def _close_coro_side_effect(coro, *args, **kwargs):
@@ -346,7 +346,7 @@ class TestTTSPool:
                    side_effect=_close_coro_side_effect) as m_task:
             pool = VolcEngineTTSGateway.get_pool(config=config)
         assert pool is not None
-        assert pool is VolcEngineTTSGateway._pool
+        assert pool in VolcEngineTTSGateway._pools.values()
         m_task.assert_called_once()
         # 再次获取应复用
         with patch("src.interfaces.tts_gateways.asyncio.create_task",
@@ -358,6 +358,20 @@ class TestTTSPool:
         # 没有连接池时 close_pool 不报错
         await VolcEngineTTSGateway.close_pool()
 
+    def test_get_pool_isolated_per_config(self, patched_tts):
+        """不同设备配置（api_key/voice_type 不同）应持有独立连接池，避免密钥串用"""
+        patched_tts["settings"].tts.enable_pool = True
+        with patch("src.interfaces.tts_gateways.asyncio.create_task",
+                   side_effect=_close_coro_side_effect):
+            pool_a = VolcEngineTTSGateway.get_pool(config={"api_key": "key-a", "voice_type": "BV001"})
+            pool_b = VolcEngineTTSGateway.get_pool(config={"api_key": "key-b", "voice_type": "BV001"})
+        assert pool_a is not pool_b
+        assert len(VolcEngineTTSGateway._pools) == 2
+        # 相同配置复用同一个池
+        with patch("src.interfaces.tts_gateways.asyncio.create_task",
+                   side_effect=_close_coro_side_effect):
+            assert VolcEngineTTSGateway.get_pool(config={"api_key": "key-a", "voice_type": "BV001"}) is pool_a
+
     async def test_close_pool_with_pool(self, patched_tts):
         patched_tts["settings"].tts.enable_pool = True
         config = {"api_key": "k"}
@@ -367,7 +381,7 @@ class TestTTSPool:
         pool.close = AsyncMock()
         await VolcEngineTTSGateway.close_pool()
         pool.close.assert_awaited_once()
-        assert VolcEngineTTSGateway._pool is None
+        assert VolcEngineTTSGateway._pools == {}
 
 
 # ─── _create_connection / create_session 测试 ──────────────
@@ -403,11 +417,12 @@ class TestCreateSession:
 
     async def test_create_session_retry_then_fail(self, patched_tts):
         # 连接持续失败，重试后抛出异常
-        gw = VolcEngineTTSGateway(config={"api_key": "k"})
-        with patch("src.interfaces.tts_gateways.asyncio.sleep", new=AsyncMock()):
-            patched_tts["websockets_connect"].side_effect = OSError("conn refused")
-            with pytest.raises((OSError, RuntimeError)):
-                await gw.create_session()
+        # 注意：必须禁用连接池——池的后台 _cleanup_loop 会持有 asyncio.sleep(60)，
+        # 若把 asyncio.sleep patch 成立即返回，清理循环会变成忙等死循环卡死事件循环
+        gw = VolcEngineTTSGateway(config={"api_key": "k", "enable_pool": False})
+        patched_tts["websockets_connect"].side_effect = OSError("conn refused")
+        with pytest.raises((OSError, RuntimeError)):
+            await gw.create_session()
 
 
 def asyncio_cancelled_error_or_runtime():
@@ -515,7 +530,8 @@ class TestTTSSession:
             results = []
             async for chunk in session.synthesize("hello"):
                 results.append(chunk)
-        assert results == [b"chunk"]
+        # session.synthesize 产出 TTSSynthEvent（kind=audio）
+        assert [(r.kind, r.data) for r in results] == [("audio", b"chunk")]
         # 序号自增
         assert session._seq == 1
 

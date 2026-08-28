@@ -9,14 +9,13 @@ from __future__ import annotations
 
 import os
 
-from fastapi import Depends, APIRouter
-from sqlalchemy import select, or_
+from fastapi import APIRouter, Depends, HTTPException
 
 from src.infrastructure.logging import get_logger
 from src.infrastructure.security_jwt import get_current_user
 from src.infrastructure.db.models.user import UserModel
-from src.infrastructure.db.models.device import DeviceModel
-from src.infrastructure.db.session import get_session_ctx
+from src.infrastructure.routes._deps import check_device_owner as _check_device_owner
+from src.infrastructure.routes._deps import resolve_device_key as _resolve_device_key
 
 logger = get_logger(__name__)
 
@@ -26,50 +25,6 @@ router = APIRouter(tags=["growth"])
 def _get_data_dir() -> str:
     """获取 data 目录路径（src/data）"""
     return os.path.join(os.path.dirname(__file__), "..", "..", "data")
-
-
-def _resolve_device_key(device_id: str) -> str:
-    """根据 device_id（MAC 或 key）从 DB 解析出 device_key。
-
-    通过同步会话查询 DeviceModel，返回 device_key。
-    DB 查询失败时记录错误日志并返回空字符串。
-    """
-    try:
-        from src.infrastructure.db.compat.sync_session import get_sync_session
-
-        with get_sync_session() as session:
-            result = session.execute(
-                select(DeviceModel).where(
-                    or_(
-                        DeviceModel.device_id == device_id,
-                        DeviceModel.device_key == device_id,
-                        DeviceModel.mac_address == device_id,
-                    )
-                )
-            )
-            model = result.scalars().first()
-            if model is not None and model.device_key:
-                return model.device_key
-    except Exception as e:
-        logger.error(f"[Growth] DB 解析 device_key 失败: {e}")
-
-    return ""
-
-
-async def _check_device_owner(device_id: str, user: UserModel) -> bool:
-    """校验设备归属当前用户（兼容 mac_address / device_id / device_key 查找）"""
-    async with get_session_ctx() as session:
-        result = await session.execute(
-            select(DeviceModel).where(
-                or_(
-                    DeviceModel.device_id == device_id,
-                    DeviceModel.mac_address == device_id,
-                    DeviceModel.device_key == device_id,
-                ),
-                DeviceModel.user_id == user.id,
-            )
-        )
-        return result.scalar_one_or_none() is not None
 
 
 # ============================================================
@@ -86,65 +41,60 @@ async def get_device_diary(device_id: str, date: str = "", limit: int = 30, user
         limit: 返回日记数量限制，默认30
     """
     if not await _check_device_owner(device_id, user):
-        from fastapi import HTTPException
         raise HTTPException(403, "Device not bound to you")
-    try:
-        from src.use_cases.growth import DiaryService
+    from src.use_cases.growth import DiaryService
 
-        data_dir = _get_data_dir()
-        diary_service = DiaryService(data_dir)
+    data_dir = _get_data_dir()
+    diary_service = DiaryService(data_dir)
 
-        device_key = _resolve_device_key(device_id)
+    device_key = _resolve_device_key(device_id)
 
-        # 获取指定日期的日记
-        if date:
-            content = await diary_service.get_diary_content(device_key, date)
-            if content:
-                # 兼容 {"日记":"..."} JSON 格式
-                import json as _json
-                try:
-                    parsed = _json.loads(content)
-                    if isinstance(parsed, dict):
-                        content = parsed.get("日记") or parsed.get("content") or content
-                except Exception:
-                    pass
-                return {"code": 0, "message": "ok", "data": {"date": date, "content": content}}
-            else:
-                return {"code": 0, "message": "ok", "data": {"date": date, "content": None, "message": "该日期无日记"}}
-
-        # 获取所有日记列表
-        entries = await diary_service.get_all_entries(device_key)
-        diary_list = []
-        for entry in entries[:limit]:
-            # 提取日记正文（兼容 {"日记":"..."} JSON 格式）
-            raw_text = entry.content
+    # 获取指定日期的日记
+    if date:
+        content = await diary_service.get_diary_content(device_key, date)
+        if content:
+            # 兼容 {"日记":"..."} JSON 格式
             import json as _json
             try:
-                parsed = _json.loads(raw_text)
+                parsed = _json.loads(content)
                 if isinstance(parsed, dict):
-                    raw_text = parsed.get("日记") or parsed.get("content") or raw_text
+                    content = parsed.get("日记") or parsed.get("content") or content
             except Exception:
                 pass
-            summary = (raw_text[:200] + "...") if len(raw_text) > 200 else raw_text
-            diary_list.append({
-                "date": entry.date,
-                "summary": summary,
-                "created_at": entry.created_at,
-            })
+            return {"code": 0, "message": "ok", "data": {"date": date, "content": content}}
+        else:
+            return {"code": 0, "message": "ok", "data": {"date": date, "content": None, "message": "该日期无日记"}}
 
-        return {
-            "code": 0,
-            "message": "ok",
-            "data": {
-                "device_id": device_id,
-                "device_key": device_key,
-                "count": len(diary_list),
-                "diaries": diary_list,
-            },
-        }
-    except Exception as e:
-        logger.error(f"获取日记失败: {e}")
-        return {"code": 1, "message": f"获取日记失败: {e}", "data": None}
+    # 获取所有日记列表
+    entries = await diary_service.get_all_entries(device_key)
+    diary_list = []
+    for entry in entries[:limit]:
+        # 提取日记正文（兼容 {"日记":"..."} JSON 格式）
+        raw_text = entry.content
+        import json as _json
+        try:
+            parsed = _json.loads(raw_text)
+            if isinstance(parsed, dict):
+                raw_text = parsed.get("日记") or parsed.get("content") or raw_text
+        except Exception:
+            pass
+        summary = (raw_text[:200] + "...") if len(raw_text) > 200 else raw_text
+        diary_list.append({
+            "date": entry.date,
+            "summary": summary,
+            "created_at": entry.created_at,
+        })
+
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "device_id": device_id,
+            "device_key": device_key,
+            "count": len(diary_list),
+            "diaries": diary_list,
+        },
+    }
 
 
 @router.get("/api/v1/growth/diary/{device_id}/{date}")
@@ -157,118 +107,108 @@ async def get_device_diary_by_date(device_id: str, date: str, user: UserModel = 
 async def get_device_growth_profile(device_id: str, user: UserModel = Depends(get_current_user)):
     """获取设备的用户画像和成长信息"""
     if not await _check_device_owner(device_id, user):
-        from fastapi import HTTPException
         raise HTTPException(403, "Device not bound to you")
+    data_dir = _get_data_dir()
+    device_key = _resolve_device_key(device_id)
+
+    # 获取用户画像
+    from src.use_cases.growth.user_profile import UserProfileService
+    profile_service = UserProfileService(data_dir)
+    profile = await profile_service.get_profile(device_key)
+    profile_dict = profile.to_dict()
+
+    # 获取情绪摘要
+    from src.use_cases.growth.emotion_analyzer import EmotionAnalyzer
+    emotion_service = EmotionAnalyzer(data_dir)
+    emotion_summary = await emotion_service.get_emotion_summary(device_key)
+
+    # 统计自学习技能数（扫描 skills 目录）
+    learned_skills_count = 0
     try:
-        data_dir = _get_data_dir()
-        device_key = _resolve_device_key(device_id)
+        import os as _os
+        skills_dir = _os.path.join(data_dir, "devices", device_key, "skills")
+        if _os.path.exists(skills_dir):
+            learned_skills_count = len([d for d in _os.scandir(skills_dir) if d.is_dir()])
+    except Exception:
+        pass
 
-        # 获取用户画像
-        from src.use_cases.growth.user_profile import UserProfileService
-        profile_service = UserProfileService(data_dir)
-        profile = await profile_service.get_profile(device_key)
-        profile_dict = profile.to_dict()
+    # 统计活跃天数（有日记的天数）
+    active_days = 0
+    try:
+        from src.use_cases.growth.diary_service import DiaryService
+        diary_svc = DiaryService(data_dir)
+        entries = await diary_svc.get_all_entries(device_key)
+        if entries:
+            active_days = len(set(e.date for e in entries))
+    except Exception:
+        pass
 
-        # 获取情绪摘要
-        from src.use_cases.growth.emotion_analyzer import EmotionAnalyzer
-        emotion_service = EmotionAnalyzer(data_dir)
-        emotion_summary = await emotion_service.get_emotion_summary(device_key)
+    profile_dict["learned_skills_count"] = learned_skills_count
+    profile_dict["active_days"] = active_days
 
-        # 统计自学习技能数（扫描 skills 目录）
-        learned_skills_count = 0
-        try:
-            import os as _os
-            skills_dir = _os.path.join(data_dir, "devices", device_key, "skills")
-            if _os.path.exists(skills_dir):
-                learned_skills_count = len([d for d in _os.scandir(skills_dir) if d.is_dir()])
-        except Exception:
-            pass
+    # 前端兼容：将 interests dict 展平为字符串数组
+    # interests 原始格式: {"likes": ["游泳"], "dislikes": [], "learning": ["编程"]}
+    flat_interests = []
+    interests_map = profile_dict.get("interests", {})
+    if isinstance(interests_map, dict):
+        for category, items in interests_map.items():
+            if items and isinstance(items, list):
+                category_label = {"likes": "喜欢", "dislikes": "不喜欢", "learning": "学习"}.get(category, category)
+                for item in items:
+                    if item:
+                        flat_interests.append(f"{category_label}: {item}")
+    profile_dict["interests"] = flat_interests
 
-        # 统计活跃天数（有日记的天数）
-        active_days = 0
-        try:
-            from src.use_cases.growth.diary_service import DiaryService
-            diary_svc = DiaryService(data_dir)
-            entries = await diary_svc.get_all_entries(device_key)
-            if entries:
-                active_days = len(set(e.date for e in entries))
-        except Exception:
-            pass
+    # 前端兼容：personality_traits（从 personality dict 提取）
+    personality = profile_dict.get("personality", {})
+    if isinstance(personality, dict):
+        profile_dict["personality_traits"] = list(personality.keys())
+    else:
+        profile_dict["personality_traits"] = []
 
-        profile_dict["learned_skills_count"] = learned_skills_count
-        profile_dict["active_days"] = active_days
-
-        # 前端兼容：将 interests dict 展平为字符串数组
-        # interests 原始格式: {"likes": ["游泳"], "dislikes": [], "learning": ["编程"]}
-        flat_interests = []
-        interests_map = profile_dict.get("interests", {})
-        if isinstance(interests_map, dict):
-            for category, items in interests_map.items():
-                if items and isinstance(items, list):
-                    category_label = {"likes": "喜欢", "dislikes": "不喜欢", "learning": "学习"}.get(category, category)
-                    for item in items:
-                        if item:
-                            flat_interests.append(f"{category_label}: {item}")
-        profile_dict["interests"] = flat_interests
-
-        # 前端兼容：personality_traits（从 personality dict 提取）
-        personality = profile_dict.get("personality", {})
-        if isinstance(personality, dict):
-            profile_dict["personality_traits"] = list(personality.keys())
-        else:
-            profile_dict["personality_traits"] = []
-
-        return {
-            "code": 0,
-            "message": "ok",
-            "data": {
-                "device_id": device_id,
-                "device_key": device_key,
-                "profile": profile_dict,
-                "emotion_summary": emotion_summary,
-            },
-        }
-    except Exception as e:
-        logger.error(f"获取成长信息失败: {e}")
-        return {"code": 1, "message": f"获取成长信息失败: {e}", "data": None}
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "device_id": device_id,
+            "device_key": device_key,
+            "profile": profile_dict,
+            "emotion_summary": emotion_summary,
+        },
+    }
 
 
 @router.get("/api/v1/growth/emotions/{device_id}")
 async def get_device_emotions(device_id: str, days: int = 7, user: UserModel = Depends(get_current_user)):
     """获取设备的情绪历史"""
     if not await _check_device_owner(device_id, user):
-        from fastapi import HTTPException
         raise HTTPException(403, "Device not bound to you")
-    try:
-        from src.use_cases.growth.emotion_analyzer import EmotionAnalyzer
+    from src.use_cases.growth.emotion_analyzer import EmotionAnalyzer
 
-        data_dir = _get_data_dir()
-        device_key = _resolve_device_key(device_id)
+    data_dir = _get_data_dir()
+    device_key = _resolve_device_key(device_id)
 
-        emotion_service = EmotionAnalyzer(data_dir)
-        emotions = await emotion_service.get_recent_emotions(device_key, days=days)
+    emotion_service = EmotionAnalyzer(data_dir)
+    emotions = await emotion_service.get_recent_emotions(device_key, days=days)
 
-        emotion_list = []
-        for e in emotions:
-            emotion_list.append({
-                "timestamp": e.timestamp,
-                "emotion": e.emotion,
-                "intensity": e.intensity,
-                "trigger": e.trigger,
-                "context": e.context,
-            })
+    emotion_list = []
+    for e in emotions:
+        emotion_list.append({
+            "timestamp": e.timestamp,
+            "emotion": e.emotion,
+            "intensity": e.intensity,
+            "trigger": e.trigger,
+            "context": e.context,
+        })
 
-        return {
-            "code": 0,
-            "message": "ok",
-            "data": {
-                "device_id": device_id,
-                "device_key": device_key,
-                "days": days,
-                "count": len(emotion_list),
-                "emotions": emotion_list,
-            },
-        }
-    except Exception as e:
-        logger.error(f"获取情绪历史失败: {e}")
-        return {"code": 1, "message": f"获取情绪历史失败: {e}", "data": None}
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "device_id": device_id,
+            "device_key": device_key,
+            "days": days,
+            "count": len(emotion_list),
+            "emotions": emotion_list,
+        },
+    }

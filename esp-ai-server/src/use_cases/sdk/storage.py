@@ -3,9 +3,14 @@
 import json
 import os
 import shutil
+import threading
 from typing import Any
 
 from src.infrastructure.plugin_security import require_permission
+
+# KV 存储进程内互斥锁：kv_set/kv_delete 是“整读-改-整写”，
+# 并发调用会互相覆盖丢失对方的写入，这里串行化保护。
+_kv_lock = threading.Lock()
 
 
 def _get_plugin_id() -> str:
@@ -199,10 +204,12 @@ def _load_kv_store(device_id: str = "") -> dict:
 
 
 def _save_kv_store(store: dict, device_id: str = "") -> None:
-    """保存 KV 存储。"""
+    """保存 KV 存储（临时文件 + 原子替换，避免写一半崩溃留下损坏的 JSON）。"""
     path = _get_kv_store_path(device_id)
-    with open(path, "w", encoding="utf-8") as f:
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(store, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
 
 
 def _resolve_device_id(tool_manager=None) -> str:
@@ -243,9 +250,10 @@ def kv_set(key: str, value: Any, tool_manager=None) -> None:
     """
     require_permission("kv", "写入键值存储")
     device_id = _resolve_device_id(tool_manager)
-    store = _load_kv_store(device_id)
-    store[key] = value
-    _save_kv_store(store, device_id)
+    with _kv_lock:
+        store = _load_kv_store(device_id)
+        store[key] = value
+        _save_kv_store(store, device_id)
 
 
 def kv_delete(key: str, tool_manager=None) -> bool:
@@ -262,12 +270,13 @@ def kv_delete(key: str, tool_manager=None) -> bool:
     """
     require_permission("kv", "删除键值存储")
     device_id = _resolve_device_id(tool_manager)
-    store = _load_kv_store(device_id)
-    if key in store:
-        del store[key]
-        _save_kv_store(store, device_id)
-        return True
-    return False
+    with _kv_lock:
+        store = _load_kv_store(device_id)
+        if key in store:
+            del store[key]
+            _save_kv_store(store, device_id)
+            return True
+        return False
 
 
 def kv_list(prefix: str = "", tool_manager=None) -> list:

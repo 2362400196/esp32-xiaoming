@@ -19,6 +19,8 @@ logger = get_logger(__name__)
 MAX_TOOL_ROUNDS = 10
 LLM_MAX_RETRIES = 3
 LLM_RETRY_DELAY = 1.5
+# 单次请求超时：流式对话最长也要在 2 分钟内判定失败（SDK 默认 600s 太长，会拖死会话）
+LLM_REQUEST_TIMEOUT = 120.0
 
 SEP = "=" * 50
 THIN_SEP = "-" * 50
@@ -39,7 +41,12 @@ class OpenAILLMGateway:
 
         self.client = None
         if self.api_key:
-            self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url or None)
+            self.client = AsyncOpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url or None,
+                timeout=LLM_REQUEST_TIMEOUT,
+                max_retries=0,  # 重试由 _retry 统一处理，避免 openai SDK 默认 2 次叠加
+            )
 
     def _resolve_config(self, user_config=None, device_id=None):
         api_key = self.api_key
@@ -76,7 +83,12 @@ class OpenAILLMGateway:
 
         client = self.client
         if api_key and (api_key != self.api_key or base_url != self.base_url):
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url or None)
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url or None,
+                timeout=LLM_REQUEST_TIMEOUT,
+                max_retries=0,
+            )
 
         return client, model, system_prompt
 
@@ -194,7 +206,6 @@ class OpenAILLMGateway:
                     reasoning_content = ""
                     raw_tool_calls: dict[int, dict] = {}
                     _tool_call_feedback_sent = False  # 标记是否已发送工具调用反馈
-                    _text_before_tool = ""  # 工具调用前的文本（可能只是推理过程，不应输出）
 
                     logger.info("[OpenAI LLM Pipeline streaming output started]")
                     async for chunk in response:
@@ -247,9 +258,7 @@ class OpenAILLMGateway:
                     logger.info(f"[OpenAI LLM Pipeline complete] {chunk_count} chunks total")
 
                     if not raw_tool_calls:
-                        # 没有工具调用，把缓存的文本输出
-                        if _text_before_tool:
-                            yield _text_before_tool
+                        # 没有工具调用：文本已在流式循环中逐 chunk 输出
 
                         # LLM 没调用工具，检测文本中是否写了函数名并自动执行
                         import re as _re
@@ -261,10 +270,6 @@ class OpenAILLMGateway:
                         else:
                             logger.info(f"{SEP}")
                             return
-                    else:
-                        # 有工具调用，先把缓存的推理文本输出，避免"我来查一下时间"被静默丢弃
-                        if _text_before_tool:
-                            yield _text_before_tool
 
                     logger.info(
                         f"[OpenAI LLM] Tool calls detected (round {round_num}): "

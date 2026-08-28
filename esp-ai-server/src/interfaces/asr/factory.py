@@ -1,17 +1,30 @@
 from __future__ import annotations
 
 from src.infrastructure.config import get_settings
+from src.infrastructure.logging import get_logger
 from src.interfaces.asr.aliyun import AliYunASRGateway
 from src.interfaces.asr.base import BaseASRGateway
 from src.interfaces.asr.tencent import TencentASRGateway
 from src.interfaces.asr.volcengine import VolcEngineASRGateway
 from src.interfaces.asr.xunfei import XunfeiASRGateway
 
+logger = get_logger(__name__)
+
+# 未实现完整识别逻辑的 provider：工厂仍允许创建（保持配置兼容），
+# 但会在启动时明确告警，避免线上静默得到空识别结果
+_UNIMPLEMENTED_PROVIDERS = {"aliyun", "xunfei"}
+
 
 def create_asr_gateway(provider: str = None, config: dict = None) -> BaseASRGateway:
     settings = get_settings()
     provider = (provider or settings.asr.provider).lower()
     config = config or {}
+
+    if provider in _UNIMPLEMENTED_PROVIDERS:
+        logger.warning(
+            f"[ASR] provider '{provider}' 的识别逻辑尚未实现（recognize/parse 返回空），"
+            "继续使用将无法得到识别结果；请改用 volcengine/tencent"
+        )
 
     if provider == "tencent":
         tencent_config = {

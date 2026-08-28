@@ -214,11 +214,11 @@ class TestPresetQueues:
     """预设子类的默认配置测试"""
 
     def test_text_queue_config(self):
-        # TextQueue: drop_oldest, maxsize=10
+        # TextQueue: block, maxsize=100（满时阻塞，保证长回复不丢句）
         q = TextQueue()
-        assert q._on_full == "drop_oldest"
+        assert q._on_full == "block"
         assert q._name == "text_queue"
-        assert q.queue.maxsize == 10
+        assert q.queue.maxsize == 100
 
     def test_text_queue_custom_maxsize(self):
         q = TextQueue(maxsize=50)
@@ -238,15 +238,20 @@ class TestPresetQueues:
         assert q._name == "send_queue"
         assert q.queue.maxsize == 500
 
-    async def test_text_queue_drop_oldest_behavior(self):
-        # 验证 TextQueue 实际使用 drop_oldest 行为
+    async def test_text_queue_blocks_when_full(self):
+        # 验证 TextQueue 的 block 行为：队列满后 put 挂起，取出一条后恢复
         q = TextQueue(maxsize=2)
         await q.put(("seq1", "text1"))
         await q.put(("seq2", "text2"))
-        await q.put(("seq3", "text3"))  # 丢弃 seq1
-        assert q.dropped == 1
+
+        put_task = asyncio.create_task(q.put(("seq3", "text3")))
+        await asyncio.sleep(0.05)
+        assert not put_task.done()  # 队列满，put 阻塞中
+
         seq, _ = await q.get()
-        assert seq == "seq2"
+        assert seq == "seq1"
+        await asyncio.wait_for(put_task, timeout=1)  # 取出后 put 完成
+        assert q.qsize() == 2
 
 
 # ════════════════════════════════════════════════════════════
@@ -261,12 +266,9 @@ class TestBackpressureQueues:
         assert isinstance(bq.audio, AudioQueue)
         assert isinstance(bq.send, SendQueue)
 
-    def test_text_queue_is_drop_oldest(self):
+    def test_all_queues_are_block(self):
         bq = BackpressureQueues()
-        assert bq.text._on_full == "drop_oldest"
-
-    def test_audio_and_send_are_block(self):
-        bq = BackpressureQueues()
+        assert bq.text._on_full == "block"
         assert bq.audio._on_full == "block"
         assert bq.send._on_full == "block"
 
@@ -299,12 +301,12 @@ class TestBackpressureQueues:
         assert audio_item == (-1, None, None)
 
     async def test_put_sentinel_when_full_text(self):
-        # text 队列满时 put_sentinel 静默忽略（不抛异常）
+        # text 队列满时（block 策略）put_sentinel 的 put_nowait 抛 QueueFull，
+        # 内部 try/except 静默忽略（不抛异常、不入队）
         bq = BackpressureQueues()
-        # 填满 text_queue（maxsize=10）
-        for i in range(10):
+        # 填满 text_queue（BackpressureQueues 中 maxsize=100）
+        for i in range(100):
             await bq.text.put((i, f"t{i}"))
-        # 此时再 put_sentinel，应被 drop_oldest 处理后成功放入
         bq.put_sentinel()
         # 队列仍满
         assert bq.text.full()

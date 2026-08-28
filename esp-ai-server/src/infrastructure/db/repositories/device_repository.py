@@ -18,10 +18,12 @@
 """
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Optional
+from typing import AsyncIterator, Optional
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +32,24 @@ from src.infrastructure.db.session import get_session_ctx
 from src.infrastructure.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+# ============================================================
+# 每设备读写锁：保证同一设备的“读-改-写”类操作（部分更新、技能增删、
+# MCP 配置写入）互斥，避免并发请求在各自 session 里读旧值互相覆盖。
+# SQLite 单文件库无行锁，仓储方法又各自开会话，只能在进程内串行化。
+# ============================================================
+
+_device_rw_locks: dict[str, asyncio.Lock] = {}
+_device_rw_locks_guard = asyncio.Lock()
+
+
+@asynccontextmanager
+async def _device_rw_lock(device_id: str) -> AsyncIterator[None]:
+    async with _device_rw_locks_guard:
+        lock = _device_rw_locks.setdefault(device_id, asyncio.Lock())
+    async with lock:
+        yield
 
 
 # ============================================================
@@ -251,25 +271,26 @@ class DeviceRepository:
         """
         if not device_id or not updates:
             return None
-        async with get_session_ctx() as session:
-            model = await self._select_device(session, device_id)
-            if model is None:
-                return None
-            # 转为 dict（含 mac，用于合并时保留 mac_address）
-            current = _model_to_dict(model)
-            current["mac"] = model.mac_address or ""
-            # 深度合并
-            merged = _deep_merge(current, updates)
-            # 转换为 model 字段并应用
-            new_fields = _dict_to_model_fields(device_id, merged)
-            for k, v in new_fields.items():
-                if k == "device_id":
-                    continue
-                setattr(model, k, v)
-            # 显式刷新 updated_at（热重载靠它判断配置变更，不依赖 onupdate 隐式触发）
-            model.updated_at = _now_ts()
-            await session.flush()
-            return _model_to_dict(model)
+        async with _device_rw_lock(device_id):
+            async with get_session_ctx() as session:
+                model = await self._select_device(session, device_id)
+                if model is None:
+                    return None
+                # 转为 dict（含 mac，用于合并时保留 mac_address）
+                current = _model_to_dict(model)
+                current["mac"] = model.mac_address or ""
+                # 深度合并
+                merged = _deep_merge(current, updates)
+                # 转换为 model 字段并应用
+                new_fields = _dict_to_model_fields(device_id, merged)
+                for k, v in new_fields.items():
+                    if k == "device_id":
+                        continue
+                    setattr(model, k, v)
+                # 显式刷新 updated_at（热重载靠它判断配置变更，不依赖 onupdate 隐式触发）
+                model.updated_at = _now_ts()
+                await session.flush()
+                return _model_to_dict(model)
 
     async def reset_device(self, device_id: str) -> bool:
         """清空设备所有配置（解绑/恢复出厂设置），保留 device_id 和 device_key"""
@@ -373,15 +394,16 @@ class DeviceRepository:
         """
         if not device_id or not skill_name:
             return False
-        async with get_session_ctx() as session:
-            model = await self._select_device(session, device_id)
-            if model is None:
-                return False
-            skills = list(model.skills or [])
-            if skill_name not in skills:
-                skills.append(skill_name)
-                model.skills = skills
-            return True
+        async with _device_rw_lock(device_id):
+            async with get_session_ctx() as session:
+                model = await self._select_device(session, device_id)
+                if model is None:
+                    return False
+                skills = list(model.skills or [])
+                if skill_name not in skills:
+                    skills.append(skill_name)
+                    model.skills = skills
+                return True
 
     async def remove_skill_from_all_devices(self, skill_name: str) -> int:
         """从所有设备的 ``skills`` 列表中移除指定技能。
@@ -409,17 +431,18 @@ class DeviceRepository:
         """
         if not device_id or not skill_id:
             return
-        async with get_session_ctx() as session:
-            model = await self._select_device(session, device_id)
-            if model is None:
-                return
-            disabled_list = list(model.disabled_skills or [])
-            if disabled:
-                if skill_id not in disabled_list:
-                    disabled_list.append(skill_id)
-            else:
-                disabled_list = [s for s in disabled_list if s != skill_id]
-            model.disabled_skills = disabled_list
+        async with _device_rw_lock(device_id):
+            async with get_session_ctx() as session:
+                model = await self._select_device(session, device_id)
+                if model is None:
+                    return
+                disabled_list = list(model.disabled_skills or [])
+                if disabled:
+                    if skill_id not in disabled_list:
+                        disabled_list.append(skill_id)
+                else:
+                    disabled_list = [s for s in disabled_list if s != skill_id]
+                model.disabled_skills = disabled_list
 
     async def get_mcp_servers(self, device_id: str) -> dict:
         """获取设备的 MCP 服务器配置。
@@ -438,26 +461,28 @@ class DeviceRepository:
         """添加或更新设备的单个 MCP 服务器配置。"""
         if not device_id or not server_name:
             return
-        async with get_session_ctx() as session:
-            model = await self._select_device(session, device_id)
-            if model is None:
-                return
-            servers = dict(model.mcp_servers or {})
-            servers[server_name] = config or {}
-            model.mcp_servers = servers
+        async with _device_rw_lock(device_id):
+            async with get_session_ctx() as session:
+                model = await self._select_device(session, device_id)
+                if model is None:
+                    return
+                servers = dict(model.mcp_servers or {})
+                servers[server_name] = config or {}
+                model.mcp_servers = servers
 
     async def delete_mcp_server(self, device_id: str, server_name: str) -> None:
         """删除设备的指定 MCP 服务器配置（不存在则无操作）。"""
         if not device_id or not server_name:
             return
-        async with get_session_ctx() as session:
-            model = await self._select_device(session, device_id)
-            if model is None:
-                return
-            servers = dict(model.mcp_servers or {})
-            if server_name in servers:
-                del servers[server_name]
-                model.mcp_servers = servers
+        async with _device_rw_lock(device_id):
+            async with get_session_ctx() as session:
+                model = await self._select_device(session, device_id)
+                if model is None:
+                    return
+                servers = dict(model.mcp_servers or {})
+                if server_name in servers:
+                    del servers[server_name]
+                    model.mcp_servers = servers
 
     async def resolve_device(self, device_id_or_mac: str) -> tuple[Optional[str], Optional[dict]]:
         """解析设备标识，返回 (device_id, config_dict) 或 (None, None)。
@@ -587,25 +612,18 @@ class DeviceRepository:
     async def _select_device(session: AsyncSession, device_id_or_mac: str) -> Optional[DeviceModel]:
         """按 device_id / device_key / mac_address 查找设备模型。
 
-        顺序：device_id (PK) → device_key → mac_address
+        单条 or_() 查询一次命中（device_id 为 PK，通常一击即中）。
         """
-        # 1. device_id（PK）
         result = await session.execute(
-            select(DeviceModel).where(DeviceModel.device_id == device_id_or_mac)
-        )
-        model = result.scalar_one_or_none()
-        if model is not None:
-            return model
-        # 2. device_key（API key）
-        result = await session.execute(
-            select(DeviceModel).where(DeviceModel.device_key == device_id_or_mac)
-        )
-        model = result.scalar_one_or_none()
-        if model is not None:
-            return model
-        # 3. mac_address
-        result = await session.execute(
-            select(DeviceModel).where(DeviceModel.mac_address == device_id_or_mac)
+            select(DeviceModel)
+            .where(
+                or_(
+                    DeviceModel.device_id == device_id_or_mac,
+                    DeviceModel.device_key == device_id_or_mac,
+                    DeviceModel.mac_address == device_id_or_mac,
+                )
+            )
+            .limit(1)
         )
         return result.scalar_one_or_none()
 

@@ -182,28 +182,22 @@ async def _ensure_developer(user: UserModel) -> UserModel:
 async def enable_developer(user: UserModel = Depends(get_current_user)):
     """开启开发者模式：生成 API Key（已开启则重新生成）。
     复用现有用户 JWT 认证，无需单独注册。"""
-    try:
-        async with get_session_ctx() as session:
-            db_user = await session.get(UserModel, str(user.id))
-            if db_user is None:
-                return {"code": 1, "message": "用户不存在", "data": None}
-            api_key = secrets.token_urlsafe(32)
-            db_user.developer_api_key = api_key
-            await session.flush()
-            logger.info(f"[Marketplace] 用户 {user.id} 开启开发者模式")
-        return {
-            "code": 0,
-            "message": "ok",
-            "data": {
-                "developer_api_key": api_key,
-                "username": _dev_name(user),
-            },
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[Marketplace] 开启开发者模式失败: {e}", exc_info=True)
-        return {"code": 1, "message": str(e), "data": None}
+    async with get_session_ctx() as session:
+        db_user = await session.get(UserModel, str(user.id))
+        if db_user is None:
+            return {"code": 1, "message": "用户不存在", "data": None}
+        api_key = secrets.token_urlsafe(32)
+        db_user.developer_api_key = api_key
+        await session.flush()
+        logger.info(f"[Marketplace] 用户 {user.id} 开启开发者模式")
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "developer_api_key": api_key,
+            "username": _dev_name(user),
+        },
+    }
 
 
 @router.get("/api/v1/marketplace/developer/info")
@@ -225,48 +219,40 @@ async def developer_info(user: UserModel = Depends(get_current_user)):
 @router.put("/api/v1/marketplace/developer/bio")
 async def update_developer_bio(body: UpdateBioReq, user: UserModel = Depends(get_current_user)):
     """更新开发者简介。"""
-    try:
-        async with get_session_ctx() as session:
-            db_user = await session.get(UserModel, str(user.id))
-            if db_user is None:
-                return {"code": 1, "message": "用户不存在", "data": None}
-            db_user.developer_bio = body.bio[:256]
-            await session.flush()
-        return {"code": 0, "message": "ok", "data": {"bio": body.bio[:256]}}
-    except Exception as e:
-        logger.error(f"[Marketplace] 更新开发者简介失败: {e}", exc_info=True)
-        return {"code": 1, "message": str(e), "data": None}
+    async with get_session_ctx() as session:
+        db_user = await session.get(UserModel, str(user.id))
+        if db_user is None:
+            return {"code": 1, "message": "用户不存在", "data": None}
+        db_user.developer_bio = body.bio[:256]
+        await session.flush()
+    return {"code": 0, "message": "ok", "data": {"bio": body.bio[:256]}}
 
 
 @router.get("/api/v1/marketplace/developer/plugins")
 async def developer_plugins(user: UserModel = Depends(get_current_user)):
     """获取当前开发者上传的所有插件。"""
-    try:
-        async with get_session_ctx() as session:
-            result = await session.execute(
-                select(MarketplacePluginModel)
-                .where(MarketplacePluginModel.developer_id == str(user.id))
-                .order_by(desc(MarketplacePluginModel.updated_at))
-            )
-            plugins = result.scalars().all()
+    async with get_session_ctx() as session:
+        result = await session.execute(
+            select(MarketplacePluginModel)
+            .where(MarketplacePluginModel.developer_id == str(user.id))
+            .order_by(desc(MarketplacePluginModel.updated_at))
+        )
+        plugins = result.scalars().all()
 
-        items = []
-        for p in plugins:
-            items.append({
-                "slug": p.slug,
-                "name": p.name,
-                "description": p.description,
-                "latest_version": p.latest_version,
-                "total_downloads": p.total_downloads,
-                "category": p.category,
-                "icon": p.icon,
-                "is_active": p.is_active,
-                "updated_at": p.updated_at,
-            })
-        return {"code": 0, "message": "ok", "data": items}
-    except Exception as e:
-        logger.error(f"[Marketplace] 查询开发者插件失败: {e}", exc_info=True)
-        return {"code": 1, "message": str(e), "data": None}
+    items = []
+    for p in plugins:
+        items.append({
+            "slug": p.slug,
+            "name": p.name,
+            "description": p.description,
+            "latest_version": p.latest_version,
+            "total_downloads": p.total_downloads,
+            "category": p.category,
+            "icon": p.icon,
+            "is_active": p.is_active,
+            "updated_at": p.updated_at,
+        })
+    return {"code": 0, "message": "ok", "data": items}
 
 
 # ==================== 插件上传 ====================
@@ -455,100 +441,95 @@ async def upload_plugin(
     流程：验证 JWT → 检查 developer_api_key → 保存 zip → 读取 manifest → 存 DB。
     slug 已存在则创建新版本（需为同一开发者），否则创建新插件。
     """
+    await _ensure_developer(user)
+
+    zip_bytes = await file.read()
+    if len(zip_bytes) == 0:
+        return {"code": 1, "message": "上传文件为空", "data": None}
+    if len(zip_bytes) > _MAX_UPLOAD_SIZE:
+        return {"code": 1, "message": f"文件过大，最大支持 {_MAX_UPLOAD_SIZE // 1024 // 1024}MB", "data": None}
+
     try:
-        await _ensure_developer(user)
-
-        zip_bytes = await file.read()
-        if len(zip_bytes) == 0:
-            return {"code": 1, "message": "上传文件为空", "data": None}
-        if len(zip_bytes) > _MAX_UPLOAD_SIZE:
-            return {"code": 1, "message": f"文件过大，最大支持 {_MAX_UPLOAD_SIZE // 1024 // 1024}MB", "data": None}
-
-        try:
-            manifest, _names = _read_manifest_from_zip(zip_bytes)
-            slug, name, version, description, category, tags, changelog, signature, provides, icon = _validate_manifest(manifest)
-        except ValueError as e:
-            return {"code": 1, "message": str(e), "data": None}
-
-        rel_path = await save_package(zip_bytes, slug, version)
-        pkg_abs = MARKETPLACE_STORAGE_DIR / rel_path
-        checksum = await compute_checksum(pkg_abs)
-
-        # 提取并保存图标（manifest.icon 指定的文件）
-        icon_file = ""
-        if icon:
-            icon_bytes = _extract_icon_from_zip(zip_bytes, icon)
-            if icon_bytes:
-                icon_file = await save_icon(icon_bytes, slug, icon)
-
-        async with get_session_ctx() as session:
-            result = await session.execute(
-                select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug).with_for_update()
-            )
-            plugin = result.scalar_one_or_none()
-
-            if plugin is None:
-                plugin = MarketplacePluginModel(
-                    slug=slug,
-                    name=name,
-                    description=description,
-                    developer_id=str(user.id),
-                    category=category,
-                    icon=icon_file,
-                    provides=json.dumps(provides, ensure_ascii=False),
-                    tags=json.dumps(tags, ensure_ascii=False),
-                    latest_version=version,
-                )
-                session.add(plugin)
-                await session.flush()
-                plugin_id = plugin.id
-                created_new = True
-            else:
-                if plugin.developer_id != str(user.id):
-                    return {"code": 1, "message": "无权修改他人插件", "data": None}
-                ver_exists = await session.execute(
-                    select(PluginVersionModel.id).where(
-                        PluginVersionModel.plugin_id == plugin.id,
-                        PluginVersionModel.version == version,
-                    )
-                )
-                if ver_exists.first() is not None:
-                    return {"code": 1, "message": f"版本 {version} 已存在，请升级版本号后再上传", "data": None}
-                plugin.name = name
-                plugin.description = description
-                plugin.category = category
-                # 新包带图标则更新；manifest 无 icon 视为移除；提取失败保留旧图标
-                plugin.icon = (icon_file or plugin.icon) if icon else ""
-                plugin.provides = json.dumps(provides, ensure_ascii=False)
-                plugin.tags = json.dumps(tags, ensure_ascii=False)
-                plugin.latest_version = version
-                plugin_id = plugin.id
-                created_new = False
-
-            version_record = PluginVersionModel(
-                plugin_id=plugin_id,
-                version=version,
-                changelog=changelog,
-                file_path=rel_path,
-                file_size=len(zip_bytes),
-                checksum=checksum,
-                signature=signature,
-            )
-            session.add(version_record)
-            await session.flush()
-            version_id = version_record.id
-
-        logger.info(f"[Marketplace] 插件上传: slug={slug} ver={version} user={user.id} new={created_new}")
-        return {
-            "code": 0, "message": "ok",
-            "data": {"plugin_id": plugin_id, "version_id": version_id, "slug": slug, "name": name,
-                     "version": version, "is_new_plugin": created_new, "checksum": checksum},
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[Marketplace] 插件上传失败: {e}", exc_info=True)
+        manifest, _names = _read_manifest_from_zip(zip_bytes)
+        slug, name, version, description, category, tags, changelog, signature, provides, icon = _validate_manifest(manifest)
+    except ValueError as e:
+        # manifest/zip 内容非法，属业务错误
         return {"code": 1, "message": str(e), "data": None}
+
+    rel_path = await save_package(zip_bytes, slug, version)
+    pkg_abs = MARKETPLACE_STORAGE_DIR / rel_path
+    checksum = await compute_checksum(pkg_abs)
+
+    # 提取并保存图标（manifest.icon 指定的文件）
+    icon_file = ""
+    if icon:
+        icon_bytes = _extract_icon_from_zip(zip_bytes, icon)
+        if icon_bytes:
+            icon_file = await save_icon(icon_bytes, slug, icon)
+
+    async with get_session_ctx() as session:
+        result = await session.execute(
+            select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug).with_for_update()
+        )
+        plugin = result.scalar_one_or_none()
+
+        if plugin is None:
+            plugin = MarketplacePluginModel(
+                slug=slug,
+                name=name,
+                description=description,
+                developer_id=str(user.id),
+                category=category,
+                icon=icon_file,
+                provides=json.dumps(provides, ensure_ascii=False),
+                tags=json.dumps(tags, ensure_ascii=False),
+                latest_version=version,
+            )
+            session.add(plugin)
+            await session.flush()
+            plugin_id = plugin.id
+            created_new = True
+        else:
+            if plugin.developer_id != str(user.id):
+                return {"code": 1, "message": "无权修改他人插件", "data": None}
+            ver_exists = await session.execute(
+                select(PluginVersionModel.id).where(
+                    PluginVersionModel.plugin_id == plugin.id,
+                    PluginVersionModel.version == version,
+                )
+            )
+            if ver_exists.first() is not None:
+                return {"code": 1, "message": f"版本 {version} 已存在，请升级版本号后再上传", "data": None}
+            plugin.name = name
+            plugin.description = description
+            plugin.category = category
+            # 新包带图标则更新；manifest 无 icon 视为移除；提取失败保留旧图标
+            plugin.icon = (icon_file or plugin.icon) if icon else ""
+            plugin.provides = json.dumps(provides, ensure_ascii=False)
+            plugin.tags = json.dumps(tags, ensure_ascii=False)
+            plugin.latest_version = version
+            plugin_id = plugin.id
+            created_new = False
+
+        version_record = PluginVersionModel(
+            plugin_id=plugin_id,
+            version=version,
+            changelog=changelog,
+            file_path=rel_path,
+            file_size=len(zip_bytes),
+            checksum=checksum,
+            signature=signature,
+        )
+        session.add(version_record)
+        await session.flush()
+        version_id = version_record.id
+
+    logger.info(f"[Marketplace] 插件上传: slug={slug} ver={version} user={user.id} new={created_new}")
+    return {
+        "code": 0, "message": "ok",
+        "data": {"plugin_id": plugin_id, "version_id": version_id, "slug": slug, "name": name,
+                 "version": version, "is_new_plugin": created_new, "checksum": checksum},
+    }
 
 
 @router.delete("/api/v1/marketplace/plugins/{slug}")
@@ -560,50 +541,44 @@ async def delete_plugin(
 
     仅限插件上传者本人删除。已安装该插件的用户不受影响（本地副本独立）。
     """
-    try:
-        await _ensure_developer(user)
+    await _ensure_developer(user)
 
-        async with get_session_ctx() as session:
-            result = await session.execute(
-                select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
-            )
-            plugin = result.scalar_one_or_none()
-            if plugin is None:
-                return {"code": 1, "message": f"插件 {slug} 不存在", "data": None}
-            if plugin.developer_id != str(user.id):
-                return {"code": 1, "message": "无权删除他人插件", "data": None}
+    async with get_session_ctx() as session:
+        result = await session.execute(
+            select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
+        )
+        plugin = result.scalar_one_or_none()
+        if plugin is None:
+            return {"code": 1, "message": f"插件 {slug} 不存在", "data": None}
+        if plugin.developer_id != str(user.id):
+            return {"code": 1, "message": "无权删除他人插件", "data": None}
 
-            # 删除所有版本记录 + 评论
-            versions = (await session.execute(
-                select(PluginVersionModel).where(PluginVersionModel.plugin_id == plugin.id)
-            )).scalars().all()
+        # 删除所有版本记录 + 评论
+        versions = (await session.execute(
+            select(PluginVersionModel).where(PluginVersionModel.plugin_id == plugin.id)
+        )).scalars().all()
 
-            # 删除 zip 文件
-            import shutil
-            for ver in versions:
-                pkg_path = MARKETPLACE_STORAGE_DIR / ver.file_path
-                if pkg_path.exists():
-                    pkg_path.unlink(missing_ok=True)
-            # 删除插件 slug 目录
-            slug_dir = MARKETPLACE_STORAGE_DIR / slug
-            if slug_dir.exists():
-                shutil.rmtree(slug_dir, ignore_errors=True)
+        # 删除 zip 文件
+        import shutil
+        for ver in versions:
+            pkg_path = MARKETPLACE_STORAGE_DIR / ver.file_path
+            if pkg_path.exists():
+                pkg_path.unlink(missing_ok=True)
+        # 删除插件 slug 目录
+        slug_dir = MARKETPLACE_STORAGE_DIR / slug
+        if slug_dir.exists():
+            shutil.rmtree(slug_dir, ignore_errors=True)
 
-            # 删除数据库记录
-            await session.execute(
-                PluginReviewModel.__table__.delete().where(PluginReviewModel.plugin_id == plugin.id)
-            )
-            for ver in versions:
-                await session.delete(ver)
-            await session.delete(plugin)
+        # 删除数据库记录
+        await session.execute(
+            PluginReviewModel.__table__.delete().where(PluginReviewModel.plugin_id == plugin.id)
+        )
+        for ver in versions:
+            await session.delete(ver)
+        await session.delete(plugin)
 
-        logger.info(f"[Marketplace] 插件删除: slug={slug} user={user.id}")
-        return {"code": 0, "message": "ok", "data": {"slug": slug}}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[Marketplace] 插件删除失败: {e}", exc_info=True)
-        return {"code": 1, "message": str(e), "data": None}
+    logger.info(f"[Marketplace] 插件删除: slug={slug} user={user.id}")
+    return {"code": 0, "message": "ok", "data": {"slug": slug}}
 
 
 # ==================== 插件源码在线编辑 ====================
@@ -611,58 +586,52 @@ async def delete_plugin(
 @router.get("/api/v1/marketplace/plugins/{slug}/source")
 async def get_plugin_source(slug: str, user: UserModel = Depends(get_current_user)):
     """获取插件的源码（从最新版本的 zip 中提取 manifest.json 和 plugin.py）。"""
+    await _ensure_developer(user)
+
+    async with get_session_ctx() as session:
+        plugin = (await session.execute(
+            select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
+        )).scalar_one_or_none()
+        if plugin is None:
+            return {"code": 1, "message": f"插件不存在: {slug}", "data": None}
+        if plugin.developer_id != str(user.id):
+            return {"code": 1, "message": "无权查看他人插件源码", "data": None}
+
+        ver = (await session.execute(
+            select(PluginVersionModel)
+            .where(PluginVersionModel.plugin_id == plugin.id)
+            .order_by(desc(PluginVersionModel.created_at))
+            .limit(1)
+        )).scalar_one_or_none()
+        if ver is None:
+            return {"code": 1, "message": "插件没有可用版本", "data": None}
+        file_path = ver.file_path
+        ver_version = ver.version
+        plugin_name = plugin.name
+
+    zip_path = MARKETPLACE_STORAGE_DIR / file_path
+    if not zip_path.is_file():
+        return {"code": 1, "message": "插件包文件不存在", "data": None}
+
+    zip_bytes = zip_path.read_bytes()
     try:
-        await _ensure_developer(user)
-
-        async with get_session_ctx() as session:
-            plugin = (await session.execute(
-                select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
-            )).scalar_one_or_none()
-            if plugin is None:
-                return {"code": 1, "message": f"插件不存在: {slug}", "data": None}
-            if plugin.developer_id != str(user.id):
-                return {"code": 1, "message": "无权查看他人插件源码", "data": None}
-
-            ver = (await session.execute(
-                select(PluginVersionModel)
-                .where(PluginVersionModel.plugin_id == plugin.id)
-                .order_by(desc(PluginVersionModel.created_at))
-                .limit(1)
-            )).scalar_one_or_none()
-            if ver is None:
-                return {"code": 1, "message": "插件没有可用版本", "data": None}
-            file_path = ver.file_path
-            ver_version = ver.version
-            plugin_name = plugin.name
-
-        zip_path = MARKETPLACE_STORAGE_DIR / file_path
-        if not zip_path.is_file():
-            return {"code": 1, "message": "插件包文件不存在", "data": None}
-
-        zip_bytes = zip_path.read_bytes()
-        try:
-            source = _read_source_from_zip(zip_bytes)
-        except ValueError as e:
-            return {"code": 1, "message": str(e), "data": None}
-
-        return {
-            "code": 0,
-            "message": "ok",
-            "data": {
-                "slug": slug,
-                "name": plugin_name,
-                "version": ver_version,
-                "manifest_raw": source["manifest_raw"],
-                "manifest": source["manifest"],
-                "plugin_code": source["plugin_code"],
-                "files": source["files"],
-            },
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[Marketplace] 获取插件源码失败: {e}", exc_info=True)
+        source = _read_source_from_zip(zip_bytes)
+    except ValueError as e:
         return {"code": 1, "message": str(e), "data": None}
+
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "slug": slug,
+            "name": plugin_name,
+            "version": ver_version,
+            "manifest_raw": source["manifest_raw"],
+            "manifest": source["manifest"],
+            "plugin_code": source["plugin_code"],
+            "files": source["files"],
+        },
+    }
 
 
 @router.put("/api/v1/marketplace/plugins/{slug}/source")
@@ -675,91 +644,85 @@ async def update_plugin_source(
 
     从 manifest dict 和 plugin_code 构建 zip → 保存为新版本。
     """
+    await _ensure_developer(user)
+
     try:
-        await _ensure_developer(user)
-
-        try:
-            m_slug, m_name, m_version, m_desc, m_cat, m_tags, m_changelog, m_sig, m_provides, m_icon = _validate_manifest(body.manifest)
-        except ValueError as e:
-            return {"code": 1, "message": str(e), "data": None}
-
-        if m_slug != slug:
-            return {"code": 1, "message": "manifest 中的 id 与插件 slug 不一致", "data": None}
-
-        async with get_session_ctx() as session:
-            plugin = (await session.execute(
-                select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug).with_for_update()
-            )).scalar_one_or_none()
-            if plugin is None:
-                return {"code": 1, "message": f"插件不存在: {slug}", "data": None}
-            if plugin.developer_id != str(user.id):
-                return {"code": 1, "message": "无权修改他人插件", "data": None}
-
-            ver_exists = await session.execute(
-                select(PluginVersionModel.id).where(
-                    PluginVersionModel.plugin_id == plugin.id,
-                    PluginVersionModel.version == m_version,
-                )
-            )
-            if ver_exists.first() is not None:
-                return {"code": 1, "message": f"版本 {m_version} 已存在，请升级版本号", "data": None}
-
-        zip_bytes = _create_zip_from_source(body.manifest, body.plugin_code, body.files)
-        if len(zip_bytes) > _MAX_UPLOAD_SIZE:
-            return {"code": 1, "message": f"文件过大，最大支持 {_MAX_UPLOAD_SIZE // 1024 // 1024}MB", "data": None}
-
-        rel_path = await save_package(zip_bytes, slug, m_version)
-        pkg_abs = MARKETPLACE_STORAGE_DIR / rel_path
-        checksum = await compute_checksum(pkg_abs)
-
-        # 提取并保存图标（manifest.icon 指定的文件）
-        icon_file = ""
-        if m_icon:
-            icon_bytes = _extract_icon_from_zip(zip_bytes, m_icon)
-            if icon_bytes:
-                icon_file = await save_icon(icon_bytes, slug, m_icon)
-
-        changelog = body.changelog or m_changelog
-
-        async with get_session_ctx() as session:
-            result = await session.execute(
-                select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
-            )
-            plugin = result.scalar_one_or_none()
-
-            plugin.name = m_name
-            plugin.description = m_desc
-            plugin.category = m_cat
-            # 新包带图标则更新；manifest 无 icon 视为移除；提取失败保留旧图标
-            plugin.icon = (icon_file or plugin.icon) if m_icon else ""
-            plugin.provides = json.dumps(m_provides, ensure_ascii=False)
-            plugin.tags = json.dumps(m_tags, ensure_ascii=False)
-            plugin.latest_version = m_version
-
-            version_record = PluginVersionModel(
-                plugin_id=plugin.id,
-                version=m_version,
-                changelog=changelog,
-                file_path=rel_path,
-                file_size=len(zip_bytes),
-                checksum=checksum,
-                signature=m_sig,
-            )
-            session.add(version_record)
-            await session.flush()
-            version_id = version_record.id
-
-        logger.info(f"[Marketplace] 插件源码更新: slug={slug} ver={m_version} user={user.id}")
-        return {
-            "code": 0,
-            "message": "ok",
-            "data": {"slug": slug, "version": m_version, "version_id": version_id},
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[Marketplace] 更新插件源码失败: {e}", exc_info=True)
+        m_slug, m_name, m_version, m_desc, m_cat, m_tags, m_changelog, m_sig, m_provides, m_icon = _validate_manifest(body.manifest)
+    except ValueError as e:
         return {"code": 1, "message": str(e), "data": None}
+
+    if m_slug != slug:
+        return {"code": 1, "message": "manifest 中的 id 与插件 slug 不一致", "data": None}
+
+    async with get_session_ctx() as session:
+        plugin = (await session.execute(
+            select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug).with_for_update()
+        )).scalar_one_or_none()
+        if plugin is None:
+            return {"code": 1, "message": f"插件不存在: {slug}", "data": None}
+        if plugin.developer_id != str(user.id):
+            return {"code": 1, "message": "无权修改他人插件", "data": None}
+
+        ver_exists = await session.execute(
+            select(PluginVersionModel.id).where(
+                PluginVersionModel.plugin_id == plugin.id,
+                PluginVersionModel.version == m_version,
+            )
+        )
+        if ver_exists.first() is not None:
+            return {"code": 1, "message": f"版本 {m_version} 已存在，请升级版本号", "data": None}
+
+    zip_bytes = _create_zip_from_source(body.manifest, body.plugin_code, body.files)
+    if len(zip_bytes) > _MAX_UPLOAD_SIZE:
+        return {"code": 1, "message": f"文件过大，最大支持 {_MAX_UPLOAD_SIZE // 1024 // 1024}MB", "data": None}
+
+    rel_path = await save_package(zip_bytes, slug, m_version)
+    pkg_abs = MARKETPLACE_STORAGE_DIR / rel_path
+    checksum = await compute_checksum(pkg_abs)
+
+    # 提取并保存图标（manifest.icon 指定的文件）
+    icon_file = ""
+    if m_icon:
+        icon_bytes = _extract_icon_from_zip(zip_bytes, m_icon)
+        if icon_bytes:
+            icon_file = await save_icon(icon_bytes, slug, m_icon)
+
+    changelog = body.changelog or m_changelog
+
+    async with get_session_ctx() as session:
+        result = await session.execute(
+            select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
+        )
+        plugin = result.scalar_one_or_none()
+
+        plugin.name = m_name
+        plugin.description = m_desc
+        plugin.category = m_cat
+        # 新包带图标则更新；manifest 无 icon 视为移除；提取失败保留旧图标
+        plugin.icon = (icon_file or plugin.icon) if m_icon else ""
+        plugin.provides = json.dumps(m_provides, ensure_ascii=False)
+        plugin.tags = json.dumps(m_tags, ensure_ascii=False)
+        plugin.latest_version = m_version
+
+        version_record = PluginVersionModel(
+            plugin_id=plugin.id,
+            version=m_version,
+            changelog=changelog,
+            file_path=rel_path,
+            file_size=len(zip_bytes),
+            checksum=checksum,
+            signature=m_sig,
+        )
+        session.add(version_record)
+        await session.flush()
+        version_id = version_record.id
+
+    logger.info(f"[Marketplace] 插件源码更新: slug={slug} ver={m_version} user={user.id}")
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {"slug": slug, "version": m_version, "version_id": version_id},
+    }
 
 
 @router.post("/api/v1/marketplace/plugins/create")
@@ -771,115 +734,109 @@ async def create_plugin_from_code(
 
     从 slug/name/plugin_code 构建 manifest.json + plugin.py 的 zip → 上架到市场。
     """
-    try:
-        await _ensure_developer(user)
+    await _ensure_developer(user)
 
-        slug = body.slug.lower()
-        if not _SLUG_RE.match(slug):
-            return {"code": 1, "message": f"slug 非法（仅允许小写字母/数字/_/-）: {body.slug}", "data": None}
+    slug = body.slug.lower()
+    if not _SLUG_RE.match(slug):
+        return {"code": 1, "message": f"slug 非法（仅允许小写字母/数字/_/-）: {body.slug}", "data": None}
 
-        if not _SEMVER_RE.match(body.version):
-            return {"code": 1, "message": f"version 必须符合语义化版本（x.y.z）: {body.version}", "data": None}
+    if not _SEMVER_RE.match(body.version):
+        return {"code": 1, "message": f"version 必须符合语义化版本（x.y.z）: {body.version}", "data": None}
 
-        if not body.name.strip():
-            return {"code": 1, "message": "插件名称不能为空", "data": None}
+    if not body.name.strip():
+        return {"code": 1, "message": "插件名称不能为空", "data": None}
 
-        async with get_session_ctx() as session:
-            existing = await session.execute(
-                select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
-            )
-            if existing.scalar_one_or_none() is not None:
-                return {"code": 1, "message": f"插件 slug '{slug}' 已存在", "data": None}
+    async with get_session_ctx() as session:
+        existing = await session.execute(
+            select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
+        )
+        if existing.scalar_one_or_none() is not None:
+            return {"code": 1, "message": f"插件 slug '{slug}' 已存在", "data": None}
 
-        # 从 files 中的 manifest.json 提取 provides/icon（用于商店分类和图标，并写入 zip 的 manifest）
-        provides = []
-        icon = ""
-        for f in body.files or []:
-            if isinstance(f, dict) and str(f.get("name", "")).endswith("manifest.json"):
-                try:
-                    m = json.loads(f.get("content", "{}"))
-                    provides = _extract_provides(m)
-                    icon = str(m.get("icon", "") or "").strip()
-                except Exception:
-                    provides = []
-                break
+    # 从 files 中的 manifest.json 提取 provides/icon（用于商店分类和图标，并写入 zip 的 manifest）
+    provides = []
+    icon = ""
+    for f in body.files or []:
+        if isinstance(f, dict) and str(f.get("name", "")).endswith("manifest.json"):
+            try:
+                m = json.loads(f.get("content", "{}"))
+                provides = _extract_provides(m)
+                icon = str(m.get("icon", "") or "").strip()
+            except Exception:
+                provides = []
+            break
 
-        manifest = {
-            "id": slug,
+    manifest = {
+        "id": slug,
+        "name": body.name,
+        "version": body.version,
+        "description": body.description,
+        "category": body.category,
+        "tags": body.tags,
+        "changelog": body.changelog,
+        "api_version": "1.0",
+    }
+    if provides:
+        manifest["provides"] = {k: [] for k in provides}
+    if icon:
+        manifest["icon"] = icon
+
+    zip_bytes = _create_zip_from_source(manifest, body.plugin_code, body.files)
+    if len(zip_bytes) > _MAX_UPLOAD_SIZE:
+        return {"code": 1, "message": f"文件过大，最大支持 {_MAX_UPLOAD_SIZE // 1024 // 1024}MB", "data": None}
+
+    rel_path = await save_package(zip_bytes, slug, body.version)
+    pkg_abs = MARKETPLACE_STORAGE_DIR / rel_path
+    checksum = await compute_checksum(pkg_abs)
+
+    # 提取并保存图标（manifest.icon 指定的文件）
+    icon_file = ""
+    if icon:
+        icon_bytes = _extract_icon_from_zip(zip_bytes, icon)
+        if icon_bytes:
+            icon_file = await save_icon(icon_bytes, slug, icon)
+
+    async with get_session_ctx() as session:
+        plugin = MarketplacePluginModel(
+            slug=slug,
+            name=body.name,
+            description=body.description,
+            developer_id=str(user.id),
+            category=body.category,
+            icon=icon_file,
+            provides=json.dumps(provides, ensure_ascii=False),
+            tags=json.dumps(body.tags, ensure_ascii=False),
+            latest_version=body.version,
+        )
+        session.add(plugin)
+        await session.flush()
+        plugin_id = plugin.id
+
+        version_record = PluginVersionModel(
+            plugin_id=plugin_id,
+            version=body.version,
+            changelog=body.changelog,
+            file_path=rel_path,
+            file_size=len(zip_bytes),
+            checksum=checksum,
+            signature="",
+        )
+        session.add(version_record)
+        await session.flush()
+        version_id = version_record.id
+
+    logger.info(f"[Marketplace] 插件在线创建: slug={slug} ver={body.version} user={user.id}")
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "plugin_id": plugin_id,
+            "version_id": version_id,
+            "slug": slug,
             "name": body.name,
             "version": body.version,
-            "description": body.description,
-            "category": body.category,
-            "tags": body.tags,
-            "changelog": body.changelog,
-            "api_version": "1.0",
-        }
-        if provides:
-            manifest["provides"] = {k: [] for k in provides}
-        if icon:
-            manifest["icon"] = icon
-
-        zip_bytes = _create_zip_from_source(manifest, body.plugin_code, body.files)
-        if len(zip_bytes) > _MAX_UPLOAD_SIZE:
-            return {"code": 1, "message": f"文件过大，最大支持 {_MAX_UPLOAD_SIZE // 1024 // 1024}MB", "data": None}
-
-        rel_path = await save_package(zip_bytes, slug, body.version)
-        pkg_abs = MARKETPLACE_STORAGE_DIR / rel_path
-        checksum = await compute_checksum(pkg_abs)
-
-        # 提取并保存图标（manifest.icon 指定的文件）
-        icon_file = ""
-        if icon:
-            icon_bytes = _extract_icon_from_zip(zip_bytes, icon)
-            if icon_bytes:
-                icon_file = await save_icon(icon_bytes, slug, icon)
-
-        async with get_session_ctx() as session:
-            plugin = MarketplacePluginModel(
-                slug=slug,
-                name=body.name,
-                description=body.description,
-                developer_id=str(user.id),
-                category=body.category,
-                icon=icon_file,
-                provides=json.dumps(provides, ensure_ascii=False),
-                tags=json.dumps(body.tags, ensure_ascii=False),
-                latest_version=body.version,
-            )
-            session.add(plugin)
-            await session.flush()
-            plugin_id = plugin.id
-
-            version_record = PluginVersionModel(
-                plugin_id=plugin_id,
-                version=body.version,
-                changelog=body.changelog,
-                file_path=rel_path,
-                file_size=len(zip_bytes),
-                checksum=checksum,
-                signature="",
-            )
-            session.add(version_record)
-            await session.flush()
-            version_id = version_record.id
-
-        logger.info(f"[Marketplace] 插件在线创建: slug={slug} ver={body.version} user={user.id}")
-        return {
-            "code": 0,
-            "message": "ok",
-            "data": {
-                "plugin_id": plugin_id,
-                "version_id": version_id,
-                "slug": slug,
-                "name": body.name,
-                "version": body.version,
-            },
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[Marketplace] 在线创建插件失败: {e}", exc_info=True)
-        return {"code": 1, "message": str(e), "data": None}
+        },
+    }
 
 
 # ==================== 插件查询 ====================
@@ -909,205 +866,181 @@ async def list_plugins(
     sort: str = Query("downloads"),
 ):
     """插件列表（分页 + 搜索 + 分类 + 排序），join UserModel 获取开发者名。"""
-    try:
-        stmt = (
-            select(MarketplacePluginModel, UserModel)
-            .join(UserModel, MarketplacePluginModel.developer_id == UserModel.id)
-            .where(MarketplacePluginModel.is_active == True)  # noqa: E712
-        )
-        if search:
-            like = f"%{search}%"
-            stmt = stmt.where(or_(
-                MarketplacePluginModel.name.ilike(like),
-                MarketplacePluginModel.description.ilike(like),
-            ))
-        if category:
-            cat_cond = _category_filter(category)
-            if cat_cond is not None:
-                stmt = stmt.where(cat_cond)
+    stmt = (
+        select(MarketplacePluginModel, UserModel)
+        .join(UserModel, MarketplacePluginModel.developer_id == UserModel.id)
+        .where(MarketplacePluginModel.is_active == True)  # noqa: E712
+    )
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(or_(
+            MarketplacePluginModel.name.ilike(like),
+            MarketplacePluginModel.description.ilike(like),
+        ))
+    if category:
+        cat_cond = _category_filter(category)
+        if cat_cond is not None:
+            stmt = stmt.where(cat_cond)
 
-        sort = (sort or "downloads").lower()
-        if sort == "rating":
-            stmt = stmt.order_by(desc(MarketplacePluginModel.avg_rating))
-        elif sort == "newest":
-            stmt = stmt.order_by(desc(MarketplacePluginModel.created_at))
-        else:
-            stmt = stmt.order_by(desc(MarketplacePluginModel.total_downloads))
+    sort = (sort or "downloads").lower()
+    if sort == "rating":
+        stmt = stmt.order_by(desc(MarketplacePluginModel.avg_rating))
+    elif sort == "newest":
+        stmt = stmt.order_by(desc(MarketplacePluginModel.created_at))
+    else:
+        stmt = stmt.order_by(desc(MarketplacePluginModel.total_downloads))
 
-        count_stmt = (
-            select(func.count()).select_from(MarketplacePluginModel)
-            .where(MarketplacePluginModel.is_active == True)  # noqa: E712
-        )
-        if search:
-            like = f"%{search}%"
-            count_stmt = count_stmt.where(or_(
-                MarketplacePluginModel.name.ilike(like),
-                MarketplacePluginModel.description.ilike(like),
-            ))
-        if category:
-            cat_cond = _category_filter(category)
-            if cat_cond is not None:
-                count_stmt = count_stmt.where(cat_cond)
+    count_stmt = (
+        select(func.count()).select_from(MarketplacePluginModel)
+        .where(MarketplacePluginModel.is_active == True)  # noqa: E712
+    )
+    if search:
+        like = f"%{search}%"
+        count_stmt = count_stmt.where(or_(
+            MarketplacePluginModel.name.ilike(like),
+            MarketplacePluginModel.description.ilike(like),
+        ))
+    if category:
+        cat_cond = _category_filter(category)
+        if cat_cond is not None:
+            count_stmt = count_stmt.where(cat_cond)
 
-        async with get_session_ctx() as session:
-            total = (await session.execute(count_stmt)).scalar() or 0
-            stmt = stmt.offset((page - 1) * size).limit(size)
-            rows = (await session.execute(stmt)).all()
+    async with get_session_ctx() as session:
+        total = (await session.execute(count_stmt)).scalar() or 0
+        stmt = stmt.offset((page - 1) * size).limit(size)
+        rows = (await session.execute(stmt)).all()
 
-        items = [_plugin_list_item(p, _dev_name(u)) for (p, u) in rows]
-        return {"code": 0, "message": "ok", "data": {"items": items, "total": total, "page": page, "size": size}}
-    except Exception as e:
-        logger.error(f"[Marketplace] 插件列表查询失败: {e}", exc_info=True)
-        return {"code": 1, "message": str(e), "data": None}
+    items = [_plugin_list_item(p, _dev_name(u)) for (p, u) in rows]
+    return {"code": 0, "message": "ok", "data": {"items": items, "total": total, "page": page, "size": size}}
 
 
 @router.get("/api/v1/marketplace/plugins/{slug}")
 async def get_plugin_detail(slug: str):
     """插件详情 + 最新版本 + 开发者信息。"""
+    async with get_session_ctx() as session:
+        result = await session.execute(
+            select(MarketplacePluginModel, UserModel)
+            .join(UserModel, MarketplacePluginModel.developer_id == UserModel.id)
+            .where(MarketplacePluginModel.slug == slug)
+        )
+        row = result.first()
+        if row is None:
+            return {"code": 1, "message": f"插件不存在: {slug}", "data": None}
+        plugin, dev_user = row
+
+        ver_result = await session.execute(
+            select(PluginVersionModel)
+            .where(PluginVersionModel.plugin_id == plugin.id)
+            .order_by(desc(PluginVersionModel.created_at))
+            .limit(1)
+        )
+        latest_ver = ver_result.scalar_one_or_none()
+
     try:
-        async with get_session_ctx() as session:
-            result = await session.execute(
-                select(MarketplacePluginModel, UserModel)
-                .join(UserModel, MarketplacePluginModel.developer_id == UserModel.id)
-                .where(MarketplacePluginModel.slug == slug)
-            )
-            row = result.first()
-            if row is None:
-                return {"code": 1, "message": f"插件不存在: {slug}", "data": None}
-            plugin, dev_user = row
+        tags = json.loads(plugin.tags) if plugin.tags else []
+    except Exception:
+        tags = []
 
-            ver_result = await session.execute(
-                select(PluginVersionModel)
-                .where(PluginVersionModel.plugin_id == plugin.id)
-                .order_by(desc(PluginVersionModel.created_at))
-                .limit(1)
-            )
-            latest_ver = ver_result.scalar_one_or_none()
-
-        try:
-            tags = json.loads(plugin.tags) if plugin.tags else []
-        except Exception:
-            tags = []
-
-        data = {
-            "slug": plugin.slug,
-            "name": plugin.name,
-            "description": plugin.description,
-            "category": plugin.category,
-            "icon": plugin.icon,
-            "tags": tags,
-            "latest_version": plugin.latest_version,
-            "total_downloads": plugin.total_downloads,
-            "avg_rating": round(plugin.avg_rating, 2),
-            "review_count": plugin.review_count,
-            "is_featured": plugin.is_featured,
-            "is_active": plugin.is_active,
-            "created_at": plugin.created_at,
-            "updated_at": plugin.updated_at,
-            "developer": {
-                "id": dev_user.id,
-                "username": _dev_name(dev_user),
-                "bio": getattr(dev_user, "developer_bio", ""),
-            },
-            "latest_version_info": {
-                "version": latest_ver.version,
-                "changelog": latest_ver.changelog,
-                "file_size": latest_ver.file_size,
-                "checksum": latest_ver.checksum,
-                "signature": latest_ver.signature,
-                "download_count": latest_ver.download_count,
-                "created_at": latest_ver.created_at,
-            } if latest_ver else None,
-        }
-        return {"code": 0, "message": "ok", "data": data}
-    except Exception as e:
-        logger.error(f"[Marketplace] 插件详情查询失败: {e}", exc_info=True)
-        return {"code": 1, "message": str(e), "data": None}
+    data = {
+        "slug": plugin.slug,
+        "name": plugin.name,
+        "description": plugin.description,
+        "category": plugin.category,
+        "icon": plugin.icon,
+        "tags": tags,
+        "latest_version": plugin.latest_version,
+        "total_downloads": plugin.total_downloads,
+        "avg_rating": round(plugin.avg_rating, 2),
+        "review_count": plugin.review_count,
+        "is_featured": plugin.is_featured,
+        "is_active": plugin.is_active,
+        "created_at": plugin.created_at,
+        "updated_at": plugin.updated_at,
+        "developer": {
+            "id": dev_user.id,
+            "username": _dev_name(dev_user),
+            "bio": getattr(dev_user, "developer_bio", ""),
+        },
+        "latest_version_info": {
+            "version": latest_ver.version,
+            "changelog": latest_ver.changelog,
+            "file_size": latest_ver.file_size,
+            "checksum": latest_ver.checksum,
+            "signature": latest_ver.signature,
+            "download_count": latest_ver.download_count,
+            "created_at": latest_ver.created_at,
+        } if latest_ver else None,
+    }
+    return {"code": 0, "message": "ok", "data": data}
 
 
 @router.get("/api/v1/marketplace/plugins/{slug}/versions")
 async def list_plugin_versions(slug: str):
     """插件版本历史列表。"""
-    try:
-        async with get_session_ctx() as session:
-            plugin = (await session.execute(
-                select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
-            )).scalar_one_or_none()
-            if plugin is None:
-                return {"code": 1, "message": f"插件不存在: {slug}", "data": None}
-            versions = (await session.execute(
-                select(PluginVersionModel).where(PluginVersionModel.plugin_id == plugin.id)
-                .order_by(desc(PluginVersionModel.created_at))
-            )).scalars().all()
+    async with get_session_ctx() as session:
+        plugin = (await session.execute(
+            select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
+        )).scalar_one_or_none()
+        if plugin is None:
+            return {"code": 1, "message": f"插件不存在: {slug}", "data": None}
+        versions = (await session.execute(
+            select(PluginVersionModel).where(PluginVersionModel.plugin_id == plugin.id)
+            .order_by(desc(PluginVersionModel.created_at))
+        )).scalars().all()
 
-        data = [{"id": v.id, "version": v.version, "changelog": v.changelog, "file_size": v.file_size,
-                 "checksum": v.checksum, "signature": v.signature, "download_count": v.download_count,
-                 "created_at": v.created_at} for v in versions]
-        return {"code": 0, "message": "ok", "data": data}
-    except Exception as e:
-        logger.error(f"[Marketplace] 版本列表查询失败: {e}", exc_info=True)
-        return {"code": 1, "message": str(e), "data": None}
+    data = [{"id": v.id, "version": v.version, "changelog": v.changelog, "file_size": v.file_size,
+             "checksum": v.checksum, "signature": v.signature, "download_count": v.download_count,
+             "created_at": v.created_at} for v in versions]
+    return {"code": 0, "message": "ok", "data": data}
 
 
 @router.get("/api/v1/marketplace/plugins/{slug}/download")
 async def download_plugin(slug: str, version: str = Query("latest")):
     """下载插件 zip 包，增加下载计数。"""
-    try:
-        async with get_session_ctx() as session:
-            plugin = (await session.execute(
-                select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
-            )).scalar_one_or_none()
-            if plugin is None:
-                return {"code": 1, "message": f"插件不存在: {slug}", "data": None}
-            target_version = plugin.latest_version if version == "latest" else version
-            ver = (await session.execute(
-                select(PluginVersionModel).where(
-                    PluginVersionModel.plugin_id == plugin.id,
-                    PluginVersionModel.version == target_version,
-                )
-            )).scalar_one_or_none()
-            if ver is None:
-                return {"code": 1, "message": f"版本不存在: {target_version}", "data": None}
-            file_path = ver.file_path
-            plugin.total_downloads = (plugin.total_downloads or 0) + 1
-            ver.download_count = (ver.download_count or 0) + 1
-            await session.flush()
+    async with get_session_ctx() as session:
+        plugin = (await session.execute(
+            select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
+        )).scalar_one_or_none()
+        if plugin is None:
+            return {"code": 1, "message": f"插件不存在: {slug}", "data": None}
+        target_version = plugin.latest_version if version == "latest" else version
+        ver = (await session.execute(
+            select(PluginVersionModel).where(
+                PluginVersionModel.plugin_id == plugin.id,
+                PluginVersionModel.version == target_version,
+            )
+        )).scalar_one_or_none()
+        if ver is None:
+            return {"code": 1, "message": f"版本不存在: {target_version}", "data": None}
+        file_path = ver.file_path
+        plugin.total_downloads = (plugin.total_downloads or 0) + 1
+        ver.download_count = (ver.download_count or 0) + 1
+        await session.flush()
 
-        abs_path = MARKETPLACE_STORAGE_DIR / file_path
-        if not abs_path.is_file():
-            logger.error(f"[Marketplace] 插件包文件丢失: {abs_path}")
-            return {"code": 1, "message": "插件包文件不存在", "data": None}
-        return FileResponse(path=str(abs_path), media_type="application/zip",
-                            filename=f"{slug}-{target_version}.zip")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[Marketplace] 插件下载失败: {e}", exc_info=True)
-        return {"code": 1, "message": str(e), "data": None}
+    abs_path = MARKETPLACE_STORAGE_DIR / file_path
+    if not abs_path.is_file():
+        logger.error(f"[Marketplace] 插件包文件丢失: {abs_path}")
+        return {"code": 1, "message": "插件包文件不存在", "data": None}
+    return FileResponse(path=str(abs_path), media_type="application/zip",
+                        filename=f"{slug}-{target_version}.zip")
 
 
 @router.get("/api/v1/marketplace/plugins/{slug}/icon")
 async def get_plugin_icon(slug: str):
     """返回插件图标文件（未上传图标时返回 404）。"""
-    try:
-        async with get_session_ctx() as session:
-            plugin = (await session.execute(
-                select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
-            )).scalar_one_or_none()
-            if plugin is None or not plugin.icon:
-                raise HTTPException(status_code=404, detail="插件未上传图标")
-            icon_name = plugin.icon
+    async with get_session_ctx() as session:
+        plugin = (await session.execute(
+            select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
+        )).scalar_one_or_none()
+        if plugin is None or not plugin.icon:
+            raise HTTPException(status_code=404, detail="插件未上传图标")
+        icon_name = plugin.icon
 
-        icon_path = MARKETPLACE_STORAGE_DIR / slug / icon_name
-        if not icon_path.is_file():
-            raise HTTPException(status_code=404, detail="图标文件不存在")
-        media_type = mimetypes.guess_type(icon_name)[0] or "image/png"
-        return FileResponse(path=str(icon_path), media_type=media_type)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[Marketplace] 插件图标读取失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    icon_path = MARKETPLACE_STORAGE_DIR / slug / icon_name
+    if not icon_path.is_file():
+        raise HTTPException(status_code=404, detail="图标文件不存在")
+    media_type = mimetypes.guess_type(icon_name)[0] or "image/png"
+    return FileResponse(path=str(icon_path), media_type=media_type)
 
 
 # ==================== 评论 ====================
@@ -1115,24 +1048,20 @@ async def get_plugin_icon(slug: str):
 @router.get("/api/v1/marketplace/plugins/{slug}/reviews")
 async def list_plugin_reviews(slug: str):
     """插件评论列表。"""
-    try:
-        async with get_session_ctx() as session:
-            plugin = (await session.execute(
-                select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
-            )).scalar_one_or_none()
-            if plugin is None:
-                return {"code": 1, "message": f"插件不存在: {slug}", "data": None}
-            reviews = (await session.execute(
-                select(PluginReviewModel).where(PluginReviewModel.plugin_id == plugin.id)
-                .order_by(desc(PluginReviewModel.created_at))
-            )).scalars().all()
+    async with get_session_ctx() as session:
+        plugin = (await session.execute(
+            select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
+        )).scalar_one_or_none()
+        if plugin is None:
+            return {"code": 1, "message": f"插件不存在: {slug}", "data": None}
+        reviews = (await session.execute(
+            select(PluginReviewModel).where(PluginReviewModel.plugin_id == plugin.id)
+            .order_by(desc(PluginReviewModel.created_at))
+        )).scalars().all()
 
-        data = [{"id": r.id, "user_id": r.user_id, "username": r.username,
-                 "rating": r.rating, "comment": r.comment, "created_at": r.created_at} for r in reviews]
-        return {"code": 0, "message": "ok", "data": data}
-    except Exception as e:
-        logger.error(f"[Marketplace] 评论列表查询失败: {e}", exc_info=True)
-        return {"code": 1, "message": str(e), "data": None}
+    data = [{"id": r.id, "user_id": r.user_id, "username": r.username,
+             "rating": r.rating, "comment": r.comment, "created_at": r.created_at} for r in reviews]
+    return {"code": 0, "message": "ok", "data": data}
 
 
 @router.post("/api/v1/marketplace/plugins/{slug}/reviews")
@@ -1142,50 +1071,44 @@ async def create_plugin_review(
     user: UserModel = Depends(get_current_user),
 ):
     """提交评论（JWT 认证，一人一评），更新插件 avg_rating。"""
-    try:
-        async with get_session_ctx() as session:
-            plugin = (await session.execute(
-                select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug).with_for_update()
-            )).scalar_one_or_none()
-            if plugin is None:
-                return {"code": 1, "message": f"插件不存在: {slug}", "data": None}
+    async with get_session_ctx() as session:
+        plugin = (await session.execute(
+            select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug).with_for_update()
+        )).scalar_one_or_none()
+        if plugin is None:
+            return {"code": 1, "message": f"插件不存在: {slug}", "data": None}
 
-            exists = await session.execute(
-                select(PluginReviewModel.id).where(
-                    PluginReviewModel.plugin_id == plugin.id,
-                    PluginReviewModel.user_id == str(user.id),
-                )
+        exists = await session.execute(
+            select(PluginReviewModel.id).where(
+                PluginReviewModel.plugin_id == plugin.id,
+                PluginReviewModel.user_id == str(user.id),
             )
-            if exists.first() is not None:
-                return {"code": 1, "message": "您已评论过该插件", "data": None}
+        )
+        if exists.first() is not None:
+            return {"code": 1, "message": "您已评论过该插件", "data": None}
 
-            uname = _dev_name(user)
-            review = PluginReviewModel(
-                plugin_id=plugin.id, user_id=str(user.id), username=uname,
-                rating=body.rating, comment=body.comment,
-            )
-            session.add(review)
+        uname = _dev_name(user)
+        review = PluginReviewModel(
+            plugin_id=plugin.id, user_id=str(user.id), username=uname,
+            rating=body.rating, comment=body.comment,
+        )
+        session.add(review)
 
-            agg = (await session.execute(
-                select(func.count(PluginReviewModel.id), func.avg(PluginReviewModel.rating))
-                .where(PluginReviewModel.plugin_id == plugin.id)
-            )).one()
-            count, avg = agg
-            new_count = (count or 0) + 1
-            new_avg = float(body.rating) if avg is None else (float(avg) * (count or 0) + float(body.rating)) / new_count
-            plugin.review_count = new_count
-            plugin.avg_rating = round(new_avg, 4)
-            await session.flush()
-            review_id = review.id
+        agg = (await session.execute(
+            select(func.count(PluginReviewModel.id), func.avg(PluginReviewModel.rating))
+            .where(PluginReviewModel.plugin_id == plugin.id)
+        )).one()
+        count, avg = agg
+        new_count = (count or 0) + 1
+        new_avg = float(body.rating) if avg is None else (float(avg) * (count or 0) + float(body.rating)) / new_count
+        plugin.review_count = new_count
+        plugin.avg_rating = round(new_avg, 4)
+        await session.flush()
+        review_id = review.id
 
-        logger.info(f"[Marketplace] 评论: slug={slug} user={user.id} rating={body.rating}")
-        return {"code": 0, "message": "ok", "data": {"review_id": review_id, "rating": body.rating,
-                "avg_rating": round(new_avg, 2), "review_count": new_count}}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[Marketplace] 提交评论失败: {e}", exc_info=True)
-        return {"code": 1, "message": str(e), "data": None}
+    logger.info(f"[Marketplace] 评论: slug={slug} user={user.id} rating={body.rating}")
+    return {"code": 0, "message": "ok", "data": {"review_id": review_id, "rating": body.rating,
+            "avg_rating": round(new_avg, 2), "review_count": new_count}}
 
 
 # ==================== 分类聚合 ====================
@@ -1220,29 +1143,25 @@ def _count_optional_by_category(optional_plugins: list, category: str) -> int:
 @router.get("/api/v1/marketplace/categories")
 async def list_categories():
     """返回商店固定分类（ASR/LLM/TTS/其他工具）及插件数量（含内置可选插件）。"""
-    try:
-        async with get_session_ctx() as session:
-            base = select(func.count(MarketplacePluginModel.id)).where(
-                MarketplacePluginModel.is_active == True  # noqa: E712
-            )
-            data = []
-            for cat in STORE_CATEGORIES:
-                cond = _category_filter(cat["name"])
-                cnt = 0
-                if cond is not None:
-                    cnt = (await session.execute(base.where(cond))).scalar() or 0
-                data.append({"name": cat["name"], "count": cnt})
+    async with get_session_ctx() as session:
+        base = select(func.count(MarketplacePluginModel.id)).where(
+            MarketplacePluginModel.is_active == True  # noqa: E712
+        )
+        data = []
+        for cat in STORE_CATEGORIES:
+            cond = _category_filter(cat["name"])
+            cnt = 0
+            if cond is not None:
+                cnt = (await session.execute(base.where(cond))).scalar() or 0
+            data.append({"name": cat["name"], "count": cnt})
 
-        # 合并内置可选插件统计（商店页面同时展示市场插件与可选插件）
-        from src.infrastructure.plugin_loader import get_optional_plugins_info
-        optional = get_optional_plugins_info()
-        for cat in data:
-            cat["count"] += _count_optional_by_category(optional, cat["name"])
+    # 合并内置可选插件统计（商店页面同时展示市场插件与可选插件）
+    from src.infrastructure.plugin_loader import get_optional_plugins_info
+    optional = get_optional_plugins_info()
+    for cat in data:
+        cat["count"] += _count_optional_by_category(optional, cat["name"])
 
-        return {"code": 0, "message": "ok", "data": data}
-    except Exception as e:
-        logger.error(f"[Marketplace] 分类查询失败: {e}", exc_info=True)
-        return {"code": 1, "message": str(e), "data": None}
+    return {"code": 0, "message": "ok", "data": data}
 
 
 __all__ = ["router"]

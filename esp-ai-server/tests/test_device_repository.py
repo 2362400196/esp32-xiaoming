@@ -1,16 +1,16 @@
-﻿"""DeviceRepository 鍗曞厓娴嬭瘯
+"""DeviceRepository 单元测试
 
-瑕嗙洊锛?
-- 鍩烘湰 CRUD锛坲psert / get / get_all / partial update锛?
+覆盖：
+- 基本 CRUD（upsert / get / get_all / partial update）
 - find_by_key / find_by_mac
 - add_skill / remove_skill
 - toggle_skill
-- MCP 閰嶇疆 CRUD锛坓et / set / delete锛?
-- 鍚屾鍔犺浇锛坙oad_all_devices_sync锛?
-- upsert 骞傜瓑鎬?
-- dict 缁撴瀯涓?users.json 鍏煎鎬?
+- MCP 配置 CRUD（get / set / delete）
+- 同步加载（load_all_devices_sync）
+- upsert 幂等性
+- dict 结构与 users.json 兼容性
 
-浣跨敤鍐呭瓨 SQLite锛坰qlite+aiosqlite:///:memory:锛夛紝鍙傝€?tests/test_db_infra.py 鐨勫す鍏锋ā寮忋€?
+使用内存 SQLite（sqlite+aiosqlite:///:memory:），参考 tests/test_db_infra.py 的夹具模式。
 """
 from __future__ import annotations
 
@@ -33,13 +33,13 @@ from src.infrastructure.db.repositories.device_repository import (
 
 
 # ============================================================
-# 娴嬭瘯鏁版嵁锛堜笌 users.json 涓殑璁惧閰嶇疆缁撴瀯涓€鑷达級
+# 测试数据（与 users.json 中设备配置结构一致）
 # ============================================================
 
 SAMPLE_DEVICE_ID = "D8:3B:DA:6D:D9:3C"
 
 SAMPLE_CONFIG: dict = {
-    "name": "瀹㈠巺鐨勮澶?,
+    "name": "客厅的设备",
     "key": "test-key-123",
     "mac": "D8:3B:DA:6D:D9:3C",
     "asr_provider": "volcengine",
@@ -55,7 +55,7 @@ SAMPLE_CONFIG: dict = {
         "api_key": "sk-test-key-1234567890",
         "base_url": "https://api.deepseek.com/v1",
         "model": "deepseek-v4-flash",
-        "system_prompt": "浣犵殑鍚嶅瓧鍙嚒鍑?,
+        "system_prompt": "你的名字叫小凡",
         "memory_enabled": True,
         "memory_max_messages": 20,
         "memory_long_term_enabled": True,
@@ -80,7 +80,7 @@ SAMPLE_CONFIG: dict = {
     "rate_limit_rpm": 60,
     "disabled_tools": [],
     "wakeup": {
-        "text": "鎴戝湪锛屼綘璇?,
+        "text": "我在，你在忙吗",
         "enabled": True,
         "cache_enabled": True,
         "play_enabled": True,
@@ -94,12 +94,12 @@ SAMPLE_CONFIG: dict = {
 
 
 # ============================================================
-# 寮傛澶瑰叿锛?memory: + StaticPool锛屽弬鑰?test_db_infra.py锛?
+# 异步夹具（:memory: + StaticPool，参考 test_db_infra.py）
 # ============================================================
 
 @pytest_asyncio.fixture
 async def async_engine():
-    """鍐呭瓨 SQLite 寮傛寮曟搸锛圫taticPool 纭繚 :memory: 鍗曡繛鎺ュ鐢級"""
+    """内存 SQLite 异步引擎（StaticPool 保证 :memory: 单连接复用）"""
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
         echo=False,
@@ -113,7 +113,7 @@ async def async_engine():
 
 @pytest_asyncio.fixture
 async def repo(async_engine, monkeypatch):
-    """DeviceRepository锛堝紓姝ワ紝瑕嗙洊鍏ㄥ眬 async session factory锛?""
+    """DeviceRepository（异步，覆盖全局 async session factory）"""
     async_factory = async_sessionmaker(
         bind=async_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False,
     )
@@ -124,14 +124,14 @@ async def repo(async_engine, monkeypatch):
 
 
 # ============================================================
-# 鍚屾澶瑰叿锛堢嫭绔?:memory: DB锛岃嚜鍖呭惈鍐欏叆 + 璇诲彇锛?
+# 同步夹具（独立 :memory: DB，自包含写入 + 读取）
 # ============================================================
 
 @pytest.fixture
 def sync_repo(monkeypatch):
-    """DeviceRepository锛堝悓姝ワ紝瑕嗙洊鍏ㄥ眬 sync session factory锛?
+    """DeviceRepository（同步，覆盖全局 sync session factory）
 
-    浣跨敤 :memory: + StaticPool锛屽崟杩炴帴澶嶇敤淇濊瘉鍐欏叆涓庤鍙栧湪鍚屼竴鍐呭瓨 DB銆?
+    使用 :memory: + StaticPool，单连接复用保证写入与读取在同一内存 DB。
     """
     sync_engine = create_engine(
         "sqlite:///:memory:",
@@ -151,19 +151,19 @@ def sync_repo(monkeypatch):
 
 
 # ============================================================
-# 娴嬭瘯锛氬熀鏈?CRUD
+# 测试：基本 CRUD
 # ============================================================
 
 class TestBasicCRUD:
-    """鍩烘湰 CRUD锛歶psert / get / get_all / partial update"""
+    """基本 CRUD：upsert / get / get_all / partial update"""
 
     @pytest.mark.asyncio
     async def test_upsert_and_get(self, repo):
-        """upsert 鏂拌澶囧悗鑳借鍙栧埌"""
+        """upsert 新设备后能读取到"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         cfg = await repo.get_device_config(SAMPLE_DEVICE_ID)
         assert cfg is not None
-        assert cfg["name"] == "瀹㈠巺鐨勮澶?
+        assert cfg["name"] == "客厅的设备"
         assert cfg["key"] == "test-key-123"
         assert cfg["asr_provider"] == "volcengine"
         assert cfg["llm"]["model"] == "deepseek-v4-flash"
@@ -175,77 +175,77 @@ class TestBasicCRUD:
 
     @pytest.mark.asyncio
     async def test_get_nonexistent_returns_none(self, repo):
-        """鏌ヨ涓嶅瓨鍦ㄧ殑璁惧杩斿洖 None"""
+        """查询不存在的设备返回 None"""
         assert await repo.get_device_config("nonexistent") is None
 
     @pytest.mark.asyncio
     async def test_get_by_device_key(self, repo):
-        """閫氳繃 device_key 鏌ヨ璁惧"""
+        """通过 device_key 查找设备"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         cfg = await repo.get_device_config("test-key-123")
         assert cfg is not None
-        assert cfg["name"] == "瀹㈠巺鐨勮澶?
+        assert cfg["name"] == "客厅的设备"
 
     @pytest.mark.asyncio
     async def test_get_by_mac(self, repo):
-        """閫氳繃 mac_address 鏌ヨ璁惧"""
+        """通过 mac_address 查找设备"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         cfg = await repo.get_device_config("D8:3B:DA:6D:D9:3C")
         assert cfg is not None
-        assert cfg["name"] == "瀹㈠巺鐨勮澶?
+        assert cfg["name"] == "客厅的设备"
 
     @pytest.mark.asyncio
     async def test_get_all_devices(self, repo):
-        """get_all_devices 杩斿洖鎵€鏈夎澶?""
+        """get_all_devices 返回所有设备"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         await repo.upsert_device("AA:BB:CC:DD:EE:FF", {
-            "name": "鍗у鐨勮澶?,
+            "name": "卧室的设备",
             "key": "another-key",
         })
         all_devices = await repo.get_all_devices()
         assert len(all_devices) == 2
         assert SAMPLE_DEVICE_ID in all_devices
         assert "AA:BB:CC:DD:EE:FF" in all_devices
-        assert all_devices[SAMPLE_DEVICE_ID]["name"] == "瀹㈠巺鐨勮澶?
-        assert all_devices["AA:BB:CC:DD:EE:FF"]["name"] == "鍗у鐨勮澶?
+        assert all_devices[SAMPLE_DEVICE_ID]["name"] == "客厅的设备"
+        assert all_devices["AA:BB:CC:DD:EE:FF"]["name"] == "卧室的设备"
 
     @pytest.mark.asyncio
     async def test_get_all_devices_empty(self, repo):
-        """绌烘暟鎹簱杩斿洖绌?dict"""
+        """空数据库返回空 dict"""
         assert await repo.get_all_devices() == {}
 
     @pytest.mark.asyncio
     async def test_update_device_partial_scalar(self, repo):
-        """閮ㄥ垎鏇存柊鏍囬噺瀛楁"""
+        """部分更新标量字段"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         updated = await repo.update_device_partial(SAMPLE_DEVICE_ID, {
-            "name": "鏂扮殑鍚嶅瓧",
+            "name": "新的名字",
             "rate_limit_rpm": 100,
         })
         assert updated is not None
-        assert updated["name"] == "鏂扮殑鍚嶅瓧"
+        assert updated["name"] == "新的名字"
         assert updated["rate_limit_rpm"] == 100
-        # 鏈洿鏂扮殑瀛楁淇濇寔涓嶅彉
+        # 未更新的字段保持不变
         assert updated["key"] == "test-key-123"
         assert updated["llm"]["model"] == "deepseek-v4-flash"
 
     @pytest.mark.asyncio
     async def test_update_device_partial_nested(self, repo):
-        """閮ㄥ垎鏇存柊宓屽 dict锛堟繁搴﹀悎骞讹級"""
+        """部分更新嵌套 dict（深度合并）"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         updated = await repo.update_device_partial(SAMPLE_DEVICE_ID, {
             "llm": {"model": "gpt-4"},
         })
         assert updated is not None
-        # llm.model 琚洿鏂?
+        # llm.model 被更新
         assert updated["llm"]["model"] == "gpt-4"
-        # llm 鍏朵粬瀛楁淇濈暀
+        # llm 其他字段保留
         assert updated["llm"]["api_key"] == "sk-test-key-1234567890"
-        assert updated["llm"]["system_prompt"] == "浣犵殑鍚嶅瓧鍙嚒鍑?
+        assert updated["llm"]["system_prompt"] == "你的名字叫小凡"
 
     @pytest.mark.asyncio
     async def test_update_device_partial_list_replace(self, repo):
-        """閮ㄥ垎鏇存柊 list 瀛楁锛堢洿鎺ユ浛鎹紝涓嶅悎骞讹級"""
+        """部分更新 list 字段（直接替换，不合并）"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         updated = await repo.update_device_partial(SAMPLE_DEVICE_ID, {
             "skills": ["new_skill"],
@@ -255,7 +255,7 @@ class TestBasicCRUD:
 
     @pytest.mark.asyncio
     async def test_update_device_partial_mcp_merge(self, repo):
-        """閮ㄥ垎鏇存柊 mcp_servers锛堟繁搴﹀悎骞讹紝淇濈暀鍘熸湁鏈嶅姟鍣級"""
+        """部分更新 mcp_servers（深度合并，保留原有服务器）"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         updated = await repo.update_device_partial(SAMPLE_DEVICE_ID, {
             "mcp_servers": {
@@ -268,55 +268,55 @@ class TestBasicCRUD:
 
     @pytest.mark.asyncio
     async def test_update_nonexistent_returns_none(self, repo):
-        """鏇存柊涓嶅瓨鍦ㄧ殑璁惧杩斿洖 None"""
+        """更新不存在的设备返回 None"""
         assert await repo.update_device_partial("nonexistent", {"name": "x"}) is None
 
 
 # ============================================================
-# 娴嬭瘯锛歠ind_by_key / find_by_mac
+# 测试：find_by_key / find_by_mac
 # ============================================================
 
 class TestFindByKeyAndMac:
-    """find_by_key / find_by_mac 鏌ユ壘"""
+    """find_by_key / find_by_mac 查找"""
 
     @pytest.mark.asyncio
     async def test_find_by_key(self, repo):
-        """鎸?device_key锛圓PI key锛夋煡鎵?""
+        """按 device_key（API key）查找"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         result = await repo.find_by_key("test-key-123")
         assert result is not None
         device_id, cfg = result
         assert device_id == SAMPLE_DEVICE_ID
-        assert cfg["name"] == "瀹㈠巺鐨勮澶?
+        assert cfg["name"] == "客厅的设备"
 
     @pytest.mark.asyncio
     async def test_find_by_key_not_found(self, repo):
-        """device_key 涓嶅瓨鍦ㄨ繑鍥?None"""
+        """device_key 不存在返回 None"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         assert await repo.find_by_key("nonexistent-key") is None
 
     @pytest.mark.asyncio
     async def test_find_by_key_empty(self, repo):
-        """绌?key 杩斿洖 None"""
+        """空 key 返回 None"""
         assert await repo.find_by_key("") is None
 
     @pytest.mark.asyncio
     async def test_find_by_mac_via_mac_address_column(self, repo):
-        """鎸?mac_address 鍒楁煡鎵?""
+        """按 mac_address 列查找"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         # SAMPLE_CONFIG["mac"] = "D8:3B:DA:6D:D9:3C"
         result = await repo.find_by_mac("D8:3B:DA:6D:D9:3C")
         assert result is not None
         device_id, cfg = result
         assert device_id == SAMPLE_DEVICE_ID
-        assert cfg["name"] == "瀹㈠巺鐨勮澶?
+        assert cfg["name"] == "客厅的设备"
 
     @pytest.mark.asyncio
     async def test_find_by_mac_via_device_id_fallback(self, repo):
-        """mac_address 鍒楁湭鍛戒腑鏃讹紝鍥為€€鍖归厤 device_id锛坉ict key 鍗?MAC锛?""
-        # 涓嶆彁渚?mac 瀛楁锛宮ac_address 浼氶粯璁や负 device_id
+        """mac_address 列未命中时，回退匹配 device_id（dict key 为 MAC）"""
+        # 不提供 mac 字段，mac_address 会默认为 device_id
         await repo.upsert_device("AA:BB:CC:DD:EE:FF", {
-            "name": "娴嬭瘯璁惧",
+            "name": "测试设备",
             "key": "key-ff",
         })
         result = await repo.find_by_mac("AA:BB:CC:DD:EE:FF")
@@ -326,18 +326,18 @@ class TestFindByKeyAndMac:
 
     @pytest.mark.asyncio
     async def test_find_by_mac_not_found(self, repo):
-        """MAC 涓嶅瓨鍦ㄨ繑鍥?None"""
+        """MAC 不存在返回 None"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         assert await repo.find_by_mac("00:00:00:00:00:00") is None
 
     @pytest.mark.asyncio
     async def test_find_by_mac_empty(self, repo):
-        """绌?MAC 杩斿洖 None"""
+        """空 MAC 返回 None"""
         assert await repo.find_by_mac("") is None
 
 
 # ============================================================
-# 娴嬭瘯锛氭妧鑳界鐞?
+# 测试：技能管理
 # ============================================================
 
 class TestSkills:
@@ -345,32 +345,32 @@ class TestSkills:
 
     @pytest.mark.asyncio
     async def test_add_skill_to_device(self, repo):
-        """鍚戣澶囨坊鍔犳柊鎶€鑳?""
+        """向设备添加新技能"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         ok = await repo.add_skill_to_device(SAMPLE_DEVICE_ID, "new_skill")
         assert ok is True
         cfg = await repo.get_device_config(SAMPLE_DEVICE_ID)
         assert "new_skill" in cfg["skills"]
-        assert "guess_number" in cfg["skills"]  # 鍘熸湁鎶€鑳戒繚鐣?
+        assert "guess_number" in cfg["skills"]  # 原有技能保留
 
     @pytest.mark.asyncio
     async def test_add_skill_already_exists(self, repo):
-        """娣诲姞宸插瓨鍦ㄧ殑鎶€鑳斤紙骞傜瓑锛?""
+        """添加已存在的技能（幂等）"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         ok = await repo.add_skill_to_device(SAMPLE_DEVICE_ID, "guess_number")
         assert ok is True
         cfg = await repo.get_device_config(SAMPLE_DEVICE_ID)
-        assert cfg["skills"].count("guess_number") == 1  # 涓嶉噸澶?
+        assert cfg["skills"].count("guess_number") == 1  # 不重复
 
     @pytest.mark.asyncio
     async def test_add_skill_nonexistent_device(self, repo):
-        """鍚戜笉瀛樺湪鐨勮澶囨坊鍔犳妧鑳借繑鍥?False"""
+        """向不存在的设备添加技能返回 False"""
         ok = await repo.add_skill_to_device("nonexistent", "skill")
         assert ok is False
 
     @pytest.mark.asyncio
     async def test_add_skill_by_device_key(self, repo):
-        """閫氳繃 device_key 娣诲姞鎶€鑳?""
+        """通过 device_key 添加技能"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         ok = await repo.add_skill_to_device("test-key-123", "new_skill")
         assert ok is True
@@ -379,7 +379,7 @@ class TestSkills:
 
     @pytest.mark.asyncio
     async def test_remove_skill_from_all_devices(self, repo):
-        """浠庢墍鏈夎澶囩Щ闄ゆ妧鑳?""
+        """从所有设备移除技能"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         await repo.upsert_device("dev2", {
             "name": "device2",
@@ -387,50 +387,50 @@ class TestSkills:
             "skills": ["guess_number", "another_skill"],
         })
         count = await repo.remove_skill_from_all_devices("guess_number")
-        assert count == 2  # 涓や釜璁惧閮借淇敼
+        assert count == 2  # 两个设备都包含该技能
         cfg1 = await repo.get_device_config(SAMPLE_DEVICE_ID)
         cfg2 = await repo.get_device_config("dev2")
         assert "guess_number" not in cfg1["skills"]
         assert "guess_number" not in cfg2["skills"]
-        assert "another_skill" in cfg2["skills"]  # 鍏朵粬鎶€鑳戒繚鐣?
+        assert "another_skill" in cfg2["skills"]  # 其他技能保留
 
     @pytest.mark.asyncio
     async def test_remove_skill_not_present(self, repo):
-        """绉婚櫎涓嶅瓨鍦ㄧ殑鎶€鑳借繑鍥?0"""
+        """移除不存在的技能返回 0"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         count = await repo.remove_skill_from_all_devices("nonexistent_skill")
         assert count == 0
 
     @pytest.mark.asyncio
     async def test_remove_skill_empty_name(self, repo):
-        """绌烘妧鑳藉悕杩斿洖 0"""
+        """空技能名返回 0"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         count = await repo.remove_skill_from_all_devices("")
         assert count == 0
 
 
 # ============================================================
-# 娴嬭瘯锛氭妧鑳藉惎鍋?
+# 测试：技能启停
 # ============================================================
 
 class TestToggleSkill:
-    """toggle_skill 鎿嶄綔 disabled_skills 鍒楄〃"""
+    """toggle_skill 操作 disabled_skills 列表"""
 
     @pytest.mark.asyncio
     async def test_disable_skill(self, repo):
-        """绂佺敤鎶€鑳斤細鍔犲叆 disabled_skills"""
+        """禁用技能：加入 disabled_skills"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
-        # 鍒濆 disabled_skills = ["guess_number"]
+        # 初始 disabled_skills = ["guess_number"]
         await repo.toggle_skill(SAMPLE_DEVICE_ID, "gushi", disabled=True)
         cfg = await repo.get_device_config(SAMPLE_DEVICE_ID)
         assert "gushi" in cfg["disabled_skills"]
-        assert "guess_number" in cfg["disabled_skills"]  # 鍘熸湁鐨勪繚鐣?
+        assert "guess_number" in cfg["disabled_skills"]  # 原有的保留
 
     @pytest.mark.asyncio
     async def test_enable_skill(self, repo):
-        """鍚敤鎶€鑳斤細浠?disabled_skills 绉婚櫎"""
+        """启用技能：从 disabled_skills 移除"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
-        # 鍒濆 disabled_skills = ["guess_number"]
+        # 初始 disabled_skills = ["guess_number"]
         await repo.toggle_skill(SAMPLE_DEVICE_ID, "guess_number", disabled=False)
         cfg = await repo.get_device_config(SAMPLE_DEVICE_ID)
         assert "guess_number" not in cfg["disabled_skills"]
@@ -438,7 +438,7 @@ class TestToggleSkill:
 
     @pytest.mark.asyncio
     async def test_toggle_skill_idempotent(self, repo):
-        """閲嶅绂佺敤涓嶄細閲嶅娣诲姞"""
+        """重复禁用不会重复添加"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         await repo.toggle_skill(SAMPLE_DEVICE_ID, "gushi", disabled=True)
         await repo.toggle_skill(SAMPLE_DEVICE_ID, "gushi", disabled=True)
@@ -447,16 +447,16 @@ class TestToggleSkill:
 
     @pytest.mark.asyncio
     async def test_enable_non_disabled_skill(self, repo):
-        """鍚敤鏈鐢ㄧ殑鎶€鑳斤紙鏃犳搷浣滐級"""
+        """启用未禁用的技能（无操作）"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
-        # guess_number 宸茬鐢紝gushi 鏈鐢?
+        # guess_number 已禁用，gushi 未禁用
         await repo.toggle_skill(SAMPLE_DEVICE_ID, "gushi", disabled=False)
         cfg = await repo.get_device_config(SAMPLE_DEVICE_ID)
         assert "gushi" not in cfg["disabled_skills"]
 
     @pytest.mark.asyncio
     async def test_toggle_skill_by_device_key(self, repo):
-        """閫氳繃 device_key 鍚仠鎶€鑳?""
+        """通过 device_key 启停技能"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         await repo.toggle_skill("test-key-123", "gushi", disabled=True)
         cfg = await repo.get_device_config(SAMPLE_DEVICE_ID)
@@ -464,21 +464,21 @@ class TestToggleSkill:
 
     @pytest.mark.asyncio
     async def test_toggle_skill_nonexistent_device(self, repo):
-        """瀵逛笉瀛樺湪鐨勮澶囧惎鍋滄妧鑳斤紙鏃犳搷浣滐紝涓嶆姤閿欙級"""
-        # 涓嶅簲鎶涘嚭寮傚父
+        """对不存在的设备启停技能（无操作，不报错）"""
+        # 不应抛出异常
         await repo.toggle_skill("nonexistent", "gushi", disabled=True)
 
 
 # ============================================================
-# 娴嬭瘯锛歁CP 閰嶇疆 CRUD
+# 测试：MCP 配置 CRUD
 # ============================================================
 
 class TestMCP:
-    """MCP 鏈嶅姟鍣ㄩ厤缃殑澧炲垹鏀规煡"""
+    """MCP 服务器配置的增删改查"""
 
     @pytest.mark.asyncio
     async def test_get_mcp_servers(self, repo):
-        """鑾峰彇璁惧鐨?MCP 鏈嶅姟鍣ㄩ厤缃?""
+        """获取设备的 MCP 服务器配置"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         servers = await repo.get_mcp_servers(SAMPLE_DEVICE_ID)
         assert "amap-maps" in servers
@@ -486,12 +486,12 @@ class TestMCP:
 
     @pytest.mark.asyncio
     async def test_get_mcp_servers_nonexistent_device(self, repo):
-        """鑾峰彇涓嶅瓨鍦ㄨ澶囩殑 MCP 閰嶇疆杩斿洖绌?dict"""
+        """获取不存在设备的 MCP 配置返回空 dict"""
         assert await repo.get_mcp_servers("nonexistent") == {}
 
     @pytest.mark.asyncio
     async def test_set_mcp_server(self, repo):
-        """娣诲姞鏂扮殑 MCP 鏈嶅姟鍣?""
+        """添加新的 MCP 服务器"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         await repo.set_mcp_server(SAMPLE_DEVICE_ID, "weather-server", {
             "type": "streamable_http",
@@ -500,12 +500,12 @@ class TestMCP:
         servers = await repo.get_mcp_servers(SAMPLE_DEVICE_ID)
         assert "weather-server" in servers
         assert servers["weather-server"]["url"] == "https://example.com/mcp"
-        # 鍘熸湁鐨勪繚鐣?
+        # 原有的保留
         assert "amap-maps" in servers
 
     @pytest.mark.asyncio
     async def test_update_mcp_server(self, repo):
-        """鏇存柊宸叉湁 MCP 鏈嶅姟鍣ㄩ厤缃?""
+        """更新已有 MCP 服务器配置"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         await repo.set_mcp_server(SAMPLE_DEVICE_ID, "amap-maps", {
             "type": "streamable_http",
@@ -516,7 +516,7 @@ class TestMCP:
 
     @pytest.mark.asyncio
     async def test_delete_mcp_server(self, repo):
-        """鍒犻櫎 MCP 鏈嶅姟鍣?""
+        """删除 MCP 服务器"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         await repo.delete_mcp_server(SAMPLE_DEVICE_ID, "amap-maps")
         servers = await repo.get_mcp_servers(SAMPLE_DEVICE_ID)
@@ -524,15 +524,15 @@ class TestMCP:
 
     @pytest.mark.asyncio
     async def test_delete_nonexistent_mcp_server(self, repo):
-        """鍒犻櫎涓嶅瓨鍦ㄧ殑 MCP 鏈嶅姟鍣紙鏃犳搷浣滐紝涓嶆姤閿欙級"""
+        """删除不存在的 MCP 服务器（无操作，不报错）"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         await repo.delete_mcp_server(SAMPLE_DEVICE_ID, "nonexistent")
         servers = await repo.get_mcp_servers(SAMPLE_DEVICE_ID)
-        assert "amap-maps" in servers  # 鍘熸湁鐨勪繚鐣?
+        assert "amap-maps" in servers  # 原有的保留
 
     @pytest.mark.asyncio
     async def test_mcp_by_device_key(self, repo):
-        """閫氳繃 device_key 鎿嶄綔 MCP"""
+        """通过 device_key 操作 MCP"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         await repo.set_mcp_server("test-key-123", "new-server", {
             "url": "https://example.com",
@@ -542,22 +542,22 @@ class TestMCP:
 
     @pytest.mark.asyncio
     async def test_mcp_nonexistent_device(self, repo):
-        """瀵逛笉瀛樺湪鐨勮澶囨搷浣?MCP锛堟棤鎿嶄綔锛屼笉鎶ラ敊锛?""
-        # 涓嶅簲鎶涘嚭寮傚父
+        """对不存在的设备操作 MCP（无操作，不报错）"""
+        # 不应抛出异常
         await repo.set_mcp_server("nonexistent", "server", {"url": "x"})
         await repo.delete_mcp_server("nonexistent", "server")
         assert await repo.get_mcp_servers("nonexistent") == {}
 
 
 # ============================================================
-# 娴嬭瘯锛氬悓姝ュ姞杞?
+# 测试：同步加载
 # ============================================================
 
 class TestSyncLoad:
-    """load_all_devices_sync 鍚屾鍔犺浇"""
+    """load_all_devices_sync 同步加载"""
 
     def test_load_all_devices_sync(self, sync_repo):
-        """鍚屾鍔犺浇璁惧閰嶇疆锛堣嚜鍖呭惈锛氱洿鎺ュ啓鍏?+ 鍚屾璇诲彇锛?""
+        """同步加载设备配置（自包含：直接写入 + 同步读取）"""
         from src.infrastructure.db.compat.sync_session import get_sync_session_factory
         factory = get_sync_session_factory()
         with factory() as session:
@@ -568,53 +568,53 @@ class TestSyncLoad:
         result = sync_repo.load_all_devices_sync()
         assert SAMPLE_DEVICE_ID in result
         cfg = result[SAMPLE_DEVICE_ID]
-        # 楠岃瘉 dict 缁撴瀯涓?users.json 涓€鑷?
-        assert cfg["name"] == "瀹㈠巺鐨勮澶?
+        # 验证 dict 结构与 users.json 一致
+        assert cfg["name"] == "客厅的设备"
         assert cfg["key"] == "test-key-123"
         assert cfg["asr_provider"] == "volcengine"
         assert cfg["llm"]["model"] == "deepseek-v4-flash"
         assert cfg["tts_config"]["voice_type"] == "zh_female_vv_uranus_bigtts"
         assert cfg["music"]["api_url"] == "http://192.168.31.176:2233"
         assert "amap-maps" in cfg["mcp_servers"]
-        assert cfg["wakeup"]["text"] == "鎴戝湪锛屼綘璇?
+        assert cfg["wakeup"]["text"] == "我在，你在忙吗"
         assert cfg["skills"] == ["guess_number", "gushi", "new"]
         assert cfg["disabled_skills"] == ["guess_number"]
         assert cfg["ota"]["enabled"] is True
 
     def test_load_all_devices_sync_empty(self, sync_repo):
-        """绌烘暟鎹簱鍚屾鍔犺浇杩斿洖绌?dict"""
+        """空数据库同步加载返回空 dict"""
         result = sync_repo.load_all_devices_sync()
         assert result == {}
 
     def test_load_all_devices_sync_multiple(self, sync_repo):
-        """鍚屾鍔犺浇澶氫釜璁惧"""
+        """同步加载多个设备"""
         from src.infrastructure.db.compat.sync_session import get_sync_session_factory
         factory = get_sync_session_factory()
         with factory() as session:
             session.add(DeviceModel(
-                device_id="dev1", name="璁惧1", device_key="key1",
+                device_id="dev1", name="设备1", device_key="key1",
             ))
             session.add(DeviceModel(
-                device_id="dev2", name="璁惧2", device_key="key2",
+                device_id="dev2", name="设备2", device_key="key2",
             ))
             session.commit()
 
         result = sync_repo.load_all_devices_sync()
         assert len(result) == 2
-        assert result["dev1"]["name"] == "璁惧1"
-        assert result["dev2"]["name"] == "璁惧2"
+        assert result["dev1"]["name"] == "设备1"
+        assert result["dev2"]["name"] == "设备2"
 
 
 # ============================================================
-# 娴嬭瘯锛歶psert 骞傜瓑鎬?
+# 测试：upsert 幂等性
 # ============================================================
 
 class TestUpsertIdempotent:
-    """upsert 骞傜瓑鎬э細澶氭 upsert 鍚屼竴璁惧涓嶄骇鐢熼噸澶嶈"""
+    """upsert 幂等性：多次 upsert 同一设备不产生重复行"""
 
     @pytest.mark.asyncio
     async def test_upsert_idempotent(self, repo):
-        """澶氭 upsert 鍚屼竴璁惧涓嶄骇鐢熼噸澶?""
+        """多次 upsert 同一设备不产生重复"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
@@ -625,24 +625,24 @@ class TestUpsertIdempotent:
 
     @pytest.mark.asyncio
     async def test_upsert_updates_existing(self, repo):
-        """upsert 鏇存柊宸插瓨鍦ㄨ澶囷紙瑕嗙洊瀛楁锛?""
+        """upsert 更新已存在设备（覆盖字段）"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         new_config = copy.deepcopy(SAMPLE_CONFIG)
-        new_config["name"] = "鏂板悕绉?
+        new_config["name"] = "新名字"
         new_config["llm"]["model"] = "gpt-4"
         await repo.upsert_device(SAMPLE_DEVICE_ID, new_config)
 
         cfg = await repo.get_device_config(SAMPLE_DEVICE_ID)
-        assert cfg["name"] == "鏂板悕绉?
+        assert cfg["name"] == "新名字"
         assert cfg["llm"]["model"] == "gpt-4"
-        # 鍏朵粬瀛楁淇濈暀
+        # 其他字段保留
         assert cfg["key"] == "test-key-123"
 
     @pytest.mark.asyncio
     async def test_upsert_preserves_created_at(self, repo):
-        """upsert 鏇存柊鏃?created_at 涓嶅彉锛寀pdated_at 鍒锋柊"""
+        """upsert 更新时 created_at 不变，updated_at 刷新"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
-        # 璇诲彇鍒濆鏃堕棿鎴?
+        # 读取初始时间戳
         from src.infrastructure.db.session import get_session_ctx
         async with get_session_ctx() as session:
             model = (await session.execute(
@@ -651,19 +651,19 @@ class TestUpsertIdempotent:
             created_before = model.created_at
             updated_before = model.updated_at
 
-        time.sleep(0.02)  # 纭繚 updated_at 鏈夊彉鍖?
-        await repo.upsert_device(SAMPLE_DEVICE_ID, {"name": "鏂板悕绉?})
+        time.sleep(0.02)  # 确保 updated_at 有变化
+        await repo.upsert_device(SAMPLE_DEVICE_ID, {"name": "新名字"})
 
         async with get_session_ctx() as session:
             model = (await session.execute(
                 select(DeviceModel).where(DeviceModel.device_id == SAMPLE_DEVICE_ID)
             )).scalar_one()
-            assert model.created_at == created_before  # 鍒涘缓鏃堕棿涓嶅彉
-            assert model.updated_at > updated_before  # 鏇存柊鏃堕棿鍒锋柊
+            assert model.created_at == created_before  # 创建时间不变
+            assert model.updated_at > updated_before  # 更新时间刷新
 
     @pytest.mark.asyncio
     async def test_upsert_multiple_devices(self, repo):
-        """upsert 澶氫釜涓嶅悓璁惧"""
+        """upsert 多个不同设备"""
         await repo.upsert_device("dev1", {"name": "d1", "key": "k1"})
         await repo.upsert_device("dev2", {"name": "d2", "key": "k2"})
         await repo.upsert_device("dev3", {"name": "d3", "key": "k3"})
@@ -672,25 +672,25 @@ class TestUpsertIdempotent:
 
     @pytest.mark.asyncio
     async def test_upsert_empty_device_id(self, repo):
-        """绌?device_id 涓嶆墽琛屾搷浣?""
+        """空 device_id 不执行操作"""
         await repo.upsert_device("", {"name": "x"})
         assert await repo.get_all_devices() == {}
 
 
 # ============================================================
-# 娴嬭瘯锛歞ict 缁撴瀯鍏煎鎬?
+# 测试：dict 结构兼容性
 # ============================================================
 
 class TestDictCompat:
-    """杩斿洖鐨?dict 缁撴瀯涓?users.json 瀹屽叏涓€鑷?""
+    """返回的 dict 结构与 users.json 完全一致"""
 
     @pytest.mark.asyncio
     async def test_dict_structure_matches_users_json(self, repo):
-        """upsert + get 杩斿洖鐨?dict 缁撴瀯涓?users.json 涓€鑷?""
+        """upsert + get 返回的 dict 结构与 users.json 一致"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         cfg = await repo.get_device_config(SAMPLE_DEVICE_ID)
 
-        # 楠岃瘉鎵€鏈?users.json 涓簲鏈夌殑椤跺眰瀛楁
+        # 验证与 users.json 中已有的顶层字段
         expected_keys = {
             "name", "key", "asr_provider", "asr_config",
             "llm_type", "llm",
@@ -700,13 +700,17 @@ class TestDictCompat:
             "ota",
             "disabled_tools", "disabled_mcp_servers", "disabled_mcp_tools",
             "disabled_skills", "skills",
+            # 仓库层新增的顶层字段
+            "management_api_key", "enabled_plugins", "plugin_configs",
+            "has_display", "robot_mode",
+            "screensaver_enabled", "screensaver_timeout",
         }
         assert set(cfg.keys()) == expected_keys, (
-            f"瀛楁涓嶄竴鑷? 澶?{set(cfg.keys()) - expected_keys}, "
-            f"灏?{expected_keys - set(cfg.keys())}"
+            f"字段不一致: 多出 {set(cfg.keys()) - expected_keys}, "
+            f"缺失 {expected_keys - set(cfg.keys())}"
         )
 
-        # 楠岃瘉宓屽瀛楁
+        # 验证嵌套字段
         assert set(cfg["llm"].keys()) == {
             "api_key", "base_url", "model", "system_prompt",
             "memory_enabled", "memory_max_messages",
@@ -718,12 +722,12 @@ class TestDictCompat:
 
     @pytest.mark.asyncio
     async def test_load_devices_compat(self, repo):
-        """杩斿洖鐨?dict 鍙 load_devices() 姝ｇ‘瑙ｆ瀽涓?DeviceConfig"""
+        """返回的 dict 能被 load_devices() 正确解析为 DeviceConfig"""
         from src.use_cases.device_config import DeviceConfig
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         cfg = await repo.get_device_config(SAMPLE_DEVICE_ID)
 
-        # 妯℃嫙 load_devices() 鐨勮В鏋愰€昏緫
+        # 模拟 load_devices() 的解析逻辑
         raw = cfg
         llm = raw.get("llm") or {}
         ota = raw.get("ota", {})
@@ -761,16 +765,16 @@ class TestDictCompat:
             wakeup_config=raw.get("wakeup") or raw.get("wakeup_config"),
         )
 
-        # 楠岃瘉瀛楁姝ｇ‘瑙ｆ瀽
+        # 验证字段正确解析
         assert dc.device_id == SAMPLE_DEVICE_ID
-        assert dc.name == "瀹㈠巺鐨勮澶?
+        assert dc.name == "客厅的设备"
         assert dc.key == "test-key-123"
         assert dc.asr_provider == "volcengine"
         assert dc.llm_type == "openai"
         assert dc.tts_type == "volcengine"
         assert dc.llm_api_key == "sk-test-key-1234567890"
         assert dc.llm_model == "deepseek-v4-flash"
-        assert dc.llm_system_prompt == "浣犵殑鍚嶅瓧鍙嚒鍑?
+        assert dc.llm_system_prompt == "你的名字叫小凡"
         assert dc.llm_memory_enabled is True
         assert dc.llm_memory_max_messages == 20
         assert dc.rate_limit_rpm == 60
@@ -779,44 +783,44 @@ class TestDictCompat:
         assert dc.skills == ["guess_number", "gushi", "new"]
         assert dc.disabled_skills == ["guess_number"]
         assert dc.disabled_tools == []
-        assert dc.wakeup_config["text"] == "鎴戝湪锛屼綘璇?
+        assert dc.wakeup_config["text"] == "我在，你在忙吗"
         assert "amap-maps" in (dc.mcp_servers or {})
 
     @pytest.mark.asyncio
     async def test_roundtrip_preserves_data(self, repo):
-        """upsert -> get 寰€杩斾繚鎸佹暟鎹畬鏁?""
+        """upsert -> get 往返保持数据一致"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         cfg = await repo.get_device_config(SAMPLE_DEVICE_ID)
-        # 鍐嶆 upsert 璇诲彇鐨?dict锛堟ā鎷熶粠 DB 璇诲嚭鍚庡啓鍥烇級
+        # 再次 upsert 读取的 dict（模拟从 DB 读出后写回）
         await repo.upsert_device(SAMPLE_DEVICE_ID, cfg)
         cfg2 = await repo.get_device_config(SAMPLE_DEVICE_ID)
-        # 鏁版嵁搴斾繚鎸佷竴鑷?
+        # 数据应保持一致
         assert cfg2 == cfg
 
     @pytest.mark.asyncio
     async def test_get_all_devices_returns_users_json_structure(self, repo):
-        """get_all_devices 杩斿洖鐨?dict 缁撴瀯涓?users.json 鐨?devices 瀛楁涓€鑷?""
+        """get_all_devices 返回的 dict 结构与 users.json 的 devices 字段一致"""
         await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
         all_devices = await repo.get_all_devices()
-        # 妯℃嫙 users.json 鐨勫畬鏁寸粨鏋?
+        # 模拟 users.json 的完整结构
         users_json_like = {"devices": all_devices}
         assert "devices" in users_json_like
         assert SAMPLE_DEVICE_ID in users_json_like["devices"]
         cfg = users_json_like["devices"][SAMPLE_DEVICE_ID]
-        assert cfg["name"] == "瀹㈠巺鐨勮澶?
+        assert cfg["name"] == "客厅的设备"
         assert cfg["llm"]["model"] == "deepseek-v4-flash"
 
     @pytest.mark.asyncio
     async def test_defaults_for_minimal_config(self, repo):
-        """鏈€灏忛厤缃篃鑳芥甯稿線杩旓紙浣跨敤榛樿鍊硷級"""
+        """最小配置也能正常往返（使用默认值）"""
         await repo.upsert_device("minimal-dev", {
-            "name": "鏈€灏忚澶?,
+            "name": "小明的设备",
             "key": "min-key",
         })
         cfg = await repo.get_device_config("minimal-dev")
         assert cfg is not None
-        # 榛樿鍊?
-        assert cfg["name"] == "鏈€灏忚澶?
+        # 默认值
+        assert cfg["name"] == "小明的设备"
         assert cfg["key"] == "min-key"
         assert cfg["asr_provider"] == ""
         assert cfg["asr_config"] == {}

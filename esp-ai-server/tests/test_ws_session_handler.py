@@ -34,6 +34,24 @@ from starlette.websockets import WebSocketDisconnect
 # ============================================================
 
 
+@pytest.fixture(autouse=True)
+def _isolate_service_registry():
+    """隔离插件服务注册表。
+
+    全局 ``plugin_loader._service_registry`` 会被其他测试（如 test_web.py
+    的 lifespan 加载 data/plugins/installed 下的已安装插件）污染，
+    导致 initialize 的插件 TTS/ASR/LLM 网关回退路径意外激活。
+    本 fixture 在每个测试期间清空该注册表，结束后恢复。
+    """
+    from src.infrastructure import plugin_loader
+
+    saved = dict(plugin_loader._service_registry)
+    plugin_loader._service_registry.clear()
+    yield
+    plugin_loader._service_registry.clear()
+    plugin_loader._service_registry.update(saved)
+
+
 def _make_websocket():
     """构造 mock websocket"""
     ws = AsyncMock()
@@ -199,12 +217,31 @@ def _init_patches(asr_error=False, llm_error=False, tts_error=False):
     stack.enter_context(patch("src.interfaces.ws_session_handler.VoiceGenerator"))
     stack.enter_context(patch("src.use_cases.skill_system.render_skills_catalog", return_value=""))
     stack.enter_context(patch("asyncio.create_task", side_effect=_swallow_coro))
+    # 后台任务统一走 task_manager.background_task，同样 mock 掉避免真实调度
+    stack.enter_context(patch(
+        "src.interfaces.ws_session_handler.background_task",
+        side_effect=_swallow_coro,
+    ))
     return stack
+
+
+class _FakeTask:
+    """create_task mock 的返回值：兼容 _bg_tasks.add + add_done_callback 跟踪"""
+
+    def add_done_callback(self, cb):
+        pass
+
+    def cancel(self):
+        return True
+
+    def done(self):
+        return True
 
 
 def _swallow_coro(coro, **kw):
     """安全关闭协程，避免 'coroutine never awaited' 警告"""
     coro.close()
+    return _FakeTask()
 
 
 async def _do_initialize(handler, asr_error=False, llm_error=False, tts_error=False):
@@ -321,10 +358,8 @@ class TestInitialize:
     async def test_initialize_starts_keepalive(self):
         handler = _make_handler()
         await _do_initialize(handler)
-        # keepalive_task 被异步创建（通过 mock 的 create_task）
-        # 检查 send_json 中是否有 keepalive 消息
-        # 由于 create_task 被 mock，keepalive 不会真正运行
-        assert handler.keepalive_task is None  # create_task 被 mock 返回 None
+        # keepalive_task 通过 mock 的 create_task 创建，返回 _FakeTask
+        assert isinstance(handler.keepalive_task, _FakeTask)
 
 
 # ============================================================
@@ -723,6 +758,8 @@ class TestDoWakeStart:
 
         # 设置 wake_audio_manager 使 wam 非空，进入唤醒音频处理分支
         wam = AsyncMock()
+        # 设备级唤醒配置解析：play_enabled=False（与 settings.wakeup.audio_play_enabled 一致）
+        wam._get_wakeup_cfg = MagicMock(return_value=False)
         app = _make_app()
         app.state.wake_audio_manager = wam
         with patch("src.interfaces.ws_session_handler.get_app", return_value=app):
@@ -913,26 +950,27 @@ class TestLlmCallForGrowth:
 
         mock_client = AsyncMock()
         mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+        # 当前实现复用 gateway 的 _resolve_config 解析 client + model
+        handler.llm_processor._resolve_config = MagicMock(
+            return_value=(mock_client, "gpt-4", None)
+        )
 
-        with patch("src.interfaces.ws_session_handler.get_settings", return_value=_make_settings()):
-            with patch("openai.AsyncOpenAI", return_value=mock_client):
-                result = await handler._llm_call_for_growth("sys", "user prompt")
+        result = await handler._llm_call_for_growth("sys", "user prompt")
 
+        handler.llm_processor._resolve_config.assert_called_once_with(handler.user_config)
         assert result == "result"
 
     async def test_fallback_to_stream_chat(self):
         handler = _make_handler()
         handler.llm_processor = MagicMock()
 
-        async def _stream(messages):
+        async def _stream(messages, user_config=None, **kwargs):
             yield "hello"
             yield " world"
 
         handler.llm_processor.stream_chat = _stream
 
-        with patch("src.interfaces.ws_session_handler.get_settings", return_value=_make_settings()):
-            with patch("openai.AsyncOpenAI", side_effect=Exception("API error")):
-                result = await handler._llm_call_for_growth("sys", "user")
+        result = await handler._llm_call_for_growth("sys", "user")
 
         assert "hello" in result
         assert "world" in result
@@ -941,21 +979,18 @@ class TestLlmCallForGrowth:
         handler = _make_handler()
         handler.llm_processor = MagicMock()
 
-        async def _stream(messages):
-            yield "__start__"
+        async def _stream(messages, user_config=None, **kwargs):
+            yield "[LLM Error] gateway error"
             yield "actual"
-            yield "__end__"
             yield "content"
 
         handler.llm_processor.stream_chat = _stream
 
-        with patch("src.interfaces.ws_session_handler.get_settings", return_value=_make_settings()):
-            with patch("openai.AsyncOpenAI", side_effect=Exception("error")):
-                result = await handler._llm_call_for_growth("sys", "user")
+        result = await handler._llm_call_for_growth("sys", "user")
 
         assert "actual" in result
         assert "content" in result
-        assert "__" not in result
+        assert "[LLM" not in result
 
 
 # ============================================================
@@ -1293,7 +1328,9 @@ class TestCleanup:
         handler.session = _make_session()
 
         registry = _make_registry()
-        with patch("src.interfaces.ws_session_handler.get_device_registry", return_value=registry):
+        # cleanup 内部通过 src.infrastructure.web 重新导入 get_device_registry，
+        # 需 patch 其源模块才能生效
+        with patch("src.infrastructure.web.get_device_registry", return_value=registry):
             await handler.cleanup()
 
         registry.unregister.assert_called_once_with("test_device_key_123")
