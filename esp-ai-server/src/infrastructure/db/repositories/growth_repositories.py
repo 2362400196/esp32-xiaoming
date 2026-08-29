@@ -9,9 +9,9 @@
 / 自学习日志条目）完全一致，保持向后兼容。
 
 替代项：
-- ``src/use_cases/growth/user_profile.py`` 中的 JSON 读写
-- ``src/use_cases/growth/emotion_analyzer.py`` 中的 JSON 读写
-- ``src/use_cases/growth/self_learning.py`` 中的 ``_log_learning`` 方法
+- ``src/plugins/growth/engine/user_profile.py`` 中的 JSON 读写
+- ``src/plugins/growth/engine/emotion_analyzer.py`` 中的 JSON 读写
+- ``src/plugins/growth/engine/self_learning.py`` 中的 ``_log_learning`` 方法
 """
 from __future__ import annotations
 

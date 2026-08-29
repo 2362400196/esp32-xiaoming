@@ -813,7 +813,7 @@ class TestGrowthRoutes:
         entry.created_at = "2026-05-29T10:00:00"
         mock_service.get_all_entries = AsyncMock(return_value=[entry])
         with patch("src.infrastructure.device_api.verify_api_key", new_callable=AsyncMock), \
-             patch("src.use_cases.growth.DiaryService", return_value=mock_service), \
+             patch("src.plugins.growth.engine.DiaryService", return_value=mock_service), \
              patch("src.infrastructure.routes.growth._resolve_device_key", return_value="key1"), \
              patch("src.infrastructure.routes.growth._get_data_dir", return_value="/data"):
             resp = client.get("/api/v1/growth/diary/dev1")
@@ -825,7 +825,7 @@ class TestGrowthRoutes:
         mock_service = MagicMock()
         mock_service.get_diary_content = AsyncMock(return_value="日记内容")
         with patch("src.infrastructure.device_api.verify_api_key", new_callable=AsyncMock), \
-             patch("src.use_cases.growth.DiaryService", return_value=mock_service), \
+             patch("src.plugins.growth.engine.DiaryService", return_value=mock_service), \
              patch("src.infrastructure.routes.growth._resolve_device_key", return_value="key1"), \
              patch("src.infrastructure.routes.growth._get_data_dir", return_value="/data"):
             resp = client.get("/api/v1/growth/diary/dev1", params={"date": "2026-05-29"})
@@ -837,7 +837,7 @@ class TestGrowthRoutes:
         mock_service = MagicMock()
         mock_service.get_diary_content = AsyncMock(return_value=None)
         with patch("src.infrastructure.device_api.verify_api_key", new_callable=AsyncMock), \
-             patch("src.use_cases.growth.DiaryService", return_value=mock_service), \
+             patch("src.plugins.growth.engine.DiaryService", return_value=mock_service), \
              patch("src.infrastructure.routes.growth._resolve_device_key", return_value="key1"), \
              patch("src.infrastructure.routes.growth._get_data_dir", return_value="/data"):
             resp = client.get("/api/v1/growth/diary/dev1", params={"date": "2026-05-29"})
@@ -846,7 +846,7 @@ class TestGrowthRoutes:
 
     async def test_get_diary_exception(self, client, app):
         """获取日记异常：当前路由未捕获，返回 500"""
-        with patch("src.use_cases.growth.DiaryService", side_effect=RuntimeError("err")), \
+        with patch("src.plugins.growth.engine.DiaryService", side_effect=RuntimeError("err")), \
              patch("src.infrastructure.routes.growth._resolve_device_key", return_value="key1"), \
              patch("src.infrastructure.routes.growth._get_data_dir", return_value="/data"):
             no_raise_client = TestClient(app, raise_server_exceptions=False)
@@ -858,7 +858,7 @@ class TestGrowthRoutes:
         mock_service = MagicMock()
         mock_service.get_diary_content = AsyncMock(return_value="内容")
         with patch("src.infrastructure.device_api.verify_api_key", new_callable=AsyncMock), \
-             patch("src.use_cases.growth.DiaryService", return_value=mock_service), \
+             patch("src.plugins.growth.engine.DiaryService", return_value=mock_service), \
              patch("src.infrastructure.routes.growth._resolve_device_key", return_value="key1"), \
              patch("src.infrastructure.routes.growth._get_data_dir", return_value="/data"):
             resp = client.get("/api/v1/growth/diary/dev1/2026-05-29")
@@ -874,8 +874,8 @@ class TestGrowthRoutes:
         mock_emotion_service.get_emotion_summary = AsyncMock(return_value={"happy": 5})
 
         with patch("src.infrastructure.device_api.verify_api_key", new_callable=AsyncMock), \
-             patch("src.use_cases.growth.user_profile.UserProfileService", return_value=mock_profile_service), \
-             patch("src.use_cases.growth.emotion_analyzer.EmotionAnalyzer", return_value=mock_emotion_service), \
+             patch("src.plugins.growth.engine.user_profile.UserProfileService", return_value=mock_profile_service), \
+             patch("src.plugins.growth.engine.emotion_analyzer.EmotionAnalyzer", return_value=mock_emotion_service), \
              patch("src.infrastructure.routes.growth._resolve_device_key", return_value="key1"), \
              patch("src.infrastructure.routes.growth._get_data_dir", return_value="/data"):
             resp = client.get("/api/v1/growth/profile/dev1")
@@ -901,7 +901,7 @@ class TestGrowthRoutes:
         mock_service = MagicMock()
         mock_service.get_recent_emotions = AsyncMock(return_value=[emotion])
         with patch("src.infrastructure.device_api.verify_api_key", new_callable=AsyncMock), \
-             patch("src.use_cases.growth.emotion_analyzer.EmotionAnalyzer", return_value=mock_service), \
+             patch("src.plugins.growth.engine.emotion_analyzer.EmotionAnalyzer", return_value=mock_service), \
              patch("src.infrastructure.routes.growth._resolve_device_key", return_value="key1"), \
              patch("src.infrastructure.routes.growth._get_data_dir", return_value="/data"):
             resp = client.get("/api/v1/growth/emotions/dev1")

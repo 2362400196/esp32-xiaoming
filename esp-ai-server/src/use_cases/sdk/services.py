@@ -141,7 +141,7 @@ async def get_user_profile_summary(device_key: str = "", tool_manager=None) -> s
         device_key = resolve_device_key("", tool_manager)
     if not device_key:
         return "暂无用户信息"
-    from src.use_cases.growth.user_profile import UserProfileService
+    from src.plugins.growth.engine.user_profile import UserProfileService
     svc = UserProfileService("")
     summary = await svc.get_profile_summary(device_key)
     return summary or "暂无用户信息"

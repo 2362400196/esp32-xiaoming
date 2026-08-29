@@ -24,7 +24,15 @@ def get_device_registry():
 
 
 async def speak_direct(channel, ctx, fsm, text):
-    """让设备直接播报语音（不经过 LLM 流程）。"""
+    """让设备直接播报语音（不经过 LLM 流程）。
+
+    .. deprecated::
+        旧 API，要求插件持有 channel/ctx/fsm 等框架内部对象（插件通常拿不到），
+        保留兼容。新代码推荐使用 :func:`speak_to_device`（只需设备标识）。
+
+    Returns:
+        True 表示播报已提交；无 Speaker 时返回 False。
+    """
     from src.infrastructure.web import get_app
     app = get_app()
     if app and hasattr(app.state, 'speaker') and app.state.speaker:
@@ -33,57 +41,60 @@ async def speak_direct(channel, ctx, fsm, text):
     return False
 
 
+async def speak_to_device(device_key: str, text: str) -> bool:
+    """向指定设备主动播报语音（推荐封装，不经过 LLM 流程）。
+
+    与旧版 speak_direct 不同，本函数不需要插件持有 channel/session/fsm
+    等框架内部对象——内部从 device_registry 解析设备的
+    channel/session/fsm/user_config，并调用 speaker.speak_direct 完成播报。
+
+    Args:
+        device_key: 设备标识（bound_xxx 格式或 MAC）
+        text: 要播报的文本
+
+    Returns:
+        True 表示播报已提交；设备离线 / 注册表或 Speaker 不可用 / 播报异常时返回 False。
+    """
+    if not device_key or not text:
+        return False
+    registry = get_device_registry()
+    if not registry:
+        return False
+    device = registry.resolve(device_key)
+    if not device:
+        return False
+    channel = device.get("channel")
+    if channel is None or not getattr(channel, "connected", True):
+        return False
+    from src.infrastructure.web import get_app
+    app = get_app()
+    if not (app and hasattr(app.state, "speaker") and app.state.speaker):
+        return False
+    try:
+        # speaker.speak_direct 签名: (channel, session, fsm, text, user_config=None, ...)
+        await app.state.speaker.speak_direct(
+            channel,
+            device.get("session"),
+            device.get("fsm"),
+            text,
+            user_config=device.get("user_config"),
+        )
+        return True
+    except Exception as e:
+        get_logger(__name__).error(f"[speak_to_device] 向设备 {device_key} 播报失败: {e}")
+        return False
+
+
 def get_wechat_bot():
-    """获取 WeChatBot 实例（懒创建 + 注册回调，模块级单例）。"""
-    from src.use_cases.wechat_bot import WeChatBot, WeChatClientConfig
-    from src.use_cases.wechat_binding import get_wechat_binding_manager
+    """获取 WeChatBot 实例（委托给 wechat_bot.py 的进程级单例）。
 
-    if get_wechat_bot._instance is not None:
-        return get_wechat_bot._instance
-
-    settings = get_settings()
-    cfg = settings.wechat_bot
-    bot_config = WeChatClientConfig(
-        token=cfg.token, base_url=cfg.base_url, cdn_base_url=cfg.cdn_base_url,
-        account_id=cfg.account_id, app_id=cfg.app_id, client_version=cfg.client_version,
-    )
-    bot = WeChatBot(bot_config)
-
-    bind_mgr = get_wechat_binding_manager()
-
-    async def _on_wechat_message(bot_, chat_id, sender_id, message_id, text, context_token):
-        binding = bind_mgr.get_by_wechat(chat_id)
-        if not binding:
-            registry = get_device_registry()
-            if registry:
-                device_ids = registry.get_all_ids()
-                if device_ids:
-                    first_id = device_ids[0]
-                    entry = registry.resolve(first_id)
-                    if entry:
-                        mac = entry.get("mac", "") or entry.get("device_id", "") or first_id
-                        device_key = first_id
-                        bind_mgr.bind(chat_id, sender_id, device_key, device_mac=mac)
-                        binding = bind_mgr.get_by_wechat(chat_id)
-                        try:
-                            await bot_.send_text(chat_id, "已自动绑定设备，现在可以开始对话了")
-                        except Exception:
-                            pass
-            if not binding:
-                return
-        await bind_mgr.send_wechat_message_to_device(binding.device_key, chat_id, sender_id, text)
-
-    bot.on_message = _on_wechat_message
-
-    if bot.state.configured and not bot.state.poll_task:
-        import asyncio
-        asyncio.create_task(bot.start())
-
-    get_wechat_bot._instance = bot
-    return bot
-
-
-get_wechat_bot._instance = None
+    历史教训：这里曾自建第二个 WeChatBot 实例并附带独立的简版消息回调
+    （含"自动绑到第一台设备"逻辑）——两个实例用同一 token 各自轮询，
+    微信服务端会话冲突返回 -14 session timeout，最终 token 被误判失效。
+    现在统一使用 wechat_bot.py 的单例，消息回调由 web.py lifespan 注册完整版。
+    """
+    from src.use_cases.wechat_bot import get_or_create_bot
+    return get_or_create_bot()
 
 
 def get_wechat_binding_mgr():

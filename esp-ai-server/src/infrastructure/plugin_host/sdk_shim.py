@@ -215,6 +215,78 @@ async def request_device_result(tool_manager=None, command_id="", future_attr=""
     return tuple(result) if isinstance(result, list) else (None, "error", "无效返回")
 
 
+# ── 设备 IO（GPIO / PWM / ADC / 舵机）───────────────────────
+# 签名与主进程 SDK（src/use_cases/sdk/io.py）完全一致：
+#   写操作返回 "ok" 或错误串；读操作返回 int（失败 -1）。
+
+
+async def gpio_mode(pin: int, mode: str = "output", tool_manager=None, device_key: str = "") -> str:
+    """配置 GPIO 引脚模式（output / input / input_pullup / input_pulldown）。"""
+    return await client.send_async(
+        "gpio_mode", {"pin": pin, "mode": mode, "device_key": device_key or ""}
+    ) or ""
+
+
+async def gpio_write(pin: int, value: int, tool_manager=None, device_key: str = "") -> str:
+    """写入数字信号到 GPIO 引脚（0/1）。"""
+    return await client.send_async(
+        "gpio_write", {"pin": pin, "value": value, "device_key": device_key or ""}
+    ) or ""
+
+
+async def gpio_read(pin: int, tool_manager=None, device_key: str = "") -> int:
+    """读取 GPIO 引脚数字信号，返回 0/1，失败返回 -1。"""
+    result = await client.send_async(
+        "gpio_read", {"pin": pin, "device_key": device_key or ""}
+    )
+    try:
+        return int(result)
+    except (TypeError, ValueError):
+        return -1
+
+
+async def pwm_write(pin: int, duty: int, freq: int = 5000, tool_manager=None, device_key: str = "") -> str:
+    """PWM 输出（LEDC，duty 0-1023，freq 默认 5000Hz）。"""
+    return await client.send_async(
+        "pwm_write", {"pin": pin, "duty": duty, "freq": freq, "device_key": device_key or ""}
+    ) or ""
+
+
+async def adc_read(pin: int, tool_manager=None, device_key: str = "") -> int:
+    """读取 ADC 模拟值（ESP32-S3 仅 GPIO1~10），返回 0-4095，失败返回 -1。"""
+    result = await client.send_async(
+        "adc_read", {"pin": pin, "device_key": device_key or ""}
+    )
+    try:
+        return int(result)
+    except (TypeError, ValueError):
+        return -1
+
+
+async def servo_write(pin: int, angle: int, tool_manager=None, device_key: str = "") -> str:
+    """控制舵机角度（0-180 度）。"""
+    return await client.send_async(
+        "servo_write", {"pin": pin, "angle": angle, "device_key": device_key or ""}
+    ) or ""
+
+
+# ── 音乐播放 ────────────────────────────────────────────────
+
+
+async def play_music_url(url: str, title: str = "", artist: str = "",
+                         duration: int = 0, device_key: str = "",
+                         lyric_url: str = "", lyrics_offset: int = 0) -> str:
+    """向设备发送音乐播放指令，返回 "ok" 或错误描述字符串。
+
+    签名与主进程 SDK（src/use_cases/sdk/music.py）完全一致。
+    """
+    return await client.send_async(
+        "play_music_url", {"url": url, "title": title, "artist": artist,
+                           "duration": duration, "device_key": device_key or "",
+                           "lyric_url": lyric_url, "lyrics_offset": lyrics_offset}
+    ) or ""
+
+
 # ── 插件配置 ────────────────────────────────────────────────
 
 
@@ -613,6 +685,14 @@ def build_helpers_shim() -> types.ModuleType:
         "current_timestamp": current_timestamp,
         "json_dumps": json_dumps,
         "json_loads": json_loads,
+        # 设备 IO（GPIO/PWM/ADC/舵机）与音乐播放
+        "gpio_mode": gpio_mode,
+        "gpio_write": gpio_write,
+        "gpio_read": gpio_read,
+        "pwm_write": pwm_write,
+        "adc_read": adc_read,
+        "servo_write": servo_write,
+        "play_music_url": play_music_url,
         # WebSocket 操作
         "ws_connect": ws_connect,
         "ws_send": ws_send,

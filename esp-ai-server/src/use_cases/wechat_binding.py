@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -266,3 +267,38 @@ def get_wechat_binding_manager() -> WeChatBindingManager:
     if _binding_manager is None:
         _binding_manager = WeChatBindingManager()
     return _binding_manager
+
+
+# ── 配对码（微信绑定安全流程，内存态，重启即失效） ──────────
+
+# {code: (device_key, 过期时间戳)}
+_pairing_codes: dict[str, tuple[str, float]] = {}
+
+PAIRING_CODE_TTL_SECONDS = 600  # 配对码默认有效期（10 分钟）
+
+
+def create_pairing_code(device_key: str, ttl_seconds: int = PAIRING_CODE_TTL_SECONDS) -> str:
+    """为设备生成 6 位随机配对码（secrets 生成，ttl 秒内有效，一次性使用）"""
+    # 顺带清理已过期的配对码，避免内存无限增长
+    now = time.time()
+    for c in [c for c, (_, exp) in _pairing_codes.items() if exp <= now]:
+        _pairing_codes.pop(c, None)
+
+    code = f"{secrets.randbelow(1000000):06d}"
+    _pairing_codes[code] = (device_key, now + ttl_seconds)
+    logger.info(f"[WeChatBind] 生成配对码: device={device_key[:16]}, ttl={ttl_seconds}s")
+    return code
+
+
+def consume_pairing_code(code: str) -> Optional[str]:
+    """校验并消费配对码：有效且未过期返回 device_key（一次性，用后即删），否则返回 None"""
+    item = _pairing_codes.pop(str(code).strip(), None)
+    if item is None:
+        logger.info(f"[WeChatBind] 配对码无效: 未找到或不一致")
+        return None
+    device_key, expires = item
+    if time.time() > expires:
+        logger.info(f"[WeChatBind] 配对码已过期")
+        return None
+    logger.info(f"[WeChatBind] 配对码消费成功: device={device_key[:16]}")
+    return device_key

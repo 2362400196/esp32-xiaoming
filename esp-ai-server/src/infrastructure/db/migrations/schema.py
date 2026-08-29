@@ -68,6 +68,12 @@ async def init_db() -> None:
         # === Schema 迁移：先读取现有列，再只补缺失的列 ===
         devices_cols = await _existing_columns(conn, "devices")
         marketplace_cols = await _existing_columns(conn, "marketplace_plugins")
+        users_cols = await _existing_columns(conn, "users")
+
+        # token_version：JWT 吊销版本号（改密码/停用用户时 +1），旧库补列默认 0
+        await _ensure_column(conn, "users", "token_version",
+            "ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0",
+            users_cols)
 
         await _ensure_column(conn, "devices", "management_api_key",
             "ALTER TABLE devices ADD COLUMN management_api_key VARCHAR(256) NOT NULL DEFAULT ''",

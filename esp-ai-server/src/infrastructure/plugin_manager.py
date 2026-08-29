@@ -416,8 +416,42 @@ class PluginManager:
             except Exception as e:
                 logger.warning(f"[插件管理] 清理插件状态目录失败（不影响卸载）: {e}")
 
+        # 3.6 清理插件的 KV 文件（所有设备）与 data 目录残留（容错，不影响卸载）
+        self._cleanup_plugin_data(plugin_name)
+
         logger.info(f"[插件管理] 插件 {plugin_name} 已卸载")
         return {"success": True, "message": f"插件 {plugin_name} 已卸载"}
+
+    def _cleanup_plugin_data(self, plugin_id: str) -> None:
+        """清理插件的 KV 文件与数据目录残留（全部容错，不影响卸载主流程）。
+
+        - KV：data/plugins/kv/{device_id}/{plugin_id}.json（按设备隔离）+
+              全局 data/plugins/kv/{plugin_id}.json
+        - 数据目录：data/plugins/data/{plugin_id}/
+        """
+        kv_root = self.INSTALLED_DIR.parent / "kv"
+        try:
+            if kv_root.is_dir():
+                # 设备级 KV：遍历所有设备目录删除该插件的 KV 文件
+                for kv_file in kv_root.glob(f"*/{plugin_id}.json"):
+                    try:
+                        kv_file.unlink()
+                    except OSError as e:
+                        logger.warning(f"[插件管理] 删除 KV 文件失败: {kv_file}: {e}")
+                # 全局 KV（兼容单设备场景）
+                global_kv = kv_root / f"{plugin_id}.json"
+                if global_kv.is_file():
+                    try:
+                        global_kv.unlink()
+                    except OSError as e:
+                        logger.warning(f"[插件管理] 删除全局 KV 失败: {global_kv}: {e}")
+        except Exception as e:
+            logger.warning(f"[插件管理] 清理插件 KV 失败（不影响卸载）: {e}")
+
+        # 插件数据目录（如闹钟插件的 stats.json / history.json）
+        data_dir = self.INSTALLED_DIR.parent / "data" / plugin_id
+        if data_dir.is_dir():
+            shutil.rmtree(data_dir, ignore_errors=True)
 
     async def _do_unload(self, plugin_name: str) -> None:
         """注销插件工具（不删除目录，供安装覆盖时复用）。"""
@@ -470,10 +504,34 @@ class PluginManager:
                 shutil.rmtree(backup_path, ignore_errors=True)
             shutil.copytree(dest_dir, backup_path)
             logger.info(f"[插件管理] 已备份插件 {plugin_id} v{version} -> {backup_path}")
+            # 顺带清理旧备份：每个插件只保留最近 3 份
+            self._prune_backups(plugin_id)
             return version
         except Exception as e:
             logger.warning(f"[插件管理] 备份插件 {plugin_id} 失败（不影响安装）: {e}")
             return None
+
+    def _prune_backups(self, plugin_id: str, keep: int = 3) -> None:
+        """保留每个插件最近 keep 份备份，更旧的删除（容错，不影响安装）。"""
+        try:
+            plugin_backup_dir = self.BACKUP_DIR / plugin_id
+            if not plugin_backup_dir.is_dir():
+                return
+            versions = sorted(
+                (d for d in plugin_backup_dir.iterdir() if d.is_dir()),
+                key=lambda d: d.stat().st_mtime,
+                reverse=True,
+            )
+            removed = 0
+            for old in versions[keep:]:
+                shutil.rmtree(old, ignore_errors=True)
+                removed += 1
+            if removed:
+                logger.info(
+                    f"[插件管理] 已清理插件 {plugin_id} 的 {removed} 份旧备份（保留最近 {keep} 份）"
+                )
+        except Exception as e:
+            logger.warning(f"[插件管理] 清理旧备份失败（不影响安装）: {e}")
 
     async def _rollback(self, plugin_id: str, version: str) -> str:
         """回滚插件到指定备份版本。

@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 
 from fastapi import Depends, APIRouter, Form, Request, UploadFile, File, HTTPException, Response
@@ -23,7 +24,7 @@ from src.infrastructure.emo_pack import (
 )
 from src.infrastructure.gif_processor import (
     process_gif, validate_size,
-    describe_sources, build_emo_gif, MAX_SOURCES,
+    describe_sources, build_emo_gif, MAX_SOURCES, MAX_FRAME_ORDER,
 )
 
 logger = get_logger(__name__)
@@ -121,10 +122,10 @@ async def api_upload_to_pack(pack_name: str, file: UploadFile = File(...), name:
     if len(content) > MAX_UPLOAD_SIZE:
         return {"code": 1, "message": f"文件过大，最大支持 {MAX_UPLOAD_SIZE // 1024 // 1024}MB"}
 
-    # 按用户选择的尺寸裁剪+缩放+压缩 GIF
+    # 按用户选择的尺寸裁剪+缩放+压缩 GIF（Pillow 密集操作放入线程，避免阻塞事件循环）
     target_size = validate_size(size)
     if target_size > 0:
-        content = process_gif(content, target_size)
+        content = await asyncio.to_thread(process_gif, content, target_size)
 
     with open(str(save_path), "wb") as f:
         f.write(content)
@@ -155,10 +156,10 @@ async def upload_emo_compat(file: UploadFile = File(...), device_key: str = "", 
     if len(content) > MAX_UPLOAD_SIZE:
         return {"code": 1, "message": f"文件过大，最大支持 {MAX_UPLOAD_SIZE // 1024 // 1024}MB"}
 
-    # 按用户选择的尺寸裁剪+缩放+压缩 GIF
+    # 按用户选择的尺寸裁剪+缩放+压缩 GIF（Pillow 密集操作放入线程，避免阻塞事件循环）
     target_size = validate_size(size)
     if target_size > 0:
-        content = process_gif(content, target_size)
+        content = await asyncio.to_thread(process_gif, content, target_size)
 
     with open(str(save_path), "wb") as f:
         f.write(content)
@@ -193,7 +194,8 @@ async def api_maker_sources(
             return {"code": 1, "message": f"单个素材最大 {MAX_UPLOAD_SIZE // 1024 // 1024}MB"}
         name = str(f.filename or "素材").replace("\\", "/").split("/")[-1]
         contents.append((name, data))
-    sources = describe_sources(contents, max_frames, thumb_size)
+    # Pillow 密集操作放入线程池，避免阻塞事件循环
+    sources = await asyncio.to_thread(describe_sources, contents, max_frames, thumb_size)
     if not any(s.get("valid") for s in sources):
         return {"code": 1, "message": "无法解析任何素材，请上传 GIF/PNG/JPG/WebP 图片"}
     return {"code": 0, "message": "ok", "data": {"sources": sources}}
@@ -221,6 +223,9 @@ async def api_maker_process(
     frame_order = p.get("frames")
     if not isinstance(frame_order, list) or not frame_order:
         return {"code": 1, "message": "未选择任何帧"}
+    # 帧序列长度上限：防止超长序列重复解码素材造成 CPU DoS
+    if len(frame_order) > MAX_FRAME_ORDER:
+        return {"code": 1, "message": f"帧序列过长，最多 {MAX_FRAME_ORDER} 帧"}
     if len(files) > MAX_SOURCES:
         return {"code": 1, "message": "素材过多"}
     contents: list[bytes] = []
@@ -245,7 +250,11 @@ async def api_maker_process(
         loop = 0
     fit = p.get("fit") if p.get("fit") in ("crop", "fit") else "crop"
 
-    gif = build_emo_gif(contents, frame_order, target_size=size, delay=delay, loop=loop, fit=fit)
+    # Pillow 密集操作放入线程池，避免阻塞事件循环
+    gif = await asyncio.to_thread(
+        build_emo_gif, contents, frame_order,
+        target_size=size, delay=delay, loop=loop, fit=fit,
+    )
     if not gif:
         return {"code": 1, "message": "合成失败：帧索引无效或素材不可解码"}
     return Response(

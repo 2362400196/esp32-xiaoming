@@ -766,8 +766,16 @@ def _clear_plugin_data(plugin_name: str) -> None:
     import os, shutil
     from src.infrastructure.plugin_loader import _PROJECT_ROOT
 
-    # 1. KV 文件
-    kv_path = _PROJECT_ROOT / "data" / "plugins" / "kv" / f"{plugin_name}.json"
+    # 1. KV 文件：按设备目录 glob 删除（data/plugins/kv/{device_id}/{plugin_name}.json）
+    #    修复旧逻辑只删全局文件的 bug；同时保留全局文件清理（兼容单设备场景）
+    kv_root = _PROJECT_ROOT / "data" / "plugins" / "kv"
+    if kv_root.is_dir():
+        for kv_file in kv_root.glob(f"*/{plugin_name}.json"):
+            try:
+                kv_file.unlink()
+            except OSError as e:
+                logger.warning(f"[卸载] 删除设备 KV 文件失败: {kv_file}: {e}")
+    kv_path = kv_root / f"{plugin_name}.json"
     if kv_path.is_file():
         try:
             kv_path.unlink()
@@ -843,8 +851,22 @@ async def uninstall_optional_plugin(
     if is_system_plugin(name):
         return {"code": 1, "message": f"「{name}」是系统核心插件，不可卸载", "data": None}
 
-    # 先从设备禁用
+    # 先从设备禁用（当前用户的设备）
     enabled = await _update_device_plugins(user, name, install=False, device_id=device_id)
+
+    # 从所有设备的 enabled_plugins 白名单移除该插件（清理失败不影响卸载主流程）
+    try:
+        affected = await _remove_plugin_from_all_devices(name)
+        for dev_id in affected:
+            try:
+                from src.infrastructure.web import _hot_reload_device_config
+                _hot_reload_device_config(dev_id)
+            except Exception:
+                pass
+        if affected:
+            logger.info(f"[卸载] 已从 {len(affected)} 个设备的启用列表移除插件: {name}")
+    except Exception as e:
+        logger.warning(f"[卸载] 清理设备启用列表失败（不影响卸载）: {e}")
 
     # 用户安装的插件：禁用 + 停止子进程 + 删除插件目录
     source = get_plugin_source(name)
@@ -887,6 +909,28 @@ async def _get_user_enabled_plugins(user) -> set[str]:
             return set()
         enabled = model.enabled_plugins or []
         return set(enabled)
+
+
+async def _remove_plugin_from_all_devices(plugin_name: str) -> list[str]:
+    """从所有设备的 enabled_plugins 白名单中移除该插件（卸载时调用，直接 DB 更新）。
+
+    Returns:
+        受影响的设备 device_id 列表（用于热重载在线设备）。
+    """
+    from src.infrastructure.db.session import get_session_ctx
+    from src.infrastructure.db.models.device import DeviceModel
+    from sqlalchemy import select
+
+    affected: list[str] = []
+    async with get_session_ctx() as session:
+        result = await session.execute(select(DeviceModel))
+        for model in result.scalars():
+            enabled = model.enabled_plugins or []
+            if plugin_name in enabled:
+                model.enabled_plugins = [p for p in enabled if p != plugin_name]
+                session.add(model)
+                affected.append(model.device_id)
+    return affected
 
 
 async def _update_device_plugins(user, plugin_name: str, install: bool, device_id: str | None = None) -> list[str]:

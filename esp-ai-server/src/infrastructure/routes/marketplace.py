@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import io
 import json
-import mimetypes
 import re
 import secrets
 import zipfile
@@ -64,6 +63,45 @@ _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+([\-+][0-9A-Za-z.\-]+)?$")
 # 上传 zip 大小上限：50MB
 _MAX_UPLOAD_SIZE = 50 * 1024 * 1024
 
+# ==================== zip 解压炸弹防护 ====================
+# 解压后大小与 zip 压缩包大小无关（zip 炸弹），读取任何成员前必须校验声明大小。
+MAX_ZIP_MEMBER_SIZE = 5 * 1024 * 1024        # 单个成员解压后上限：5MB
+MAX_ZIP_TOTAL_UNCOMPRESSED = 20 * 1024 * 1024  # 所有已读成员累计解压后上限：20MB
+MAX_ZIP_MEMBERS = 200                         # 已读成员数量上限
+
+
+def create_zip_read_state() -> dict:
+    """创建 zip 读取限额状态（跨多次 read_zip_member_checked 累计计数）。"""
+    return {"total": 0, "count": 0}
+
+
+def read_zip_member_checked(zf: zipfile.ZipFile, name: str, state: dict | None = None) -> bytes:
+    """按防解压炸弹限额读取 zip 成员内容。
+
+    读取前检查 ``ZipInfo.file_size``（解压后大小），超限抛 ValueError：
+    - 单文件解压后上限 5MB
+    - 累计解压后上限 20MB（同一 state 跨成员累计）
+    - 已读文件数上限 200
+    """
+    if state is None:
+        state = create_zip_read_state()
+    info = zf.getinfo(name)
+    state["count"] += 1
+    if state["count"] > MAX_ZIP_MEMBERS:
+        raise ValueError(f"zip 内文件数超过上限（{MAX_ZIP_MEMBERS} 个）")
+    if info.file_size > MAX_ZIP_MEMBER_SIZE:
+        raise ValueError(
+            f"zip 内文件解压后过大: {name}（{info.file_size // 1024 // 1024 + 1}MB，"
+            f"单文件上限 {MAX_ZIP_MEMBER_SIZE // 1024 // 1024}MB）"
+        )
+    state["total"] += info.file_size
+    if state["total"] > MAX_ZIP_TOTAL_UNCOMPRESSED:
+        raise ValueError(
+            f"zip 解压后总大小超过上限（{MAX_ZIP_TOTAL_UNCOMPRESSED // 1024 // 1024}MB）"
+        )
+    with zf.open(name) as f:
+        return f.read()
+
 # 商店固定分类：基于插件 provides 能力（ASR/LLM/TTS/其他工具）
 STORE_CATEGORIES = [
     {"name": "ASR", "key": "asr"},
@@ -93,12 +131,20 @@ def _extract_icon_from_zip(zip_bytes: bytes, icon_name: str) -> bytes | None:
         zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
     except zipfile.BadZipFile:
         return None
+    state = create_zip_read_state()
     try:
-        return zf.read(icon_name)
+        # 限额读取，防 zip 炸弹（超限抛 ValueError）
+        return read_zip_member_checked(zf, icon_name, state)
     except KeyError:
         for n in zf.namelist():
             if n.endswith("/" + icon_name) and n.count("/") == 1:
-                return zf.read(n)
+                try:
+                    return read_zip_member_checked(zf, n, state)
+                except ValueError:
+                    return None
+        return None
+    except ValueError:
+        # 图标超限：上传流程按未提取图标处理（返回 None）
         return None
 
 
@@ -298,7 +344,12 @@ def _read_manifest_from_zip(zip_bytes: bytes) -> tuple[dict, set]:
         raise ValueError(f"zip 包缺少 plugin.py（期望路径: {plugin_name}）")
 
     try:
-        manifest = json.loads(zf.read(manifest_name).decode("utf-8"))
+        manifest = json.loads(
+            read_zip_member_checked(zf, manifest_name).decode("utf-8")
+        )
+    except ValueError as e:
+        # manifest 解压后超限（zip 炸弹防护）
+        raise ValueError(f"manifest.json 读取失败: {e}")
     except Exception as e:
         raise ValueError(f"manifest.json 解析失败: {e}")
     if not isinstance(manifest, dict):
@@ -374,11 +425,14 @@ def _read_source_from_zip(zip_bytes: bytes) -> dict:
     if plugin_name not in names:
         raise ValueError("zip 包缺少 plugin.py")
 
-    manifest_raw = zf.read(manifest_name).decode("utf-8")
-    plugin_code = zf.read(plugin_name).decode("utf-8")
+    manifest_raw = read_zip_member_checked(zf, manifest_name).decode("utf-8")
+    plugin_code = read_zip_member_checked(zf, plugin_name).decode("utf-8")
     manifest = json.loads(manifest_raw)
 
     # 收集所有文本文件（相对路径，跳过 __MACOSX 与目录条目）
+    state = create_zip_read_state()
+    state["total"] = len(manifest_raw) + len(plugin_code)  # 已读文件计入累计限额
+    state["count"] = 2
     files = []
     for n in sorted(zf.namelist()):
         if n.endswith("/") or n.startswith("__MACOSX"):
@@ -386,18 +440,21 @@ def _read_source_from_zip(zip_bytes: bytes) -> dict:
         if n == manifest_name or n == plugin_name:
             continue
         try:
-            content = zf.read(n).decode("utf-8")
+            # 限额读取，防 zip 炸弹（单文件/累计超限抛 ValueError）
+            data = read_zip_member_checked(zf, n, state)
+        except KeyError:
+            continue
+        try:
+            content = data.decode("utf-8")
             files.append({"name": n, "content": content})
         except UnicodeDecodeError:
             # 二进制文件（如图标 png/jpg）以 base64 返回，编辑后重新打包时保留
             import base64
             files.append({
                 "name": n,
-                "content": base64.b64encode(zf.read(n)).decode("ascii"),
+                "content": base64.b64encode(data).decode("ascii"),
                 "binary": True,
             })
-        except KeyError:
-            continue
 
     return {
         "manifest": manifest,
@@ -465,7 +522,11 @@ async def upload_plugin(
     if icon:
         icon_bytes = _extract_icon_from_zip(zip_bytes, icon)
         if icon_bytes:
-            icon_file = await save_icon(icon_bytes, slug, icon)
+            try:
+                icon_file = await save_icon(icon_bytes, slug, icon)
+            except ValueError as e:
+                # 图标扩展名/内容非白名单图片，拒绝上传（400）
+                raise HTTPException(status_code=400, detail=str(e))
 
     async with get_session_ctx() as session:
         result = await session.execute(
@@ -685,7 +746,11 @@ async def update_plugin_source(
     if m_icon:
         icon_bytes = _extract_icon_from_zip(zip_bytes, m_icon)
         if icon_bytes:
-            icon_file = await save_icon(icon_bytes, slug, m_icon)
+            try:
+                icon_file = await save_icon(icon_bytes, slug, m_icon)
+            except ValueError as e:
+                # 图标扩展名/内容非白名单图片，拒绝上传（400）
+                raise HTTPException(status_code=400, detail=str(e))
 
     changelog = body.changelog or m_changelog
 
@@ -794,7 +859,11 @@ async def create_plugin_from_code(
     if icon:
         icon_bytes = _extract_icon_from_zip(zip_bytes, icon)
         if icon_bytes:
-            icon_file = await save_icon(icon_bytes, slug, icon)
+            try:
+                icon_file = await save_icon(icon_bytes, slug, icon)
+            except ValueError as e:
+                # 图标扩展名/内容非白名单图片，拒绝上传（400）
+                raise HTTPException(status_code=400, detail=str(e))
 
     async with get_session_ctx() as session:
         plugin = MarketplacePluginModel(
@@ -1025,9 +1094,23 @@ async def download_plugin(slug: str, version: str = Query("latest")):
                         filename=f"{slug}-{target_version}.zip")
 
 
+# 图标响应 Content-Type 白名单（防存储型 XSS：svg/html 一律 404，绝不按原扩展名推断）
+_ICON_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+
 @router.get("/api/v1/marketplace/plugins/{slug}/icon")
 async def get_plugin_icon(slug: str):
-    """返回插件图标文件（未上传图标时返回 404）。"""
+    """返回插件图标文件（未上传图标时返回 404）。
+
+    安全：Content-Type 仅按扩展名白名单映射，非白名单文件 404；
+    响应带 nosniff + CSP sandbox，防止图标文件被浏览器当作 HTML/脚本执行（存储型 XSS）。
+    """
     async with get_session_ctx() as session:
         plugin = (await session.execute(
             select(MarketplacePluginModel).where(MarketplacePluginModel.slug == slug)
@@ -1039,8 +1122,19 @@ async def get_plugin_icon(slug: str):
     icon_path = MARKETPLACE_STORAGE_DIR / slug / icon_name
     if not icon_path.is_file():
         raise HTTPException(status_code=404, detail="图标文件不存在")
-    media_type = mimetypes.guess_type(icon_name)[0] or "image/png"
-    return FileResponse(path=str(icon_path), media_type=media_type)
+    media_type = _ICON_MIME_TYPES.get(icon_path.suffix.lower())
+    if media_type is None:
+        # 非白名单类型（svg/html 等）直接 404，防存储型 XSS
+        raise HTTPException(status_code=404, detail="不支持的图标类型")
+    return FileResponse(
+        path=str(icon_path),
+        media_type=media_type,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            # 禁止图标内容内的任何脚本/资源加载
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        },
+    )
 
 
 # ==================== 评论 ====================
@@ -1164,4 +1258,11 @@ async def list_categories():
     return {"code": 0, "message": "ok", "data": data}
 
 
-__all__ = ["router"]
+__all__ = [
+    "router",
+    "MAX_ZIP_MEMBER_SIZE",
+    "MAX_ZIP_TOTAL_UNCOMPRESSED",
+    "MAX_ZIP_MEMBERS",
+    "create_zip_read_state",
+    "read_zip_member_checked",
+]

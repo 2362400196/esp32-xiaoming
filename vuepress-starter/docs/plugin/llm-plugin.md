@@ -1,135 +1,15 @@
 # LLM 插件开发教程
-
-LLM（Large Language Model，大语言模型）插件是系统的 **AI 服务提供商**之一，负责把用户的识别文本转成智能回复，是语音交互闭环的核心一环：
-
-```
-用户说话 → ASR 识别 → [LLM 插件] → 回复文本 → TTS 播报
-```
-
-LLM 插件是所有语音服务插件中最复杂的一个，因为它不仅要流式输出文本，还要支持**工具调用（Function Calling）**——LLM 判断需要调用哪个工具（查天气、开灯、播放音乐等），插件把工具调用结果回传给 LLM 继续生成。本文以 **OpenAI 兼容接口（SSE 流式）** 为例，从原理到完整实现，带你写一个可上架的 LLM 服务插件。
-
 ::: tip 先看这个
 编写前建议先阅读 [插件开发教程](./plugin-dev.md) 了解插件基础概念，以及 [插件公共工具库（Plugin SDK）](./plugin-sdk.md) 了解 SDK 提供的流式 HTTP 封装。
 :::
 
-## 一、LLM 插件在系统中的位置
+LLM 插件把外部大模型服务接入系统：系统把对话消息交给插件，插件流式返回模型输出（可含工具调用）。本篇以 OpenAI 兼容接口（HTTP SSE）为例给出可直接改编的完整实现。
 
-### 1.1 与普通工具插件的区别
+开发者只需要关心两件事：**按契约实现 3 个工具**（下文表格），以及**对接你选择的模型服务**（直接改编文中的完整示例）。系统如何调度插件、工具调用链如何闭环，框架已全部处理，无需了解。
 
-| 维度 | 普通工具插件 | LLM 服务插件 |
-|------|-------------|-------------|
-| 调用方 | LLM 自主决策调用 | 系统语音流程按固定顺序调用 |
-| 数据形态 | 一次性请求/响应 | **流式**：token 边生成边返回 |
-| 状态管理 | 无状态 | **跨多次调用**保存会话状态 |
-| 底层依赖 | `http_request` | HTTP SSE 流式 |
-| 返回值 | 文本（会被 TTS 播报） | 结构化 dict（`chat_id`/`token`/`done`） |
-| 声明方式 | 普通 manifest | `provides: {"llm": [...]}` 声明服务能力 |
+先读 [插件开发教程](./plugin-dev.md) 了解基础概念。
 
-### 1.2 系统如何调用 LLM 插件
-
-系统在设备建立 WebSocket 连接时，通过 `create_plugin_llm_gateway()` 检查是否有已注册的 LLM 服务插件。**只要插件声明了 `provides.llm` 且必需工具齐全，系统就优先走插件网关**，否则回退到内置的 `OpenAILLMGateway`。
-
-```
-设备连接
-  ↓
-ws_session_handler 初始化 LLM
-  ├─ 有 LLM 插件 → PluginLLMGateway
-  │     └─ 通过 service_plugin_adapter 调用插件工具（含工具调用链）
-  └─ 无 LLM 插件 → 传统网关（create_llm_gateway）
-```
-
-插件网关 `PluginLLMGateway` 实现了与内置 `OpenAILLMGateway` 相同的 duck-typing 接口（`stream_chat` / `generate` / `_resolve_config`），因此 **Pipeline 代码无需任何修改**。
-
-### 1.3 工具调用链（重要）
-
-与 ASR/TTS 不同，LLM 插件**必须支持工具调用**。系统在 `service_plugin_adapter.call_llm_chat` 中实现了完整的工具调用循环：
-
-```
-用户消息 → 插件 start_chat（携带 tools schema）
-  ↓
-get_next 轮询 token（同时收集 tool_calls）
-  ↓
-finish_reason → 返回 tool_calls + done=True
-  ↓
-系统执行工具（tool_manager.call_tool）
-  ↓
-工具结果作为 tool 消息追加到 messages
-  ↓
-再次 start_chat（携带工具结果）→ 循环（最多 10 轮）
-```
-
-因此 LLM 插件需要：
-
-1. **接收 `config["tools"]`**：系统按用户查询预筛选相关工具的 schema，插件需把它放进请求的 `tools` 字段
-2. **解析流式 `tool_calls`**：OpenAI 流式中 `delta.tool_calls` 按 `index` 分片，插件需按 index 累积拼接
-3. **在 finish_reason 时一次性返回 tool_calls**：`get_next` 返回 `{"token": "", "tool_calls": [...], "done": True}`
-
-## 二、工作原理：HTTP SSE 流式
-
-### 2.1 数据流模型
-
-LLM 是**单向流式**：一次 POST 请求，服务端以 SSE（Server-Sent Events）逐行推送 token。OpenAI 兼容接口的 SSE 格式：
-
-```
-data: {"choices":[{"delta":{"content":"你"}}]}
-data: {"choices":[{"delta":{"content":"好"}}]}
-data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}
-data: [DONE]
-```
-
-整个对话生命周期：
-
-```
-┌──────────────┐      ┌──────────────┐      ┌──────────────┐
-│ start_chat   │──→  │ get_next 循环  │──→  │ end_chat     │
-│ 打开流式请求   │      │  逐 token 读取  │      │  关闭流+清理   │
-└──────────────┘      └──────────────┘      └──────────────┘
-       │                      │                      │
-       │  返回 chat_id         │  返回 token/done      │
-       ▼                      ▼                      ▼
-```
-
-- **`start_chat`**：发起流式 POST 请求，返回 `chat_id`
-- **`get_next`**：从 SSE 流读取下一个 token（或工具调用）
-- **`end_chat`**：关闭流并清理
-
-### 2.2 真流式 vs 假流式
-
-| 方式 | 实现 | 首字延迟 |
-|------|------|---------|
-| **真流式**（推荐） | `http_stream_open/read` 逐行读取响应体 | 低（token 边生成边返回） |
-| 假流式 | `http_request` 一次性缓冲后逐字符模拟 | 高（需等完整响应） |
-
-**必须用真流式**。`http_stream_open` 请求发出后立即返回 `stream_id`，响应体由后台任务逐行读取，`http_stream_read` 每次取一行。
-
-### 2.3 工具调用（Function Calling）
-
-OpenAI 兼容接口的工具调用在流式中按 `index` 分片：
-
-```json
-data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_xxx","function":{"name":"get_weather","arguments":""}}]}}]}
-data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]}}]}
-data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"北京\"}"}}]}}]}
-data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
-```
-
-插件需要按 `index` 累积：
-
-```python
-for tc in delta.get("tool_calls") or []:
-    idx = tc.get("index", 0)
-    if idx not in raw_tool_calls:
-        raw_tool_calls[idx] = {"id": "", "function_name": "", "arguments": ""}
-    if tc.get("id"):
-        raw_tool_calls[idx]["id"] = tc["id"]
-    fn = tc.get("function") or {}
-    if fn.get("name"):
-        raw_tool_calls[idx]["function_name"] = fn["name"]
-    if fn.get("arguments"):
-        raw_tool_calls[idx]["arguments"] += fn["arguments"]  # 分片拼接
-```
-
-## 三、工具约定（系统契约）
+## 一、工具约定（系统契约）
 
 系统通过 `service_plugin_adapter.py` 调用 LLM 插件，**工具名必须严格遵循以下约定**（插件 id 前缀 + 固定后缀）：
 
@@ -147,7 +27,7 @@ for tc in delta.get("tool_calls") or []:
 ```
 :::
 
-### 3.1 返回值约定
+### 1.1 返回值约定
 
 所有 LLM 工具返回**结构化 dict**（而非文本），统一格式：
 
@@ -169,7 +49,7 @@ for tc in delta.get("tool_calls") or []:
 LLM 工具**全部**要设 `@tool(cache=False)`。默认缓存会在相同参数下 300 秒内跳过函数体，导致第二次对话直接返回旧结果。
 :::
 
-### 3.2 工具调用返回格式
+### 1.2 工具调用返回格式
 
 `get_next` 在 `finish_reason` 时返回的 `tool_calls` 列表，每项格式：
 
@@ -186,11 +66,11 @@ LLM 工具**全部**要设 `@tool(cache=False)`。默认缓存会在相同参数
 系统适配层会**先收集 `tool_calls` 再判断 `done`**。插件必须在 `finish_reason` 时一次性返回累积好的 `tool_calls` + `done=True`，否则工具调用会被丢弃。
 :::
 
-## 四、完整代码实现
+## 二、完整代码实现
 
 下面以 **OpenAI 兼容 LLM 插件**（`llm_openai`）为例，给出完整可运行的实现。这是系统内置的参考实现，可直接作为模板，支持 DeepSeek、通义千问、Kimi 等所有 OpenAI 兼容接口。
 
-### 4.1 文件结构
+### 2.1 文件结构
 
 ```
 llm_openai/
@@ -198,7 +78,7 @@ llm_openai/
 └── plugin.py        # 工具实现
 ```
 
-### 4.2 manifest.json
+### 2.2 manifest.json
 
 ```json
 {
@@ -227,7 +107,7 @@ ASR/LLM/TTS 服务插件**不需要**在 manifest 中声明 `config_fields`。�
 声明 `config_fields` 仅有两个作用：① 配置保存接口的键名白名单校验（防止拼错键名）；② 前端配置表单的字段元数据（标签/类型/默认值）。对服务插件而言这两者都不是必需的，因此可以省略，配置保存接口会接受任意键。
 :::
 
-### 4.3 plugin.py 完整代码
+### 2.3 plugin.py 完整代码
 
 ```python
 """OpenAI 兼容 LLM 服务插件（真流式）。
@@ -243,7 +123,7 @@ import logging
 import time
 import uuid
 
-from src.use_cases.tools_system import tool
+from src.use_cases.sdk.tools import tool
 from src.use_cases._plugin_helpers import (
     http_stream_open,
     http_stream_read,
@@ -417,123 +297,13 @@ async def llm_openai_end_chat(chat_id: str, tool_manager=None) -> dict:
     return {}
 ```
 
-## 五、代码逐段解析
+## 三、关键点与常见坑
 
-### 5.1 发起流式请求（`start_chat`）
-
-```python
-payload = {
-    "model": model,
-    "messages": messages,
-    "stream": True,
-}
-# 工具调用：config["tools"] 由框架适配层传入（已按用户查询预筛选）
-tools = cfg.get("tools")
-if tools:
-    payload["tools"] = tools
-    payload["tool_choice"] = "auto"
-
-stream_id, err = await http_stream_open(
-    "POST",
-    f"{base_url}/chat/completions",
-    headers={
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream",
-    },
-    content=json.dumps(payload),
-    timeout=30.0,
-)
-```
-
-关键点：
-
-- **`Accept: text/event-stream`**：告诉服务端返回 SSE 流
-- **`config["tools"]`**：由框架适配层注入（`service_plugin_adapter` 按用户查询预筛选相关工具的 schema），插件只需透传
-- **`timeout=30.0`**：连接超时，避免长时间阻塞
-
-### 5.2 SSE 行解析（`get_next`）
-
-SSE 流逐行读取，解析规则：
-
-```python
-line = line.strip()
-if not line or line.startswith(":"):
-    continue                    # 跳过空行和注释行
-if not line.startswith("data:"):
-    continue                    # 跳过非 data 行
-data = line[5:].strip()
-if data == "[DONE]":
-    session["done"] = True      # 流结束
-    return {"token": "", "done": True, "error": None}
-```
-
-### 5.3 空 token 轮询
-
-`http_stream_read` 超时返回 `(None, None)`，此时 LLM 仍在生成，应返回空 token 让上层继续轮询，**不要**把它当流结束：
-
-```python
-line, err = await http_stream_read(session["stream_id"], timeout=0.3)
-if line is None:
-    return {"token": "", "done": False, "error": None}  # 继续轮询
-```
-
-### 5.4 工具调用累积
-
-OpenAI 流式工具调用按 `index` 分片，`arguments` 是分片字符串，需要拼接：
-
-```python
-for tc in delta.get("tool_calls") or []:
-    idx = tc.get("index", 0)
-    if idx not in session["raw_tool_calls"]:
-        session["raw_tool_calls"][idx] = {"id": "", "function_name": "", "arguments": ""}
-    if tc.get("id"):
-        session["raw_tool_calls"][idx]["id"] = tc["id"]
-    fn = tc.get("function") or {}
-    if fn.get("name"):
-        session["raw_tool_calls"][idx]["function_name"] = fn["name"]
-    if fn.get("arguments"):
-        session["raw_tool_calls"][idx]["arguments"] += fn["arguments"]  # 分片拼接
-```
-
-### 5.5 finish_reason 一次性返回
-
-在 `finish_reason` 时，把累积好的工具调用**一次性**返回（`done=True`）：
-
-```python
-if choices[0].get("finish_reason"):
-    session["done"] = True
-    tool_calls = [
-        {
-            "id": v["id"],
-            "function_name": v["function_name"],
-            "arguments": v["arguments"],
-            "index": i,
-        }
-        for i, v in sorted(session["raw_tool_calls"].items())
-        if v["function_name"]
-    ]
-    return {"token": "", "tool_calls": tool_calls, "done": True, "error": None}
-```
-
-### 5.6 首 token 延迟统计
-
-参考实现记录了首 token 延迟（TTFT），用于性能诊断：
-
-```python
-if not session["first_token_logged"]:
-    session["first_token_logged"] = True
-    ttft = (time.time() - session["start_time"]) * 1000
-    logger.info(f"[llm_openai] 首 token 延迟: {ttft:.0f} ms")
-```
-
-## 六、关键点与常见坑
-
-### 6.1 真流式 vs 假流式
+### 3.1 真流式 vs 假流式
 
 **必须用 `http_stream_open/read` 逐行读取响应体**（真流式）。不要用 `http_request` 一次性缓冲后逐字符模拟（假流式），假流式的首字延迟会很高，因为要等完整响应返回。
 
-### 6.2 推理模型的 reasoning_content
+### 3.2 推理模型的 reasoning_content
 
 部分模型（如 DeepSeek-R1）先输出 `reasoning_content`（思考过程）再输出 `content`（正式回复）。首字延迟会包含推理耗时。参考实现会检测并记录：
 
@@ -544,11 +314,11 @@ if reasoning and not session["reasoning_seen"]:
     logger.info("检测到 reasoning_content（模型在思考），首字延迟将包含推理耗时")
 ```
 
-### 6.3 工具调用顺序
+### 3.3 工具调用顺序
 
 **必须先收集 `tool_calls` 再判断 `done`**。如果先判断 `done` 返回，工具调用会被丢弃，导致 LLM 无法执行工具。
 
-### 6.4 兼容性
+### 3.4 兼容性
 
 OpenAI 兼容接口（DeepSeek、通义千问、Kimi 等）都可用此模板，只需改 `base_url` 和 `model`：
 
@@ -559,9 +329,9 @@ OpenAI 兼容接口（DeepSeek、通义千问、Kimi 等）都可用此模板，
 | 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
 | Kimi | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` |
 
-## 七、安装与配置
+## 四、安装与配置
 
-### 7.1 打包上传
+### 4.1 打包上传
 
 将 `manifest.json` 和 `plugin.py` 打成 zip 包：
 
@@ -579,7 +349,7 @@ Compress-Archive -Path manifest.json,plugin.py -DestinationPath llm_openai-1.0.0
 
 登录 Web 管理界面 → **插件市场 → 开发者** tab → 开启开发者模式 → 拖入 zip 上传。
 
-### 7.2 配置参数
+### 4.2 配置参数
 
 安装后在设备级插件配置中填写：
 
@@ -589,7 +359,7 @@ Compress-Archive -Path manifest.json,plugin.py -DestinationPath llm_openai-1.0.0
 | `base_url` | 接口地址，如 `https://api.deepseek.com/v1` |
 | `model` | 模型名，如 `deepseek-chat` |
 
-### 7.3 验证生效
+### 4.3 验证生效
 
 上传并配置后，查看服务端日志确认服务已注册：
 
@@ -600,9 +370,9 @@ Compress-Archive -Path manifest.json,plugin.py -DestinationPath llm_openai-1.0.0
 
 设备连接时日志出现 `[WS] 使用 LLM 插件网关` 即表示插件模式生效。
 
-## 八、调试与排错
+## 五、调试与排错
 
-### 8.1 日志
+### 5.1 日志
 
 插件中可用 `logging.getLogger("plugin.<插件id>")` 打日志，管理员可在 Web 界面查看插件日志：
 
@@ -614,7 +384,7 @@ logger.info(f"[llm_openai] 首 token 延迟: {ttft:.0f} ms")
 logger.info("[llm_openai] 检测到 reasoning_content（模型在思考）")
 ```
 
-### 8.2 常见问题
+### 5.2 常见问题
 
 | 现象 | 原因 | 排查 |
 |------|------|------|
@@ -626,7 +396,7 @@ logger.info("[llm_openai] 检测到 reasoning_content（模型在思考）")
 | 首字延迟高 | 推理模型 / 假流式 | 确认用 `http_stream_open/read` 真流式；推理模型首字含思考耗时 |
 | 无限轮询不结束 | 未处理 `[DONE]` | 确认 `[DONE]` 和 `finish_reason` 都置 `done=True` |
 
-### 8.3 性能优化建议
+### 5.3 性能优化建议
 
 | 优化项 | 说明 |
 |--------|------|
@@ -634,7 +404,7 @@ logger.info("[llm_openai] 检测到 reasoning_content（模型在思考）")
 | 首 token 延迟 | 优先选择非推理模型；减少上下文长度（记忆注入） |
 | 连接复用 | 框架已实现 HTTP 连接池复用（keep-alive），无需插件处理 |
 
-## 九、接入其他 LLM 厂商
+## 六、接入其他 LLM 厂商
 
 换厂商只需改配置，代码完全复用：
 

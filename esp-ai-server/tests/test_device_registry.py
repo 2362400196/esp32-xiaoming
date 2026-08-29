@@ -252,6 +252,38 @@ class TestUnregister:
         await reg.unregister("d1")
         assert "d1" not in reg._devices
 
+    async def test_unregister_session_mismatch_skips(self):
+        """重连竞态：注册表中 session 已被新会话覆盖时，旧会话迟到的注销应跳过（不杀新会话）"""
+        reg = DeviceRegistry()
+        old_session = _make_session()
+        old_tm = _make_tool_manager()
+        await reg.register("d1", _make_channel(), old_session, _make_fsm(), tool_manager=old_tm)
+
+        # 设备重连：新会话先 register 覆盖条目
+        new_session = _make_session()
+        new_tm = _make_tool_manager()
+        await reg.register("d1", _make_channel(), new_session, _make_fsm(), tool_manager=new_tm)
+
+        # 旧 handler 迟到的 cleanup：传入旧 session → 属主不匹配，跳过注销
+        await reg.unregister("d1", session=old_session)
+        assert "d1" in reg._devices
+        assert reg._devices["d1"]["session"] is new_session
+        new_tm.cleanup.assert_not_awaited()
+
+        # 新会话自己注销：属主匹配，正常注销
+        await reg.unregister("d1", session=new_session)
+        assert "d1" not in reg._devices
+        new_tm.cleanup.assert_awaited()
+
+    async def test_unregister_session_none_keeps_old_behavior(self):
+        """session=None（默认）保持旧行为：无条件注销（兼容其他调用点）"""
+        reg = DeviceRegistry()
+        session = _make_session()
+        await reg.register("d1", _make_channel(), session, _make_fsm())
+        # 即使传入与注册表不一致的对象也不影响 None 路径
+        await reg.unregister("d1", session=None)
+        assert "d1" not in reg._devices
+
 
 # ============================================================
 # get / get_by_mac / resolve 同步查询

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import inspect
 import sys
 from pathlib import Path
 
@@ -73,6 +74,24 @@ _plugin_manifest: dict[str, object] = {}
 
 # 插件 → importlib 模块名（卸载时从 sys.modules 清理，确保重新加载生效）
 _plugin_module_names: dict[str, str] = {}
+
+# 插件 → 加载时新增到 sys.modules 的子模块名列表（卸载时一并清理，
+# 修复"插件升级后改了兄弟模块不生效"——旧兄弟模块残留在 sys.modules 中）
+_plugin_submodules: dict[str, list[str]] = {}
+
+
+def get_plugin_module(plugin_name: str):
+    """获取插件已加载的模块实例。
+
+    优先复用 plugin_loader 注册的合成模块（esp_ai_plugins_*），避免调用方
+    `from src.plugins.X.plugin import ...` 触发二次实例化——那会重复执行
+    @tool() 装饰器、与已注册的同名工具冲突。插件未加载时回退直接导入。
+    """
+    module_name = _plugin_module_names.get(plugin_name)
+    if module_name and module_name in sys.modules:
+        return sys.modules[module_name]
+    return importlib.import_module(f"src.plugins.{plugin_name}.plugin")
+
 
 # 插件 → 已加入 sys.path 的目录（支持 plugin.py 同目录 import 其他模块）
 _plugin_syspaths: dict[str, str] = {}
@@ -265,20 +284,53 @@ async def _load_plugin(plugin_name: str) -> bool:
 
     if source == "installed":
         return await _load_installed_plugin(plugin_name, plugin_dir)
-    return _load_builtin_plugin(plugin_name, plugin_dir, plugin_file)
+    return await _load_builtin_plugin(plugin_name, plugin_dir, plugin_file)
 
 
-def _load_builtin_plugin(plugin_name: str, plugin_dir: Path, plugin_file: Path) -> bool:
+async def _call_plugin_hook(plugin_name: str, hook_name: str) -> None:
+    """调用插件生命周期钩子（on_startup / on_shutdown），容错不影响主流程。
+
+    仅内置插件有进程内模块对象（从 sys.modules 取）；installed 沙箱插件
+    无进程内模块时静默跳过。
+    """
+    module_name = _plugin_module_names.get(plugin_name)
+    module = sys.modules.get(module_name) if module_name else None
+    if module is None:
+        return
+    hook = getattr(module, hook_name, None)
+    if not callable(hook):
+        return
+    try:
+        result = hook()
+        if inspect.isawaitable(result):
+            await result
+        logger.info(f"[插件] {plugin_name} {hook_name}() 已调用")
+    except Exception as e:
+        logger.warning(f"[插件] {plugin_name} {hook_name}() 执行异常（不影响主流程）: {e}")
+
+
+async def _load_builtin_plugin(plugin_name: str, plugin_dir: Path, plugin_file: Path) -> bool:
     """内置插件：进程内加载（受信任，仅做权限上下文守卫）。"""
     module_name = f"esp_ai_plugins_{plugin_name}"
     try:
         before = set(get_all_tools().keys())
+        # 记录执行前的模块集合，执行后 diff 出本插件新增的子模块
+        # （如 plugin.py import 的同目录兄弟模块），供卸载时从 sys.modules 清理
+        modules_before = set(sys.modules.keys())
         if str(plugin_dir) not in sys.path:
             sys.path.insert(0, str(plugin_dir))
             _plugin_syspaths[plugin_name] = str(plugin_dir)
         spec = importlib.util.spec_from_file_location(module_name, plugin_file)
         module = importlib.util.module_from_spec(spec)
+        # 必须先注册到 sys.modules 再执行：tool() 装饰器靠 sys.modules 解析
+        # 模块文件路径来区分系统/插件工具，缺失会导致插件工具被误判为内置工具，
+        # 进而触发"插件不允许覆盖系统工具"的误报（plugins/exec 导入同名模块时）
+        sys.modules[module_name] = module
         spec.loader.exec_module(module)
+        # diff 出新增子模块（含主模块本身），卸载/热重载时一并从 sys.modules 删除
+        _plugin_submodules[plugin_name] = sorted(
+            set(sys.modules.keys()) - modules_before
+        )
         after = set(get_all_tools().keys())
         _loaded_tools[plugin_name] = sorted(after - before)
 
@@ -291,6 +343,8 @@ def _load_builtin_plugin(plugin_name: str, plugin_dir: Path, plugin_file: Path) 
             f"[插件] 已加载: {plugin_name}（来源: built-in，版本: {_plugin_version[plugin_name]}，"
             f"工具: {_loaded_tools[plugin_name]}，名称: {_plugin_meta[plugin_name].get('name', plugin_name)}）"
         )
+        # 生命周期钩子：加载成功后调用 on_startup（异常不影响加载结果）
+        await _call_plugin_hook(plugin_name, "on_startup")
         return True
     except Exception as e:
         logger.error(f"[插件] 加载失败 {plugin_name}: {e}")
@@ -318,6 +372,8 @@ async def _load_installed_plugin(plugin_name: str, plugin_dir: Path) -> bool:
         f"[插件] 已加载: {plugin_name}（来源: installed，版本: {_plugin_version[plugin_name]}，"
         f"工具: {_loaded_tools[plugin_name]}，名称: {_plugin_meta[plugin_name].get('name', plugin_name)}，沙箱运行）"
     )
+    # 生命周期钩子：沙箱插件通常无进程内模块，_call_plugin_hook 会静默跳过
+    await _call_plugin_hook(plugin_name, "on_startup")
     return True
 
 
@@ -350,6 +406,9 @@ async def _unload_plugin(plugin_name: str) -> None:
     内置插件：注销工具 + 清理 sys.modules / sys.path。
     已安装插件：停止子进程沙箱 + 注销工具。
     """
+    # 生命周期钩子：卸载前调用 on_shutdown（需在注册表/sys.modules 清理前调用）
+    await _call_plugin_hook(plugin_name, "on_shutdown")
+
     old_tools = _loaded_tools.pop(plugin_name, [])
     old_source = _plugin_source.pop(plugin_name, None)
     old_manifest = _plugin_manifest.pop(plugin_name, None)
@@ -381,6 +440,14 @@ async def _unload_plugin(plugin_name: str) -> None:
     if module_name and module_name in sys.modules:
         del sys.modules[module_name]
 
+    # 清理本插件加载时新增的子模块（兄弟模块），确保重新加载时生效
+    for sub in _plugin_submodules.pop(plugin_name, []):
+        if sub != module_name and sub in sys.modules:
+            try:
+                del sys.modules[sub]
+            except KeyError:
+                pass
+
     added = _plugin_syspaths.pop(plugin_name, None)
     if added and added in sys.path:
         try:
@@ -392,11 +459,21 @@ async def _unload_plugin(plugin_name: str) -> None:
 async def reload_single_plugin(plugin_name: str) -> bool:
     """重载单个插件（安装/更新后调用）。
 
-    先卸载旧工具 → 再重新加载。返回是否成功。
+    先快照工具注册表 → 卸载旧工具 → 再重新加载。
+    加载失败时回滚恢复旧注册（工具/元数据），插件不再"重载失败即消失"。
+    返回是否成功。
     """
-    if plugin_name in _loaded_tools:
+    had_old = plugin_name in _loaded_tools
+    # 重载前快照（参考全量 reload_plugins 的事务回滚机制）
+    snapshot = _snapshot_registry() if had_old else None
+    if had_old:
         await _unload_plugin(plugin_name)
-    return await _load_plugin(plugin_name)
+    ok = await _load_plugin(plugin_name)
+    if not ok and snapshot is not None:
+        # 明确报错并回滚：恢复卸载前的工具注册与插件元数据
+        logger.error(f"[插件] 单插件热重载失败，已回滚旧版本: {plugin_name}")
+        _restore_registry(snapshot, failed_names={plugin_name})
+    return ok
 
 
 def get_plugin_of_tool(tool_name: str) -> str | None:
@@ -605,6 +682,7 @@ def _snapshot_registry() -> dict:
         "plugin_version": dict(_plugin_version),
         "plugin_manifest": dict(_plugin_manifest),
         "plugin_module_names": dict(_plugin_module_names),
+        "plugin_submodules": {k: list(v) for k, v in _plugin_submodules.items()},
         "plugin_syspaths": dict(_plugin_syspaths),
     }
 
@@ -638,6 +716,8 @@ def _restore_registry(snapshot: dict, failed_names: set[str]) -> None:
             _plugin_manifest[plugin_name] = snapshot["plugin_manifest"][plugin_name]
         if plugin_name in snapshot["plugin_module_names"]:
             _plugin_module_names[plugin_name] = snapshot["plugin_module_names"][plugin_name]
+        if plugin_name in snapshot.get("plugin_submodules", {}):
+            _plugin_submodules[plugin_name] = list(snapshot["plugin_submodules"][plugin_name])
         if plugin_name in snapshot["plugin_syspaths"]:
             _plugin_syspaths[plugin_name] = snapshot["plugin_syspaths"][plugin_name]
     if failed_names:

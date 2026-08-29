@@ -26,6 +26,46 @@
 安全：
     - 单条消息最大 MAX_MSG_BYTES 字节，防止内存炸弹。
     - 每条消息都是完整 JSON 行，行内不能有换行。
+
+SDK 操作类型（sdk_request.op）注册表：
+    op 名由 sdk_shim 桩函数发出、adjudicator._op_<op> 处理，权限见 adjudicator._OP_PERMS。
+
+    设备标识 / 配置（无权限）：
+        device_key            {}                                            -> str
+        resolve_device_key    {device_key}                                  -> str
+        plugin_config         {plugin, key, env_var, default}               -> str
+        skill_catalog         {}                                            -> str
+        plugin_log            {level, message}                              -> None
+
+    设备指令 / 状态（device）：
+        device_send_instruct      {command_id, data}                        -> None
+        device_send_command       {command_id, data}                        -> str|None
+        device_send_command_ack   {command_id, data, timeout}               -> [result, status, detail]
+        device_request_result     {command_id, future_attr, timeout, data, if_busy}
+                                                                            -> [result, status, detail]
+        device_is_online          {device_key}                              -> bool
+        device_get_info           {device_key}                              -> dict
+
+    设备 IO（device）——参数对照 src/use_cases/sdk/io.py：
+        gpio_mode     {pin, mode, device_key}        写操作  -> str  ("ok"/错误串)
+        gpio_write    {pin, value, device_key}       写操作  -> str  ("ok"/错误串)
+        gpio_read     {pin, device_key}              读操作  -> int  (0/1，失败 -1)
+        pwm_write     {pin, duty, freq, device_key}  写操作  -> str  ("ok"/错误串)
+        adc_read      {pin, device_key}              读操作  -> int  (0-4095，失败 -1)
+        servo_write   {pin, angle, device_key}       写操作  -> str  ("ok"/错误串)
+
+    音乐播放（device）——参数对照 src/use_cases/sdk/music.py：
+        play_music_url    {url, title, artist, duration, device_key,
+                           lyric_url, lyrics_offset}                    -> str  ("ok"/错误串)
+
+    HTTP（network）：
+        http_request      {method, url, params, headers, content, timeout} -> [status, body, err]
+        http_get_json     {url, params, headers, timeout}                  -> [data, err]
+        http_stream_open  {method, url, headers, content, timeout}         -> [stream_id, err]
+        http_stream_read  {stream_id, timeout}                             -> [line, err]
+        http_stream_close {stream_id}                                      -> None
+    （ltm_* / diary_* / device_config_* / env_read / llm_* / tts_synthesize /
+      plugin_data_* / kv_* / get_user_profile_summary / ws_* 等其余 op 详见 adjudicator._OP_PERMS）
 """
 
 from __future__ import annotations

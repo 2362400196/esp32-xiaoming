@@ -15,8 +15,16 @@ from src.infrastructure.logging import get_logger
 
 logger = get_logger(__name__)
 
+# 全局像素上限（3000 万像素），防止超大图片解码导致内存/CPU DoS
+Image.MAX_IMAGE_PIXELS = 30_000_000
+
 # 支持的尺寸选项（像素），0 表示保持原始尺寸
 SUPPORTED_SIZES = [0, 120, 160, 180, 240]
+
+# process_gif 处理帧数上限（超过截断，防超长动画 CPU DoS）
+MAX_PROCESS_FRAMES = 300
+# build_emo_gif 帧序列长度上限（防止超长 frame_order 重复解码素材造成 CPU DoS）
+MAX_FRAME_ORDER = 200
 
 
 def process_gif(content: bytes, target_size: int) -> bytes:
@@ -62,6 +70,10 @@ def process_gif(content: bytes, target_size: int) -> bytes:
                 pass
 
         for frame in ImageSequence.Iterator(img):
+            # 帧数上限：超过截断（防超长动画 CPU/内存 DoS）
+            if len(frames) >= MAX_PROCESS_FRAMES:
+                logger.debug("GIF 帧数超过上限 %d，截断处理", MAX_PROCESS_FRAMES)
+                break
             # 转为 RGBA 进行处理
             frame_rgba = frame.convert("RGBA")
             w, h = frame_rgba.size
@@ -339,6 +351,11 @@ def build_emo_gif(
     """
     out_rgba: list = []
     out_durations: list = []
+
+    # 帧序列长度上限：防止超长 frame_order 重复解码素材造成 CPU DoS
+    if len(frame_order) > MAX_FRAME_ORDER:
+        logger.debug("frame_order 超过上限 %d，截断", MAX_FRAME_ORDER)
+        frame_order = frame_order[:MAX_FRAME_ORDER]
 
     for item in frame_order:
         if not isinstance(item, dict):

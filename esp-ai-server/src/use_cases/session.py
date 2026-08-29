@@ -1147,6 +1147,21 @@ class Session:
         self.runtime.reset()
         self._pending_out_audio_over = False
 
+        # 关闭本会话持有的网关（每次连接都会新建，内含 AsyncOpenAI 的
+        # HTTPS 连接与 TTS 网关资源）——不释放的话进程退出时 GC 会在
+        # 已关闭的事件循环上报 'Event loop is closed'
+        for _gw_name in ("llm_processor", "tts_processor"):
+            _gw = getattr(self, _gw_name, None)
+            if _gw is not None and hasattr(_gw, "aclose"):
+                try:
+                    await asyncio.wait_for(_gw.aclose(), timeout=3.0)
+                except asyncio.TimeoutError:
+                    logger.warning(f"[Session:{self.session_id}] 关闭 {_gw_name} 超时")
+                except Exception as e:
+                    logger.debug(f"[Session:{self.session_id}] 关闭 {_gw_name} 异常: {e}")
+                setattr(self, _gw_name, None)
+        # asr_client 由连接层共享管理，此处只清理其预连接资源（上方 cancel_pre_asr）
+
         await self.set_tts_playing(False)
         self.tts_playback_done.set()
         self.tts_audio_ended.set()

@@ -165,13 +165,14 @@ class AlarmManager:
         return result
 
     async def start(self):
-        """启动后台检查协程"""
-        if self._task is not None:
+        """启动后台检查协程（幂等：已启动或任务仍在运行时重复调用无副作用）"""
+        if self._task is not None and not self._task.done():
             return
         self._task = background_task(self._check_loop(), name="alarm_check_loop")
         logger.info("[Alarm] 后台检查已启动 (task=%s)", hex(id(self._task)))
 
     async def stop(self):
+        """停止后台检查协程（幂等：未启动时重复调用无副作用）"""
         if self._task:
             self._task.cancel()
             self._task = None

@@ -7,6 +7,7 @@ WebSocketSessionHandler（见 ws_session_handler.py）。
 from __future__ import annotations
 
 import asyncio
+import re
 import secrets
 import string
 import time
@@ -30,6 +31,19 @@ def _generate_bind_code() -> str:
     """生成 6 位大写字母+数字绑定码（使用密码学安全随机数）"""
     chars = string.ascii_uppercase + string.digits
     return ''.join(secrets.choice(chars) for _ in range(6))
+
+
+# MAC 地址格式：AA:BB:CC:DD:EE:FF 或 AA-BB-CC-DD-EE-FF
+_MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$")
+
+
+def _is_valid_mac(mac: str) -> bool:
+    """校验 MAC 地址格式
+
+    安全修复：MAC 会作为 device_id / mac_address 入库并在管理界面渲染，
+    不校验则任意字符串（含 HTML/JS）可入库形成 stored XSS。
+    """
+    return bool(_MAC_RE.match(mac or ""))
 
 
 async def _send_bind_code_and_close(websocket: WebSocket, device_mac: str) -> None:
@@ -142,6 +156,15 @@ async def handle_websocket(websocket: WebSocket):
     if not device_key:
         if not device_mac:
             await websocket.close(code=4001, reason="Missing device identifier")
+            return
+
+        # 安全修复：MAC 格式校验——不合法的标识符拒绝入库，
+        # 防止任意字符串（含 HTML）作为 device_id/mac_address 入库形成 stored XSS
+        if not _is_valid_mac(device_mac):
+            logger.warning(
+                f"[WS][安全] 设备标识符 '{device_mac}' 不是合法 MAC 地址，拒绝连接并拒绝入库"
+            )
+            await websocket.close(code=4001, reason="Invalid device MAC format")
             return
 
         # 查 DB 看设备是否已绑定到用户

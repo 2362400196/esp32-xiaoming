@@ -48,6 +48,19 @@ class OpenAILLMGateway:
                 max_retries=0,  # 重试由 _retry 统一处理，避免 openai SDK 默认 2 次叠加
             )
 
+    async def aclose(self) -> None:
+        """关闭底层 HTTP 客户端（释放 SSL 连接）。
+
+        不关闭的话，进程退出时 GC 回收残存 transport 会在已关闭的事件循环上
+        调 __del__ → 'Event loop is closed' 报错刷屏。
+        """
+        if self.client is not None:
+            try:
+                await self.client.close()
+            except Exception as e:
+                logger.debug(f"[LLM] 关闭 AsyncOpenAI 客户端异常: {e}")
+            self.client = None
+
     def _resolve_config(self, user_config=None, device_id=None):
         api_key = self.api_key
         base_url = self.base_url

@@ -127,7 +127,12 @@ def tool(name: str | None = None, description: str | None = None, cache: bool = 
             module_file = getattr(module, "__file__", None)
         except Exception:
             module_file = None
-        is_builtin = not _is_plugin_module_path(module_file)
+        # plugin_loader 以合成模块名（esp_ai_plugins_*）加载内置插件，
+        # 模块名即身份：无法从 sys.modules 解析路径时按模块名兜底判定
+        is_builtin = (
+            not _is_plugin_module_path(module_file)
+            and not (func.__module__ or "").startswith("esp_ai_plugins_")
+        )
 
         definition = ToolDefinition(
             name=tool_name,
@@ -796,11 +801,11 @@ class ToolRetriever:
     """
 
     # 核心工具白名单：无论用户说什么都始终可用（对话必备能力）
+    # 注意：execute_lua 属高危工具，不常驻 LLM schema（按意图检索时仍可被选中）
     CORE_TOOLS = frozenset({
         "standby",
         "get_current_time",
         "get_current_date",
-        "execute_lua",
         "clear_screen",
         "stop_lua",
     })
@@ -973,6 +978,10 @@ class ToolManager:
 _shared_tool_manager = ToolManager()
 
 
+# 高危工具集合：可在创建通道时整体禁用（如开放 API / 不可信通道）
+DANGEROUS_TOOLS: set[str] = {"execute_lua"}
+
+
 class PerUserToolManager:
     def __init__(
         self,
@@ -992,12 +1001,15 @@ class PerUserToolManager:
         enabled_plugins: list[str] = None,
         device_has_display: bool = True,
         device_id: str = "",  # 绑定设备 ID，用于 KV 按设备隔离存储
+        dangerous_tools_enabled: bool = True,  # 高危工具开关（False 时 DANGEROUS_TOOLS 内的工具调用被拒绝）
     ):
         self._shared = shared
         self.channel = channel
         self.ctx = ctx
         self.fsm = fsm
         self.device_id = device_id  # 设备 ID，供 KV 存储等按设备隔离
+        # 高危工具门禁：False 时 DANGEROUS_TOOLS 中的工具在 call_tool 入口被直接拒绝
+        self.dangerous_tools_enabled = dangerous_tools_enabled
         self._disabled_tools = set(disabled_tools) if disabled_tools else set()
         # 设备级插件白名单：None/空 = 无白名单限制（插件全部启用）；
         # 非空集合 = 仅白名单内插件生效（插件商店语义）
@@ -1019,6 +1031,9 @@ class PerUserToolManager:
         self._mcp_tool_map: dict[str, MCPClient | tuple[str, MCPPool]] = {}
         self._mcp_pools: dict[str, MCPPool] = {}
         self._mcp_tool_schemas: dict[str, list[dict]] = {}
+        # 是否共享全局 startup_tool_mgr 的 MCP 池（ws_session_handler 复用全局池时置 True）。
+        # 共享时 cleanup 只清空引用、不 close 池，否则会误杀其他在线设备的 MCP 连接。
+        self._shares_global_mcp: bool = False
         self._mcp_pool_max_size = mcp_pool_max_size
         self._mcp_pool_min_size = mcp_pool_min_size
 
@@ -1297,6 +1312,11 @@ class PerUserToolManager:
         timeout = timeout or self._tool_timeout
         max_retries = max_retries or self._tool_max_retries
 
+        # 高危工具熔断：通道禁用高危工具时直接拒绝（在权限检查之前，避免任何执行路径）
+        if tool_name in DANGEROUS_TOOLS and not self.dangerous_tools_enabled:
+            logger.warning(f"[ToolManager] 高危工具 {tool_name} 已在当前通道禁用，拒绝调用")
+            return "该工具已在当前通道禁用"
+
         # 权限检查前置：无论缓存命中还是执行，未安装/禁用的工具一律拒绝
         # （否则缓存命中会绕过 _device_tool_allowed——卸载插件后缓存期内仍可使用，付费插件会被白嫖）
         if not self._device_tool_allowed(tool_name):
@@ -1546,6 +1566,16 @@ class PerUserToolManager:
             logger.info(f"[ToolManager] 熔断器已重置: {name}")
 
     async def cleanup(self):
+        # 共享全局 MCP 池时只清空本对象的引用，不关闭池/断开客户端——
+        # 池的生命周期由 app.state 全局管理，close 会误杀其他在线设备的 MCP 连接
+        if self._shares_global_mcp:
+            self._mcp_pools = {}
+            self._mcp_tool_schemas = {}
+            self._circuit_breakers = {}
+            self._mcp_clients = []
+            self._mcp_tool_map = {}
+            return
+
         for pool in self._mcp_pools.values():
             await pool.close()
         self._mcp_pools.clear()

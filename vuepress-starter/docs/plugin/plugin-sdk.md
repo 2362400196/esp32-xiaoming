@@ -2,23 +2,25 @@
 
 插件开发中最容易踩坑的是**重复造轮子**：每个插件都要手写设备指令下发、错误处理、配置读取、HTTP 请求……写法还不一致，导致同样的逻辑散落在十几个插件里。
 
-本系统将所有高频、易错的操作统一封装到 `src/use_cases/_plugin_helpers.py`（即**插件 SDK**）。插件里只做两件事：
+本系统将所有高频、易错的操作统一封装到 **插件 SDK**（`src/use_cases/sdk/` 目录）。插件里只做两件事：
 
-1. `from src.use_cases._plugin_helpers import xxx` 引入所需能力
+1. `from src.use_cases.sdk.<领域> import xxx` 引入所需能力
 2. 专注于自己的业务逻辑
 
 ::: tip 为什么文件以下划线 `_` 开头？
-`_plugin_helpers.py` 位于 `use_cases` 目录，`auto_discover` 扫描该目录时**会跳过下划线前缀的模块**，因此它不会被误当作技能/工具模块加载，可以安全 import。
+`_plugin_helpers.py`（兼容导出层）位于 `use_cases` 目录，`auto_discover` 扫描该目录时**会跳过下划线前缀的模块**，因此它不会被误当作技能/工具模块加载，可以安全 import。它是 SDK 的旧导入路径，新代码请使用 `src/use_cases/sdk/` 各子模块。
 :::
 
 ## 能力总览
 
 | 分组 | 函数 | 用途 |
 |------|------|------|
+| **工具注册** | `tool()` / `StopPipeline` | 插件第一入口：注册 LLM 可调用工具（`src.use_cases.sdk.tools`） |
 | 设备标识 | `get_device_key()` / `resolve_device_key()` | 拿到当前设备的 `bound_xxx` 标识，查询内部表必备 |
 | 指令下发 | `send_instruct()` / `send_device_command()` | 向设备发一条 `instruct` 指令 |
 | **音乐播放** | `play_music_url()` | 给一个链接即可播放音乐，支持歌词和元数据 |
-| 指令回执 | `request_device_result()` / `send_device_command_ack()` | 下发指令并**等待设备回复结果**（Lua 返回、状态查询、指令 ack） |
+| 指令回执 | `lua_execute()` / `get_device_state()` / `device_command_ack()` | 下发指令并**等待设备回复结果**（推荐，隐藏框架细节） |
+| 指令回执（底层） | `request_device_result()` / `send_device_command_ack()` | 同上（旧 API，需理解 `future_attr`，已标注废弃） |
 | KV 配置存储 | `kv_get()` / `kv_set()` / `kv_delete()` / `kv_list()` | 插件专属的持久化键值存储（推荐替代 config_fields） |
 | HTTP 请求 | `http_request()` / `http_get_json()` | 统一超时与错误处理的外部 API 调用 |
 | LTM 记忆 | `get_ltm_service()` / `get_default_ltm_service()` | 访问长期记忆服务（注入优先） |
@@ -28,8 +30,10 @@
 | **TTS 合成** | `tts_synthesize()` | 文本转语音，返回 MP3 音频数据 |
 | **设备状态** | `device_is_online()` / `device_get_info()` | 查询设备在线状态与基本信息 |
 | **设备 IO 控制** | `gpio_mode()` / `gpio_write()` / `gpio_read()` / `pwm_write()` / `adc_read()` / `servo_write()` | 控制设备 GPIO、PWM、ADC、舵机 |
+| **主动播报** | `speak_to_device()` | 让指定设备直接播报一段语音（无需获取 channel 等内部对象） |
 | **文件持久化** | `plugin_data_read()` / `plugin_data_write()` / `plugin_data_list()` / `plugin_data_delete()` | 读写插件专属数据目录 |
 | **用户画像** | `get_user_profile_summary()` | 获取当前设备用户的画像摘要 |
+| **事件订阅** | `subscribe()` / `unsubscribe()` / `publish()` | 订阅框架事件（设备上下线、会话开始结束、微信消息） |
 | **工具函数** | `generate_uuid()` / `current_timestamp()` / `json_dumps()` / `json_loads()` | 通用零依赖工具函数 |
 
 ---
@@ -190,9 +194,36 @@ from src.use_cases.sdk.utils import json_dumps, get_device_key
 - `execute_lua`：设备执行 Lua 后把返回值发回来（如 GPIO 读取、传感器数值）
 - `get_volume` / `get_brightness`：设备上报当前状态
 
-### `request_device_result(tool_manager, command_id, future_attr, timeout=8.0, data="", if_busy=None)`
+### 推荐用法：三个高层封装（无需理解 future 机制）
 
-下发指令后挂起，等待设备回复并解析。返回统一三元组 `(result, status, detail)`：
+::: tip 新插件直接用这三个
+框架细节（future 槽位、防覆盖、旧等待方主动失败）已被封装隐藏，返回统一三元组 `(result, status, detail)`：
+
+```python
+from src.use_cases.sdk.device import lua_execute, get_device_state, device_command_ack
+
+# 执行设备端 Lua 代码并拿返回值
+result, status, detail = await lua_execute(tool_manager, "return gpio.read(48)")
+if status == "ok":
+    return f"GPIO48 = {result}"
+
+# 查询设备状态（如音量/亮度）
+result, status, detail = await get_device_state(tool_manager, "get_volume", timeout=5.0)
+
+# 下发指令并等待设备 ack 确认
+result, status, detail = await device_command_ack(tool_manager, "set_volume", "50")
+```
+
+| 函数 | 场景 | status 取值 |
+|------|------|------------|
+| `lua_execute(tool_manager, code, timeout=8.0)` | 执行 Lua 并拿返回值 | ok / offline / timeout / error / busy |
+| `get_device_state(tool_manager, command_id, timeout=5.0)` | 状态查询（get_volume 等） | 同上 |
+| `device_command_ack(tool_manager, command_id, data="", timeout=8.0)` | 指令 ack 确认 | ok / offline / timeout / error |
+:::
+
+### `request_device_result(tool_manager, command_id, future_attr, timeout=8.0, data="", if_busy=None)`（底层，已标注废弃）
+
+上面三个封装的底层实现。**仅当需要自定义指令类型时**才直接使用——它要求你传入 `future_attr`（框架 future 槽位名），理解成本较高：
 
 | status | 含义 | result | detail |
 |--------|------|--------|--------|
@@ -203,7 +234,7 @@ from src.use_cases.sdk.utils import json_dumps, get_device_key
 | `"busy"` | future 被占用 | `None` | `if_busy` 传入的文案 |
 
 ```python
-from src.use_cases._plugin_helpers import request_device_result
+from src.use_cases.sdk.device import request_device_result
 
 async def _query_device_state(tool_manager, command_id: str) -> str:
     result, status, detail = await request_device_result(
@@ -222,11 +253,11 @@ async def get_volume(tool_manager=None) -> str:
     return result
 ```
 
-### `future_attr` 是什么？
+### `future_attr` 是什么？（仅底层 API 需要）
 
 设备回复到达时，框架会把结果写入 `tool_manager.<future_attr>` 指向的 future。因此：
 
-- 同一时间**同一类型的查询只能有一个**在等待——第二个调用会覆盖第一个的 future，导致第一个永远等不到结果
+- 同一时间**同一类型的查询只能有一个**在等待——第二个调用会覆盖第一个的 future（新版本会主动失败旧等待方，旧调用立即返回错误而不是干等超时）
 - 不同指令类型要用**不同的 future_attr**（如 Lua 用 `_pending_lua_future`、状态查询用 `_pending_device_state_future`），互不干扰
 - 用 `if_busy="文案"` 在 future 被占用时立即返回 `busy`，避免无谓等待
 
@@ -240,9 +271,9 @@ if status == "busy":
     return detail
 ```
 
-### `send_device_command_ack(tool_manager, command_id, data="", timeout=8.0)`
+### `send_device_command_ack(tool_manager, command_id, data="", timeout=8.0)`（旧 API）
 
-下发指令并等待设备返回 **ack 确认回执**（`instruct_ack` 消息）。返回三元组 `(result, status, detail)`，status 取值集合为 `{ok, offline, timeout, error}`。适用于设备侧"收到即回执"的指令确认场景，无需像 `request_device_result` 那样手动指定 `future_attr`。
+下发指令并等待设备返回 **ack 确认回执**（`instruct_ack` 消息）。返回三元组 `(result, status, detail)`，status 取值集合为 `{ok, offline, timeout, error}`。新代码请用 `device_command_ack()`（签名一致，语义更清晰）。
 
 ---
 
@@ -878,11 +909,125 @@ while True:
 `http_request` 一次性拿到完整响应体，适合普通 API；`http_stream_open/read` 逐行返回，适合 SSE（`text/event-stream`）等流式协议。流有 120 秒空闲 TTL，长时间不读取会被自动回收。
 :::
 
+## 十九、主动播报：让设备直接说话（权限 `device`）
+
+### `speak_to_device(device_key, text) -> bool`
+
+让指定设备直接播报一段语音（走设备端的 Speaker，带唤醒交互）。插件**无需**获取 channel/fsm 等框架内部对象，一个设备标识即可：
+
+```python
+from src.use_cases.sdk.infrastructure import speak_to_device
+
+ok = await speak_to_device("bound_xxx", "您的外卖到了，记得取一下")
+if not ok:
+    # 设备离线/未连接时返回 False，可回退到微信通知等其他通道
+    ...
+```
+
+返回 `True` 表示已下发播报；设备不在线、无 Speaker 或播报异常均返回 `False`。
+
+旧的 `speak_direct(channel, ctx, fsm, text)` 要求拿到框架内部对象且 SDK 无途径获取，已标注废弃。
+
+---
+
+## 二十、事件订阅：响应框架事件
+
+插件可以订阅框架运行过程中发出的事件，实现"被动响应"型逻辑（设备上线提醒、会话统计等）：
+
+```python
+from src.use_cases.sdk.events import (
+    subscribe, unsubscribe, publish,
+    EVENT_DEVICE_ONLINE, EVENT_DEVICE_OFFLINE,
+    EVENT_SESSION_START, EVENT_SESSION_END, EVENT_WECHAT_MESSAGE,
+)
+
+# 订阅（返回订阅 id，用于退订）
+sub_id = subscribe(EVENT_DEVICE_ONLINE, my_callback, plugin_name="my_plugin")
+
+async def my_callback(device_id=""):
+    print(f"设备上线: {device_id}")
+
+# 退订
+unsubscribe(sub_id)
+```
+
+**可用事件：**
+
+| 事件常量 | 触发时机 | 回调参数 |
+|----------|---------|---------|
+| `EVENT_DEVICE_ONLINE` | 设备注册成功 | `device_id` |
+| `EVENT_DEVICE_OFFLINE` | 设备注销 | `device_id` |
+| `EVENT_SESSION_START` | 收到设备 start 命令（唤醒） | `device_key` |
+| `EVENT_SESSION_END` | 会话清理完成 | `device_key` |
+| `EVENT_WECHAT_MESSAGE` | 微信回复发送成功 | `chat_id`, `text` |
+
+::: warning 注意
+- 回调抛出的任何异常都会被捕获并记日志，**不影响**发布方和其他订阅者
+- 协程回调会被包装为后台任务执行，不阻塞事件发布方
+- 当前仅**内置插件**（进程内运行）可用；沙箱插件的 RPC 通道尚未接入事件系统
+:::
+
+---
+
+## 二十一、插件生命周期钩子
+
+插件可以定义两个可选的模块级函数，框架在加载/卸载时自动调用：
+
+```python
+# plugin.py 顶层（与 @tool 定义同级）
+
+def on_startup():
+    """插件加载成功后调用（可同步可 async）。适合启动后台任务、初始化连接。"""
+    ...
+
+def on_shutdown():
+    """插件卸载/重载前调用。适合停止后台任务、释放资源。"""
+    ...
+```
+
+::: tip 真实示例：alarm 插件
+闹钟引擎的启停就由生命周期钩子持有：
+
+```python
+# src/plugins/alarm/plugin.py
+def on_startup():
+    from src.use_cases.alarm_manager import get_alarm_manager
+    get_alarm_manager().start()
+
+def on_shutdown():
+    from src.use_cases.alarm_manager import get_alarm_manager
+    get_alarm_manager().stop()
+```
+
+框架保证：钩子异常只记日志不影响插件加载/卸载；重复加载/卸载安全（幂等由插件自行保证）。
+:::
+
+::: warning 适用范围
+生命周期钩子当前仅**内置插件**（进程内运行）生效；沙箱插件（子进程随调用生灭）被静默跳过。
+:::
+
+---
+
+## 错误返回约定（重要）
+
+SDK 函数的错误返回约定正在统一中，新插件遵循以下规则：
+
+| 约定 | 函数 | 说明 |
+|------|------|------|
+| **`(result, status, detail)` 三元组**（推荐） | `lua_execute` / `get_device_state` / `device_command_ack` | status ∈ {ok, offline, timeout, error, busy}，判断 `status == "ok"` 即可 |
+| `"ok"` / 错误字符串 | `send_device_command` / `play_music_url` / `gpio_write` 等 | 判断 `result == "ok"`；旧约定，保留兼容 |
+| int / 哨兵 -1 | `gpio_read` / `adc_read` | 失败返回 `-1` |
+| `None` / 数据 | `plugin_data_read` / `device_get_info` | 不存在/离线返回 `None` 或 `{}` |
+| 抛异常 | `llm_chat` / `tts_synthesize` / `ws_send` | 调用方需自行 try/except |
+
+---
+
 ## 参考文件
 
 | 文件 | 说明 |
 |------|------|
-| `src/use_cases/_plugin_helpers.py` | 插件 SDK 源码（唯一实现，本教程即基于此） |
+| `src/use_cases/sdk/` | 插件 SDK 源码（按领域拆分：device/http/storage/music/io/services/tools/events/infrastructure/utils） |
+| `src/use_cases/_plugin_helpers.py` | 兼容导出层（旧导入路径，re-export SDK 全部符号） |
 | `src/plugins/system_basic/plugin.py` | `send_device_command` + `request_device_result` 示例 |
 | `src/plugins/weather/plugin.py` | `kv_get` + `kv_set` + `http_get_json` + `send_device_command` 示例 |
 | `src/plugins/media_player/plugin.py` | `play_music_url` + `http_request` 示例 |

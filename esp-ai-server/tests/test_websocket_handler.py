@@ -252,7 +252,8 @@ class TestHandleWebsocketAuthBypass:
             acquire_called = True
             return True
 
-        ws = _make_ws(query_key="")
+        # 新增 MAC 校验后，无 key 路径必须携带合法格式 MAC 才能进入绑定模式
+        ws = _make_ws(query_key="", device_id="AA:BB:CC:DD:EE:FF")
         with patch.object(
             websocket_handler, "_send_bind_code_and_close", new=AsyncMock()
         ) as mock_bind, \
@@ -406,7 +407,8 @@ class TestSecurityFixes:
         device.device_id = "AA:BB:CC:DD:EE:FF"
         device.is_banned = False
 
-        ws = _make_ws(query_key="")
+        # 新增 MAC 校验后，无 key 路径必须携带合法格式 MAC（该用例验证 4004 拒绝语义）
+        ws = _make_ws(query_key="", device_id="AA:BB:CC:DD:EE:FF")
         with patch(
             "src.infrastructure.db.session.get_session_ctx",
             _make_async_db(device),
@@ -467,3 +469,49 @@ class TestSecurityFixes:
         assert all(c in string.ascii_uppercase + string.digits for c in code)
         codes = {websocket_handler._generate_bind_code() for _ in range(20)}
         assert len(codes) > 1
+
+
+# ─── MAC 格式校验（stored XSS 防护） ───────────────────────
+
+class TestMacFormatValidation:
+    """无 key 连接的设备标识必须为合法 MAC，防止任意字符串（含 HTML）入库"""
+
+    async def test_invalid_mac_rejected_with_4001(self, stub_session_handler_cls):
+        """非法 MAC（含 HTML 注入 payload）应以 4001 拒绝，且不得进入绑定/入库流程"""
+        malicious = "<script>alert(1)</script>"
+        ws = _make_ws(query_key="", device_id=malicious)
+        with patch.object(
+            websocket_handler, "_send_bind_code_and_close", new=AsyncMock()
+        ) as mock_bind, \
+             patch("src.interfaces.websocket_handler.get_settings") as mock_settings:
+            mock_settings.return_value.deploy_mode = "single"
+            await websocket_handler.handle_websocket(ws)
+
+        ws.close.assert_called_once()
+        args, kwargs = ws.close.call_args
+        code = kwargs.get("code", args[0] if args else None)
+        assert code == 4001
+        mock_bind.assert_not_called()
+
+    async def test_valid_mac_enters_bind_mode(self, stub_session_handler_cls):
+        """合法 MAC（冒号/连字符分隔）应正常进入绑定模式"""
+        for mac in ("AA:BB:CC:DD:EE:FF", "aa-bb-cc-dd-ee-ff"):
+            ws = _make_ws(query_key="", device_id=mac)
+            with patch.object(
+                websocket_handler, "_send_bind_code_and_close", new=AsyncMock()
+            ) as mock_bind, \
+                 patch("src.interfaces.websocket_handler.get_settings") as mock_settings:
+                mock_settings.return_value.deploy_mode = "single"
+                await websocket_handler.handle_websocket(ws)
+            mock_bind.assert_awaited_once()
+            assert mock_bind.call_args.args[1] == mac
+
+    def test_mac_regex_semantics(self):
+        """_is_valid_mac 语义校验"""
+        assert websocket_handler._is_valid_mac("AA:BB:CC:DD:EE:FF")
+        assert websocket_handler._is_valid_mac("aa-bb-cc-dd-ee-ff")
+        assert not websocket_handler._is_valid_mac("")
+        assert not websocket_handler._is_valid_mac("AA:BB:CC")
+        assert not websocket_handler._is_valid_mac("<script>")
+        assert not websocket_handler._is_valid_mac("AA:BB:CC:DD:EE:GG")
+        assert not websocket_handler._is_valid_mac("AABBCCDDEEFF")

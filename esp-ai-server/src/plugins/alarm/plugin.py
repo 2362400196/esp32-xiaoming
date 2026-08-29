@@ -23,6 +23,32 @@ from src.use_cases._plugin_helpers import (
 )
 
 
+# ── 生命周期钩子（插件加载/卸载时由 plugin_loader 调用）──────
+
+
+async def on_startup():
+    """插件加载钩子：确保闹钟后台检查协程已启动。
+
+    AlarmManager.start 幂等（重复调用无副作用），与 web.py 启动时的
+    调用兼容，不会重复创建后台任务。
+    """
+    try:
+        mgr = get_alarm_manager()
+        await mgr.start()
+    except Exception as e:
+        import logging
+        logging.getLogger("alarm").warning(f"[Alarm] 插件 on_startup 异常（不影响加载）: {e}")
+
+
+async def on_shutdown():
+    """插件卸载钩子：停止闹钟后台检查协程（幂等）。"""
+    try:
+        await get_alarm_manager().stop()
+    except Exception as e:
+        import logging
+        logging.getLogger("alarm").warning(f"[Alarm] 插件 on_shutdown 异常（不影响卸载）: {e}")
+
+
 # ── 数据存储（直接文件读写，内置插件不走 kv 的 ContextVar 机制）──────
 
 

@@ -41,7 +41,7 @@ hello/
 **plugin.py**：
 
 ```python
-from src.use_cases.tools_system import tool
+from src.use_cases.sdk.tools import tool
 
 @tool()
 async def say_hello(name: str = "朋友") -> str:
@@ -192,7 +192,7 @@ LLM 解析后调用 `say_hello(name="张三")`，设备播报："你好，张三
 **plugin.py**：
 
 ```python
-from src.use_cases.tools_system import tool
+from src.use_cases.sdk.tools import tool
 from src.use_cases.sdk.device import send_device_command
 
 @tool()
@@ -304,7 +304,7 @@ LLM 偶尔会传入超范围值（如 `level=150`）。用 `max`/`min` 钳制到
 **plugin.py**：
 
 ```python
-from src.use_cases.tools_system import tool
+from src.use_cases.sdk.tools import tool
 from src.use_cases.sdk.device import send_device_command
 
 @tool()
@@ -405,7 +405,7 @@ lua_code = (
 ### 2. plugin.py
 
 ```python
-from src.use_cases.tools_system import tool
+from src.use_cases.sdk.tools import tool
 from src.use_cases.sdk.http import http_request
 from src.use_cases.sdk.utils import get_plugin_config_or_env
 
@@ -515,7 +515,7 @@ if len(text) > 3000:
 ```python
 import asyncio
 
-from src.use_cases.tools_system import tool, StopPipeline
+from src.use_cases.sdk.tools import tool, StopPipeline
 from src.use_cases.sdk.device import send_device_command
 
 @tool(cache=False)
@@ -630,7 +630,7 @@ mini_weather/
 ```python
 import json
 
-from src.use_cases.tools_system import tool
+from src.use_cases.sdk.tools import tool
 from src.use_cases.sdk.http import http_get_json
 from src.use_cases.sdk.device import send_device_command
 from src.use_cases.sdk.storage import kv_get, kv_set

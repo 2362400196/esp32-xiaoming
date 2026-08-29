@@ -8,6 +8,7 @@
 保持旧版 from src.use_cases._plugin_helpers import xxx 的兼容性。
 
 新代码推荐直接导入 sdk 子模块：
+    from src.use_cases.sdk.tools import tool, StopPipeline
     from src.use_cases.sdk.http import http_request, http_get_json
     from src.use_cases.sdk.device import send_device_command, request_device_result
     from src.use_cases.sdk.music import play_music_url
@@ -16,6 +17,11 @@
     from src.use_cases.sdk.services import llm_chat, tts_synthesize
     from src.use_cases.sdk.utils import json_dumps, get_device_key
 """
+
+# ════════════════════════════════════════════════════════════
+# 工具注册（插件开发的第一入口，惰性 re-export 自 tools_system）
+# ════════════════════════════════════════════════════════════
+from src.use_cases.sdk.tools import tool, StopPipeline, ToolDefinition  # noqa: F401
 
 # ════════════════════════════════════════════════════════════
 # 工具函数
@@ -38,6 +44,9 @@ from src.use_cases.sdk.device import (  # noqa: F401
     send_device_command,
     send_device_command_ack,
     request_device_result,
+    lua_execute,
+    get_device_state,
+    device_command_ack,
     device_is_online,
     device_get_info,
 )
@@ -115,6 +124,7 @@ from src.use_cases.sdk.infrastructure import (  # noqa: F401
     get_settings,
     get_device_registry,
     speak_direct,
+    speak_to_device,
     get_wechat_bot,
     get_wechat_binding_mgr,
     get_remote_config_provider,

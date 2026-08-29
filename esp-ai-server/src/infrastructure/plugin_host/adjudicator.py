@@ -51,6 +51,14 @@ _OP_PERMS: dict[str, str] = {
     "tts_synthesize": "tts",
     "device_is_online": "device",
     "device_get_info": "device",
+    # 设备 IO（gpio/pwm/adc/servo）与音乐播放均挂 device 权限
+    "gpio_mode": "device",
+    "gpio_write": "device",
+    "gpio_read": "device",
+    "pwm_write": "device",
+    "adc_read": "device",
+    "servo_write": "device",
+    "play_music_url": "device",
     "plugin_data_read": "file_read",
     "plugin_data_write": "file_write",
     "plugin_data_list": "file_read",
@@ -303,6 +311,97 @@ class Adjudicator:
             params.get("if_busy"),
         )
         return [result, status, detail]
+
+    # ── 设备 IO / 音乐播放（复用主进程 SDK 实现）────────────
+    # 写操作返回 "ok"/错误串；读操作返回 int（失败 -1）；音乐返回 "ok"/错误串。
+
+    def _resolve_io_device_key(self, params, ctx, what: str) -> str:
+        """设备 IO/音乐的目标设备：优先插件显式指定，否则用本次调用绑定的设备。
+
+        显式指定非绑定设备时按设备作用域规则拦截。
+        """
+        device_key = params.get("device_key") or ctx.device_key or ""
+        self._check_device_scope(device_key, ctx, what)
+        return device_key
+
+    async def _op_gpio_mode(self, params, ctx) -> str:
+        from src.use_cases.sdk.io import gpio_mode as _gpio_mode
+
+        device_key = self._resolve_io_device_key(params, ctx, "gpio_mode")
+        return await _gpio_mode(
+            int(params.get("pin", 0)),
+            str(params.get("mode", "output")),
+            tool_manager=ctx.tool_manager,
+            device_key=device_key,
+        )
+
+    async def _op_gpio_write(self, params, ctx) -> str:
+        from src.use_cases.sdk.io import gpio_write as _gpio_write
+
+        device_key = self._resolve_io_device_key(params, ctx, "gpio_write")
+        return await _gpio_write(
+            int(params.get("pin", 0)),
+            int(params.get("value", 0)),
+            tool_manager=ctx.tool_manager,
+            device_key=device_key,
+        )
+
+    async def _op_gpio_read(self, params, ctx) -> int:
+        from src.use_cases.sdk.io import gpio_read as _gpio_read
+
+        device_key = self._resolve_io_device_key(params, ctx, "gpio_read")
+        return await _gpio_read(
+            int(params.get("pin", 0)),
+            tool_manager=ctx.tool_manager,
+            device_key=device_key,
+        )
+
+    async def _op_pwm_write(self, params, ctx) -> str:
+        from src.use_cases.sdk.io import pwm_write as _pwm_write
+
+        device_key = self._resolve_io_device_key(params, ctx, "pwm_write")
+        return await _pwm_write(
+            int(params.get("pin", 0)),
+            int(params.get("duty", 0)),
+            int(params.get("freq", 5000)),
+            tool_manager=ctx.tool_manager,
+            device_key=device_key,
+        )
+
+    async def _op_adc_read(self, params, ctx) -> int:
+        from src.use_cases.sdk.io import adc_read as _adc_read
+
+        device_key = self._resolve_io_device_key(params, ctx, "adc_read")
+        return await _adc_read(
+            int(params.get("pin", 0)),
+            tool_manager=ctx.tool_manager,
+            device_key=device_key,
+        )
+
+    async def _op_servo_write(self, params, ctx) -> str:
+        from src.use_cases.sdk.io import servo_write as _servo_write
+
+        device_key = self._resolve_io_device_key(params, ctx, "servo_write")
+        return await _servo_write(
+            int(params.get("pin", 0)),
+            int(params.get("angle", 0)),
+            tool_manager=ctx.tool_manager,
+            device_key=device_key,
+        )
+
+    async def _op_play_music_url(self, params, ctx) -> str:
+        from src.use_cases.sdk.music import play_music_url as _play_music_url
+
+        device_key = self._resolve_io_device_key(params, ctx, "play_music_url")
+        return await _play_music_url(
+            str(params.get("url", "")),
+            title=str(params.get("title", "") or ""),
+            artist=str(params.get("artist", "") or ""),
+            duration=int(params.get("duration", 0) or 0),
+            device_key=device_key,
+            lyric_url=str(params.get("lyric_url", "") or ""),
+            lyrics_offset=int(params.get("lyrics_offset", 0) or 0),
+        )
 
     # ── HTTP ────────────────────────────────────────────────
 

@@ -652,6 +652,19 @@ class VolcEngineTTSGateway(TTSRepository):
         self._pool_idle_timeout = effective.get("pool_idle_timeout") or tts_config.pool_idle_timeout
         self._pool_connection_timeout = effective.get("pool_connection_timeout") or tts_config.pool_connection_timeout
 
+    async def aclose(self) -> None:
+        """释放本网关实例持有的 WS 连接（服务关闭/设备会话关闭时调用）。
+
+        注意：连接池连接由 close_pool() 统一管理，此处只处理本实例
+        直接持有的活跃 websocket（非池会话）。
+        """
+        for ws in list(self._active_websockets):
+            try:
+                await ws.close()
+            except Exception as e:
+                logger.debug(f"[TTS] aclose 关闭 WS 异常: {e}")
+        self._active_websockets.clear()
+
     @classmethod
     def get_pool(cls, config: dict | None = None) -> VolcEngineTTSConnectionPool | None:
         settings = get_settings()

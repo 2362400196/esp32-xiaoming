@@ -1333,7 +1333,8 @@ class TestCleanup:
         with patch("src.infrastructure.web.get_device_registry", return_value=registry):
             await handler.cleanup()
 
-        registry.unregister.assert_called_once_with("test_device_key_123")
+        # 传入 self.session 做属主校验，防止重连竞态下旧会话迟到 cleanup 误杀新会话
+        registry.unregister.assert_called_once_with("test_device_key_123", session=handler.session)
 
     async def test_closes_session(self):
         handler = _make_handler()

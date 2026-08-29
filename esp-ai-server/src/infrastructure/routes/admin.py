@@ -243,6 +243,9 @@ async def update_user(user_id: str, req: UserUpdateReq, admin: UserModel = Depen
             if target.id == admin.id and req.is_active is False:
                 raise HTTPException(400, "不能停用当前登录的管理员账号")
             target.is_active = req.is_active
+            if req.is_active is False:
+                # 吊销语义：停用用户后 token_version +1，使其所有已签发 JWT 失效
+                target.token_version = (target.token_version or 0) + 1
 
         if req.nickname is not None:
             target.nickname = req.nickname
@@ -442,6 +445,8 @@ async def admin_reset_password(user_id: str, req: ResetPasswordReq, _: UserModel
         if not target:
             raise HTTPException(404, "User not found")
         target.password_hash = hash_password(req.new_password)
+        # 吊销语义：重置密码后 token_version +1，使该用户所有已签发 JWT（含 refresh）失效
+        target.token_version = (target.token_version or 0) + 1
         session.add(target)
     return {"code": 0, "message": "密码已重置"}
 
@@ -799,7 +804,8 @@ async def admin_health_check(_: UserModel = Depends(require_admin)):
 
 # ==================== 操作日志 ====================
 
-OPLOG_FILE = "data/admin_operation_logs.json"
+# 操作日志文件基于项目根目录的绝对路径（避免相对 CWD，换工作目录启动时日志写到别处）
+OPLOG_FILE = str(_project_root() / "data" / "admin_operation_logs.json")
 
 
 def _load_oplogs() -> list:
@@ -917,7 +923,9 @@ async def admin_export_data(data_type: str, _: UserModel = Depends(require_admin
             w = csv.writer(output)
             w.writerow(["ID", "名称", "MAC", "设备Key", "用户ID", "在线", "封禁", "最后在线", "创建时间"])
             for r in rows:
-                w.writerow([r.device_id, r.name, r.mac_address, r.device_key, r.user_id or "", "是" if r.is_online else "否", "是" if r.is_banned else "否", r.last_seen or "", r.created_at or ""])
+                # 安全：device_key 是设备 WS 凭据，导出只保留前 8 位掩码，防止明文泄露
+                masked_key = (r.device_key or "")[:8] + "***" if r.device_key else ""
+                w.writerow([r.device_id, r.name, r.mac_address, masked_key, r.user_id or "", "是" if r.is_online else "否", "是" if r.is_banned else "否", r.last_seen or "", r.created_at or ""])
             from starlette.responses import StreamingResponse
             output.seek(0)
             return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=devices.csv"})
@@ -1458,7 +1466,7 @@ async function loadDevices() {
     if (Array.isArray(devices)) {
       const online = devices.filter(d => d.online);
       document.getElementById('onlineDevices').innerHTML = online.length
-        ? online.map(d => '&#x1F7E2; ' + escapeHtml(d.name || d.device_id) + ' (' + (d.mac || '') + ')').join('<br>')
+        ? online.map(d => '&#x1F7E2; ' + escapeHtml(d.name || d.device_id) + ' (' + escapeHtml(d.mac || '') + ')').join('<br>')
         : '暂无在线设备';
     } else {
       document.getElementById('onlineDevices').textContent = '暂无设备数据';

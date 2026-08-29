@@ -223,3 +223,176 @@ class TestVerifyAdminApiKey:
         with pytest.raises(HTTPException) as exc_info:
             await verify_admin_api_key(x_api_key="nonexistent-key")
         assert exc_info.value.status_code == 403
+
+
+# ============================================================
+# Refresh token 查库校验 + token_version 吊销
+# ============================================================
+
+import jwt as _pyjwt
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+
+import jwt
+import pytest_asyncio
+from fastapi.security import HTTPAuthorizationCredentials
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from src.infrastructure.db.base import Base
+from src.infrastructure.db.models.user import UserModel
+from src.infrastructure import security_jwt
+from src.infrastructure.routes import admin as admin_routes
+from src.infrastructure.routes import auth as auth_routes
+
+
+@pytest_asyncio.fixture
+async def user_db():
+    """内存 SQLite（含 users 表），并把 auth/admin/security_jwt 的会话上下文
+    替换为指向该库，隔离真实 DB"""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+
+    @asynccontextmanager
+    async def _ctx():
+        async with factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    with patch("src.infrastructure.security_jwt.get_session_ctx", _ctx), \
+         patch("src.infrastructure.routes.auth.get_session_ctx", _ctx), \
+         patch("src.infrastructure.routes.admin.get_session_ctx", _ctx):
+        yield factory
+    await engine.dispose()
+
+
+async def _add_user(factory, *, is_active: bool = True, token_version: int = 0) -> UserModel:
+    """插入一个测试用户（默认密码 oldpass123）"""
+    user = UserModel(
+        id="11111111-1111-1111-1111-111111111111",
+        email="rev@example.com",
+        password_hash=security_jwt.hash_password("oldpass123"),
+        nickname="rev",
+        role="user",
+        is_active=is_active,
+        token_version=token_version,
+    )
+    async with factory() as session:
+        session.add(user)
+        await session.commit()
+    return user
+
+
+@pytest.mark.asyncio
+class TestRefreshTokenDbValidation:
+    """/auth/refresh 必须查库：禁用用户与版本不匹配的 refresh token 拒绝续签"""
+
+    async def test_refresh_rejects_disabled_user(self, user_db):
+        """安全修复：被禁用用户即使持有有效 refresh_token 也不能续期"""
+        user = await _add_user(user_db, is_active=False, token_version=0)
+        token = security_jwt.create_refresh_token(user.id, 0)
+        with pytest.raises(HTTPException) as ei:
+            await auth_routes.refresh(auth_routes.RefreshReq(refresh_token=token))
+        assert ei.value.status_code == 401
+
+    async def test_refresh_rejects_stale_token_version(self, user_db):
+        """token_version 不匹配（改密码后已吊销）→ 401"""
+        user = await _add_user(user_db, is_active=True, token_version=2)
+        stale = security_jwt.create_refresh_token(user.id, 0)  # 旧版本 token
+        with pytest.raises(HTTPException) as ei:
+            await auth_routes.refresh(auth_routes.RefreshReq(refresh_token=stale))
+        assert ei.value.status_code == 401
+
+    async def test_refresh_ok_issues_latest_version(self, user_db):
+        """活跃用户 + 版本匹配 → 正常续签，且新 access_token 带最新 token_version"""
+        user = await _add_user(user_db, is_active=True, token_version=1)
+        token = security_jwt.create_refresh_token(user.id, 1)
+        resp = await auth_routes.refresh(auth_routes.RefreshReq(refresh_token=token))
+        assert resp["code"] == 0
+        payload = security_jwt.decode_token(resp["data"]["access_token"])
+        assert payload["type"] == "access"
+        assert payload["token_version"] == 1
+
+
+@pytest.mark.asyncio
+class TestTokenVersionRevocation:
+    """token_version 吊销语义：get_current_user 校验版本 + 吊销触发点 +1"""
+
+    async def test_get_current_user_rejects_old_version(self, user_db):
+        """改密码/停用后版本号已递增，旧 access_token 校验 → 401"""
+        user = await _add_user(user_db, is_active=True, token_version=3)
+        old_token = security_jwt.create_access_token(user.id, 2)  # 版本落后
+        creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=old_token)
+        with pytest.raises(HTTPException) as ei:
+            await security_jwt.get_current_user(creds)
+        assert ei.value.status_code == 401
+        assert "revoked" in str(ei.value.detail).lower()
+
+    async def test_get_current_user_accepts_matching_version(self, user_db):
+        """版本匹配时正常通过并返回用户"""
+        user = await _add_user(user_db, is_active=True, token_version=3)
+        token = security_jwt.create_access_token(user.id, 3)
+        creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+        got = await security_jwt.get_current_user(creds)
+        assert got.id == user.id
+
+    async def test_change_password_bumps_token_version(self, user_db):
+        """用户修改密码后 token_version +1，旧 access_token 全部失效"""
+        user = await _add_user(user_db, is_active=True, token_version=0)
+        old_token = security_jwt.create_access_token(user.id, 0)
+        await auth_routes.change_password(
+            auth_routes.PasswordChangeReq(old_password="oldpass123", new_password="newpass456"),
+            user=user,
+        )
+        async with user_db() as session:
+            from sqlalchemy import select
+            row = (await session.execute(
+                select(UserModel).where(UserModel.id == user.id)
+            )).scalar_one()
+        assert row.token_version == 1
+        creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=old_token)
+        with pytest.raises(HTTPException) as ei:
+            await security_jwt.get_current_user(creds)
+        assert ei.value.status_code == 401
+
+    async def test_admin_reset_password_bumps_token_version(self, user_db):
+        """管理员重置用户密码后 token_version +1"""
+        user = await _add_user(user_db, is_active=True, token_version=0)
+        await admin_routes.admin_reset_password(
+            user.id, admin_routes.ResetPasswordReq(new_password="brandnew123")
+        )
+        async with user_db() as session:
+            from sqlalchemy import select
+            row = (await session.execute(
+                select(UserModel).where(UserModel.id == user.id)
+            )).scalar_one()
+        assert row.token_version == 1
+        assert security_jwt.verify_password("brandnew123", row.password_hash)
+
+    async def test_admin_disable_user_bumps_token_version(self, user_db):
+        """管理员停用用户后 token_version +1（即使重新启用，旧 token 也已失效）"""
+        admin = UserModel(
+            id="22222222-2222-2222-2222-222222222222",
+            email="root@example.com",
+            password_hash=security_jwt.hash_password("adminpass123"),
+            nickname="root",
+            role="admin",
+            is_active=True,
+            token_version=0,
+        )
+        user = await _add_user(user_db, is_active=True, token_version=0)
+        await admin_routes.update_user(
+            user.id, admin_routes.UserUpdateReq(is_active=False), admin=admin
+        )
+        async with user_db() as session:
+            from sqlalchemy import select
+            row = (await session.execute(
+                select(UserModel).where(UserModel.id == user.id)
+            )).scalar_one()
+        assert row.is_active is False
+        assert row.token_version == 1

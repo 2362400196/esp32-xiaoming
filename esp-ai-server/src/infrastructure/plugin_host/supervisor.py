@@ -286,12 +286,20 @@ class SandboxedPlugin:
                 raw = proc.stdout.readline()
                 if not raw:
                     break
-                loop.call_soon_threadsafe(queue.put_nowait, raw)
+                # 解释器关闭阶段事件循环已停，call_soon_threadsafe 会抛
+                # RuntimeError——吞掉即可（daemon 线程的正常退出路径）
+                try:
+                    loop.call_soon_threadsafe(queue.put_nowait, raw)
+                except RuntimeError:
+                    break
         except (OSError, ValueError):
             pass
         finally:
-            # 放入 None 作为 EOF 信号
-            loop.call_soon_threadsafe(queue.put_nowait, None)
+            # 放入 None 作为 EOF 信号（循环已关时静默放弃）
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+            except RuntimeError:
+                pass
 
     async def _reader_loop(self) -> None:
         """从队列读取子进程 stdout 消息并分发（避免 Windows ProactorEventLoop 管道 bug）。"""

@@ -22,18 +22,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from src.infrastructure.db.base import Base
-from src.use_cases.growth.models import (
+from src.plugins.growth.engine.models import (
     ConversationAnalysis,
     DiaryEntry,
     EmotionRecord,
     SkillCandidate,
     UserProfile,
 )
-from src.use_cases.growth.diary_service import DiaryService
-from src.use_cases.growth.emotion_analyzer import EmotionAnalyzer, EMOTION_LABELS
-from src.use_cases.growth.growth_system import GrowthSystem
-from src.use_cases.growth.self_learning import SelfLearningService
-from src.use_cases.growth.user_profile import UserProfileService
+from src.plugins.growth.engine.diary_service import DiaryService
+from src.plugins.growth.engine.emotion_analyzer import EmotionAnalyzer, EMOTION_LABELS
+from src.plugins.growth.engine.growth_system import GrowthSystem
+from src.plugins.growth.engine.self_learning import SelfLearningService
+from src.plugins.growth.engine.user_profile import UserProfileService
 
 
 # ============================================================
@@ -44,9 +44,9 @@ from src.use_cases.growth.user_profile import UserProfileService
 
 @pytest.fixture(autouse=True)
 def _mock_growth_repos(monkeypatch):
-    from src.use_cases.growth import user_profile as _up
-    from src.use_cases.growth import emotion_analyzer as _ea
-    from src.use_cases.growth import self_learning as _sl
+    from src.plugins.growth.engine import user_profile as _up
+    from src.plugins.growth.engine import emotion_analyzer as _ea
+    from src.plugins.growth.engine import self_learning as _sl
 
     prof = MagicMock()
     prof.get = AsyncMock(return_value={})
@@ -162,7 +162,7 @@ async def _make_ea_with_history(tmp_path, device_id="d1", records_data=None):
     阶段 3 后历史持久化由 DB 仓储负责，这里通过覆盖 ``_emotion_repo.list_all``
     的返回值预置历史，再触发 ``load_history`` 填充缓存。
     """
-    from src.use_cases.growth import emotion_analyzer as _ea
+    from src.plugins.growth.engine import emotion_analyzer as _ea
     if records_data is not None:
         _ea._emotion_repo.list_all = AsyncMock(return_value=list(records_data))
     ea = EmotionAnalyzer(str(tmp_path))
@@ -179,7 +179,7 @@ class TestEmotionAnalyzer:
         assert records == []
 
     async def test_load_history_from_file(self, tmp_path):
-        from src.use_cases.growth import emotion_analyzer as _ea
+        from src.plugins.growth.engine import emotion_analyzer as _ea
         _ea._emotion_repo.list_all = AsyncMock(return_value=[
             {"timestamp": 1.0, "emotion": "happy", "intensity": 0.8, "trigger": "t", "context": "c"},
         ])
@@ -302,7 +302,7 @@ class TestUserProfileService:
         assert profile.name == ""
 
     async def test_get_profile_from_file(self, tmp_path):
-        from src.use_cases.growth import user_profile as _up
+        from src.plugins.growth.engine import user_profile as _up
         _up._profile_repo.get = AsyncMock(return_value={
             "device_id": "d1", "name": "张三", "occupation": "工程师",
         })
@@ -323,7 +323,7 @@ class TestUserProfileService:
         assert profile.device_id == "d1"
 
     async def test_save_profile(self, tmp_path):
-        from src.use_cases.growth import user_profile as _up
+        from src.plugins.growth.engine import user_profile as _up
         svc = UserProfileService(str(tmp_path))
         await svc.get_profile("d1")
         await svc.save_profile("d1")

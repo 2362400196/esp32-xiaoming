@@ -17,6 +17,7 @@ from src.interfaces.tts_gateways import create_tts_gateway, VoiceGenerator
 from src.domain.services import MemoryService
 from src.domain.entities import Conversation, Message
 from src.use_cases.session_fsm import SessionState
+from src.use_cases.sdk.events import publish, EVENT_DEVICE_ONLINE, EVENT_DEVICE_OFFLINE
 
 logger = get_logger(__name__)
 
@@ -99,19 +100,50 @@ class DeviceRegistry:
             self._stats["register_count"] += 1
             logger.info(f"[DeviceRegistry] 已注册设备: key={device_id} mac={mac or device_id}, firmware={firmware_version}, 总数: {len(self._devices)}")
 
-    async def unregister(self, device_id: str):
+        # 注册成功 → 发布设备上线事件（publish 内部容错，不影响注册流程）
+        publish(EVENT_DEVICE_ONLINE, device_id=device_id)
+
+    async def unregister(self, device_id: str, session=None):
+        """注销设备。
+
+        Args:
+            device_id: 设备 key
+            session: 调用方持有的 session 对象，用于属主校验。
+                     传入时与注册表中当前条目的 session 做 ``is`` 比对：
+                     不一致说明是旧会话迟到的清理（重连竞态），跳过注销，避免误杀新会话；
+                     传 None 保持旧行为（无条件注销，兼容其他调用点）。
+        """
         async with self._lock:
             if device_id not in self._devices:
                 return
 
             device = self._devices[device_id]
             mac = device.get("mac", "")
+
+            # 属主校验：注册表中的 session 已被新会话覆盖 → 旧会话迟到的 cleanup，跳过
+            if session is not None and device.get("session") is not session:
+                logger.debug(
+                    f"[DeviceRegistry] 设备 {device_id} 已被新会话接管，跳过旧会话的注销"
+                )
+                return
+
             logger.info(f"[DeviceRegistry] 开始注销设备: key={device_id}")
 
             try:
                 session = device.get("session")
                 if session and hasattr(session, "cancel_event"):
                     session.cancel_event.set()
+
+                # 关闭设备的 LLM 网关（释放 AsyncOpenAI 的 SSL 连接，
+                # 避免进程退出时 GC 在已关闭的事件循环上报错）
+                llm_processor = None
+                if session is not None:
+                    llm_processor = getattr(session, "llm_processor", None)
+                if llm_processor is not None and hasattr(llm_processor, "aclose"):
+                    try:
+                        await asyncio.wait_for(llm_processor.aclose(), timeout=2.0)
+                    except Exception as e:
+                        logger.debug(f"[DeviceRegistry] 关闭 LLM 网关异常: {e}")
 
                 tool_manager = device.get("tool_manager")
                 if tool_manager and hasattr(tool_manager, "cleanup"):
@@ -132,6 +164,8 @@ class DeviceRegistry:
                     del self._mac_index[mac]
                 self._stats["unregister_count"] += 1
                 logger.info(f"[DeviceRegistry] 已注销设备: {device_id}, 剩余: {len(self._devices)}")
+                # 实际删除后 → 发布设备离线事件（publish 内部容错）
+                publish(EVENT_DEVICE_OFFLINE, device_id=device_id)
 
     def get(self, device_id: str):
         self._stats["lookup_count"] += 1
@@ -171,6 +205,13 @@ class DeviceRegistry:
                 session = d.get("session")
                 if session and hasattr(session, "cancel_event"):
                     session.cancel_event.set()
+                # 关闭设备的 LLM 网关（释放 AsyncOpenAI 的 SSL 连接）
+                llm_processor = getattr(session, "llm_processor", None) if session else None
+                if llm_processor is not None and hasattr(llm_processor, "aclose"):
+                    try:
+                        await asyncio.wait_for(llm_processor.aclose(), timeout=2.0)
+                    except Exception as e:
+                        logger.debug(f"[DeviceRegistry] 关闭 LLM 网关异常: {e}")
                 channel = d.get("channel")
                 if channel and hasattr(channel, "close"):
                     await channel.close()

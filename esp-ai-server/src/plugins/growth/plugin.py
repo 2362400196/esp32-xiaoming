@@ -13,7 +13,7 @@ from src.use_cases._plugin_helpers import (
 @tool()
 async def get_diary_entries(limit: int = 999, tool_manager=None) -> str:
     """获取日记列表，返回包含完整内容的日记条目 JSON。"""
-    from src.use_cases.growth.diary_service import DiaryService
+    from src.plugins.growth.engine.diary_service import DiaryService
     device_id = getattr(tool_manager, 'device_id', '') or get_device_key(tool_manager)
     if not device_id:
         return json.dumps({"success": False, "error": "未获取到设备信息"})
@@ -37,8 +37,8 @@ async def get_emotion_trend(days: int = 7, tool_manager=None) -> str:
     参数:
         days: 分析最近几天的情绪，默认 7 天
     """
-    from src.use_cases.growth.emotion_analyzer import EmotionAnalyzer
-    from src.use_cases.growth.diary_service import DiaryService
+    from src.plugins.growth.engine.emotion_analyzer import EmotionAnalyzer
+    from src.plugins.growth.engine.diary_service import DiaryService
     device_key = get_device_key(tool_manager)
     if not device_key:
         return "未获取到设备信息"
@@ -70,7 +70,7 @@ async def get_diary_summary(days: int = 7, tool_manager=None) -> str:
     参数:
         days: 最近几天，默认 7 天
     """
-    from src.use_cases.growth.diary_service import DiaryService
+    from src.plugins.growth.engine.diary_service import DiaryService
     device_key = get_device_key(tool_manager)
     if not device_key:
         return "未获取到设备信息"
@@ -91,8 +91,8 @@ async def get_diary_summary(days: int = 7, tool_manager=None) -> str:
 @tool()
 async def analyze_conversation_quality(tool_manager=None) -> str:
     """分析最近的对话质量，给出改进建议。"""
-    from src.use_cases.growth.self_learning import SelfLearningService
-    from src.use_cases.growth.diary_service import DiaryService
+    from src.plugins.growth.engine.self_learning import SelfLearningService
+    from src.plugins.growth.engine.diary_service import DiaryService
     device_key = get_device_key(tool_manager)
     if not device_key:
         return "未获取到设备信息"

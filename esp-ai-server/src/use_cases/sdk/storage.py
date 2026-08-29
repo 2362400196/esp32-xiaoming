@@ -7,6 +7,9 @@ import threading
 from typing import Any
 
 from src.infrastructure.plugin_security import require_permission
+from src.infrastructure.logging import get_logger
+
+logger = get_logger(__name__)
 
 # KV 存储进程内互斥锁：kv_set/kv_delete 是“整读-改-整写”，
 # 并发调用会互相覆盖丢失对方的写入，这里串行化保护。
@@ -146,23 +149,38 @@ def _get_kv_store_path(device_id: str = "") -> str:
         safe_id = _sanitize_device_id(device_id)
         kv_dir = os.path.join(root, "data", "plugins", "kv", safe_id)
     else:
-        # 全局共享（兼容旧用法）
+        # 全局共享（兼容旧用法）：多设备会共享此文件，
+        # 建议设备连接时携带 mac 以启用设备级隔离
+        _log_global_kv_warning()
         kv_dir = os.path.join(root, "data", "plugins", "kv")
     os.makedirs(kv_dir, exist_ok=True)
     return os.path.join(kv_dir, f"{plugin_id}.json")
 
 
+_global_kv_warn_at = 0.0
+
+
+def _log_global_kv_warning() -> None:
+    """device_id 为空时给出警告（限频：每 60 秒最多一次，避免刷日志）。"""
+    import time
+    global _global_kv_warn_at
+    now = time.time()
+    if now - _global_kv_warn_at < 60:
+        return
+    _global_kv_warn_at = now
+    logger.warning(
+        "[SDK-KV] KV 存储未携带 device_id，多设备将共享全局文件 %s（建议设备连接时携带 mac 启用设备级隔离）",
+        "data/plugins/kv",
+    )
+
+
 def _load_kv_store(device_id: str = "") -> dict:
     """加载 KV 存储。
 
-    优先读取设备级文件，不存在时依次尝试：
-    1. 全局文件 kv/{plugin}.json（旧版单设备回退）
-    2. 扫描 kv/*/{plugin}.json 下任意已有数据（device_id 变更回退）
+    device_id 非空时只读取设备级文件（不存在直接返回空）；
+    device_id 为空时读取全局文件（多设备会共享此文件，仅兼容旧用法）。
     """
-    plugin_id = _get_plugin_id()
-    root = _get_project_root()
-
-    # 1. 设备级路径
+    # 设备级路径
     path = _get_kv_store_path(device_id)
     if os.path.isfile(path):
         try:
@@ -171,35 +189,21 @@ def _load_kv_store(device_id: str = "") -> dict:
         except (json.JSONDecodeError, OSError):
             return {}
 
-    # 2. 全局文件回退
     if device_id:
-        global_path = _get_kv_store_path(device_id="")
-        if os.path.isfile(global_path):
-            try:
-                with open(global_path, "r", encoding="utf-8") as f:
-                    store = json.load(f)
-                    if store:
-                        _save_kv_store(store, device_id)
-                        return store
-            except (json.JSONDecodeError, OSError):
-                pass
+        # 安全修复：不再回退到全局文件或扫描其他设备目录复制数据——
+        # 跨设备复制会把前用户的插件数据（token/账号配置）泄露给新设备，
+        # 历史"device_id 变更迁移"需求已废弃
+        return {}
 
-    # 3. 扫描其他设备目录（device_id 变更迁移，如 bound_xxx → MAC）
-    if device_id:
-        kv_root = os.path.join(root, "data", "plugins", "kv")
-        if os.path.isdir(kv_root):
-            try:
-                for entry in os.listdir(kv_root):
-                    candidate = os.path.join(kv_root, entry, f"{plugin_id}.json")
-                    if os.path.isfile(candidate):
-                        with open(candidate, "r", encoding="utf-8") as f:
-                            store = json.load(f)
-                            if store:
-                                _save_kv_store(store, device_id)
-                                return store
-            except (OSError, json.JSONDecodeError):
-                pass
-
+    # 全局文件分支（device_id 为空）：多设备会共享此文件，
+    # 建议设备连接时携带 mac 以启用设备级隔离
+    global_path = _get_kv_store_path(device_id="")
+    if os.path.isfile(global_path):
+        try:
+            with open(global_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
     return {}
 
 

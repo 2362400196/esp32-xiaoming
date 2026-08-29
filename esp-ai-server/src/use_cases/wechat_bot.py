@@ -653,14 +653,14 @@ class WeChatBot:
         message_id_val = msg.get("message_id", int(time.time() * 1000))
         message_id = str(message_id_val)
 
-        chat_id = group_id if group_id else from_user_id
-        if not chat_id:
+        # 仅支持私聊：群聊消息直接忽略
+        if group_id:
+            logger.debug(f"[WeChat] 群聊消息已忽略，仅支持私聊: group={group_id[:20]}")
             return
 
-        # 记录群聊信息（供 App 端展示可选群聊）
-        if group_id:
-            from src.infrastructure.routes.wechat import add_recent_group
-            add_recent_group(group_id, msg)
+        chat_id = from_user_id
+        if not chat_id:
+            return
 
         # 去重
         key = self._fnv1a64(message_id)
@@ -994,3 +994,31 @@ class WeChatAPIError(Exception):
         self.code = code
         self.message = message
         super().__init__(f"[{code}] {message}")
+
+
+# ──────────────────────────────────────────────
+# 进程级单例
+# 全项目唯一 WeChatBot 实例。绝不允许直接 WeChatBot(bot_config) 另建实例——
+# 同一 token 双实例轮询会导致微信服务端 -14 session timeout、
+# token 被误判失效（历史事故，见 web.py lifespan 与 sdk/infrastructure 注释）。
+# 消息回调由 web.py lifespan 注册（完整版：转发设备 + LLM 回复）。
+# ──────────────────────────────────────────────
+_wechat_bot_singleton: Optional["WeChatBot"] = None
+
+
+def get_or_create_bot() -> "WeChatBot":
+    """获取全项目唯一的 WeChatBot 实例（懒创建，构造时自动恢复持久化 token）。"""
+    global _wechat_bot_singleton
+    if _wechat_bot_singleton is None:
+        from src.infrastructure.config import get_settings
+        cfg = get_settings().wechat_bot
+        bot_config = WeChatClientConfig(
+            token=cfg.token,
+            base_url=cfg.base_url,
+            cdn_base_url=cfg.cdn_base_url,
+            account_id=cfg.account_id,
+            app_id=cfg.app_id,
+            client_version=cfg.client_version,
+        )
+        _wechat_bot_singleton = WeChatBot(bot_config)
+    return _wechat_bot_singleton

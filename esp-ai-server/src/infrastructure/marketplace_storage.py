@@ -61,16 +61,49 @@ async def save_package(zip_bytes: bytes, slug: str, version: str) -> str:
     return rel_path
 
 
+# 图标扩展名白名单（拒绝 svg/html 等可被浏览器执行的类型，防存储型 XSS）
+_ICON_ALLOWED_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+
+def _check_icon_magic(icon_bytes: bytes, ext: str) -> None:
+    """按扩展名校验图标内容 magic bytes，不符抛 ValueError。
+
+    - png: \x89PNG
+    - jpg/jpeg: \xFF\xD8\xFF
+    - webp: RIFF....WEBP
+    - gif: GIF87a / GIF89a
+    """
+    if ext == ".png":
+        ok = icon_bytes.startswith(b"\x89PNG")
+    elif ext in (".jpg", ".jpeg"):
+        ok = icon_bytes.startswith(b"\xFF\xD8\xFF")
+    elif ext == ".webp":
+        ok = icon_bytes[:4] == b"RIFF" and icon_bytes[8:12] == b"WEBP"
+    elif ext == ".gif":
+        ok = icon_bytes[:6] in (b"GIF87a", b"GIF89a")
+    else:
+        ok = False
+    if not ok:
+        raise ValueError(f"图标内容与扩展名 {ext} 不符（已拒绝非图片文件）")
+
+
 async def save_icon(icon_bytes: bytes, slug: str, icon_name: str) -> str:
     """保存插件图标文件，返回文件名（如 icon.png）。
 
     图标统一命名为 ``icon<ext>`` 存放在 ``<slug>/`` 目录下，与 zip 包同级。
+
+    安全：仅允许 png/jpg/jpeg/webp/gif 扩展名，且内容 magic bytes 必须匹配，
+    否则抛 ValueError（上传端点转为 400），防止 svg/html 图标造成存储型 XSS。
     """
     import asyncio
 
+    ext = Path(icon_name).suffix.lower() or ".png"
+    if ext not in _ICON_ALLOWED_EXTS:
+        raise ValueError(f"图标格式不支持: {ext}（仅允许 png/jpg/jpeg/webp/gif）")
+    _check_icon_magic(icon_bytes, ext)
+
     plugin_dir = _slug_dir(slug)
     plugin_dir.mkdir(parents=True, exist_ok=True)
-    ext = Path(icon_name).suffix.lower() or ".png"
     file_name = f"icon{ext}"
     file_path = plugin_dir / file_name
     await asyncio.to_thread(file_path.write_bytes, icon_bytes)

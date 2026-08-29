@@ -93,24 +93,30 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def create_access_token(user_id: str) -> str:
-    """创建 access_token（有效期 24h）"""
+def create_access_token(user_id: str, token_version: int = 0) -> str:
+    """创建 access_token（有效期 24h）
+
+    token_version：与 users.token_version 一致；改密码/停用用户后版本号 +1，
+    旧 token 校验时版本不匹配即 401（吊销）。
+    """
     secret = _get_secret()
     payload = {
         "sub": user_id,
         "exp": datetime.now(timezone.utc) + timedelta(hours=24),
         "type": "access",
+        "token_version": int(token_version),
     }
     return jwt.encode(payload, secret, algorithm=ALGORITHM)
 
 
-def create_refresh_token(user_id: str) -> str:
-    """创建 refresh_token（有效期 30 天）"""
+def create_refresh_token(user_id: str, token_version: int = 0) -> str:
+    """创建 refresh_token（有效期 30 天），同 access_token 携带 token_version"""
     secret = _get_secret()
     payload = {
         "sub": user_id,
         "exp": datetime.now(timezone.utc) + timedelta(days=30),
         "type": "refresh",
+        "token_version": int(token_version),
     }
     return jwt.encode(payload, secret, algorithm=ALGORITHM)
 
@@ -159,6 +165,10 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="User not found")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="User disabled")
+    # Token 版本校验：改密码/管理员重置/停用后 token_version 已 +1，旧 token 直接失效
+    token_ver = payload.get("token_version", 0)
+    if int(token_ver or 0) != int(user.token_version or 0):
+        raise HTTPException(status_code=401, detail="Token revoked, please login again")
 
     return user
 
@@ -189,5 +199,9 @@ async def get_current_user_optional(
         result = await session.execute(select(UserModel).where(UserModel.id == user_id))
         user = result.scalar_one_or_none()
     if not user or not user.is_active:
+        return None
+    # 与 get_current_user 一致：版本不匹配视为已吊销
+    token_ver = payload.get("token_version", 0)
+    if int(token_ver or 0) != int(user.token_version or 0):
         return None
     return user

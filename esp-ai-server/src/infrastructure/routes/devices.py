@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import secrets
+import shutil
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Body
@@ -31,6 +33,28 @@ router = APIRouter(prefix="/api/v1", tags=["devices"])
 
 # 保持后台 Pipeline 任务引用，防止被 GC 回收
 _bg_tasks: set = set()
+
+
+def _remove_device_kv_dir(mac: str) -> None:
+    """删除设备的插件 KV 目录 data/plugins/kv/{mac}/（解绑时清除前用户的插件数据）。
+
+    路径规则与 sdk/storage.py 的 _get_kv_store_path 保持一致（设备级隔离目录），
+    此处直接复用其路径构造辅助函数。KV 可能含前用户的 token/账号配置，必须清除。
+    """
+    try:
+        from src.use_cases.sdk.storage import _get_project_root, _sanitize_device_id
+
+        kv_dir = os.path.join(
+            _get_project_root(), "data", "plugins", "kv", _sanitize_device_id(mac)
+        )
+        if os.path.isdir(kv_dir):
+            shutil.rmtree(kv_dir, ignore_errors=True)
+            logger.info(f"[Devices] 已删除设备 {mac} 的插件 KV 目录: {kv_dir}")
+        else:
+            logger.debug(f"[Devices] 设备 {mac} 无插件 KV 目录，跳过删除")
+    except Exception as e:
+        # 清理失败不阻塞解绑主流程，但必须留下告警便于人工排查
+        logger.warning(f"[Devices] 删除设备 {mac} 插件 KV 目录失败: {e}")
 
 
 class WakeupRequest(BaseModel):
@@ -384,10 +408,28 @@ async def _device_action(device_id: str, action: str, text: str) -> dict:
 
     # 纯功能动作：调用设备会话的工具管理器（插件权限/配置自动生效）
     if action == "music":
-        from src.plugins.media_player.plugin import play_random_music_to_channel
-        ok = await play_random_music_to_channel(channel, tool_manager=tool_mgr)
-        return {"code": 0 if ok else 1,
-                "message": "正在播放随机音乐" if ok else "音乐服务不可用", "data": None}
+        if not tool_mgr:
+            return {"code": 1, "message": "设备会话不可用", "data": None}
+        # 白名单检查：设备未启用 media_player 插件时直接返回友好错误，
+        # 不再绕过设备工具白名单直调插件方法（安全修复）
+        checker = getattr(tool_mgr, "_device_tool_allowed", None)
+        if callable(checker) and not checker("play_music"):
+            return {"code": 1, "message": "音乐插件未启用", "data": None}
+        # 走正规工具调用（等价随机播放：song/artist 留空即随机推荐）；
+        # play_music 成功发送音频后抛 StopPipeline 接管音频通道，视为成功；
+        # 正常返回字符串说明音乐未成功发出（未配置/搜索失败/发送失败）
+        from src.use_cases.tools_system import StopPipeline
+        try:
+            result = await tool_mgr.call_tool("play_music", {"song": "", "artist": ""})
+            if isinstance(result, str) and result:
+                logger.warning(f"[ACTION] music 未成功播放: {result}")
+                return {"code": 1, "message": "音乐服务不可用", "data": None}
+            return {"code": 0, "message": "正在播放随机音乐", "data": None}
+        except StopPipeline:
+            return {"code": 0, "message": "正在播放随机音乐", "data": None}
+        except Exception as e:
+            logger.error(f"[ACTION] music 调用失败: {e}")
+            return {"code": 1, "message": "音乐服务不可用", "data": None}
 
     action_args = {
         "weather": ("get_weather", {}),
@@ -577,6 +619,15 @@ async def api_unbind_device(device_id: str, user: UserModel = Depends(get_curren
         # 解绑同时清空绑定码，避免残留的绑定码/哨兵被复用
         device.bind_code = None
         device.bind_code_expires = None
+        # 解绑即轮换 device_key：旧 key 立即失效，防止解绑后用旧 key 连接继承前用户的对话上下文
+        # （设备重新连接会走配网绑定流程，这是预期行为）
+        device.device_key = "orphan_" + secrets.token_hex(16)
+
+        # 清理该设备的插件 KV 目录：KV 可能含前用户的 token/账号配置，必须清除
+        mac = device.mac_address or ""
+        if mac:
+            _remove_device_kv_dir(mac)
+
         session.add(device)
     return {"code": 0, "message": "Device unbound"}
 

@@ -1,5 +1,5 @@
 """
-proactive_brain.py - AI 主动推送系统
+engine.py - AI 主动推送系统（proactive_brain 插件引擎）
 
 让 AI 像朋友一样主动找用户聊天，而不是永远被动等待用户开口。
 所有推送内容由 LLM 自主决定，无固定模板，每次都不一样。
@@ -147,7 +147,7 @@ class ProactiveBrain:
 
         # 用户画像
         try:
-            from src.use_cases.growth.user_profile import UserProfileService
+            from src.plugins.growth.engine.user_profile import UserProfileService
             profile_svc = UserProfileService("")
             profile_summary = await profile_svc.get_profile_summary(device_id)
             if profile_summary and profile_summary != "暂无用户信息":
@@ -269,3 +269,16 @@ class ProactiveBrain:
                     logger.warning(f"[Proactive] 设备 {device_id} 未绑定微信")
         except Exception as e:
             logger.warning(f"[Proactive] 微信推送失败: {e}")
+
+
+# ── 模块级单例：多处调用拿同一实例 ──────────────────────────────
+
+_singleton: Optional[ProactiveBrain] = None
+
+
+def get_proactive_brain() -> ProactiveBrain:
+    """获取 ProactiveBrain 单例（所有调用方共享同一实例）。"""
+    global _singleton
+    if _singleton is None:
+        _singleton = ProactiveBrain()
+    return _singleton

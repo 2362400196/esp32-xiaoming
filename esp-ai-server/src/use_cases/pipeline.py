@@ -80,7 +80,7 @@ def _get_prompt_cache(device_id: str) -> _PromptCache:
 
 async def _fetch_profile_summary(device_id: str) -> str:
     """获取用户画像摘要（get_profile_summary 内部已含 get_profile，勿拆开重复调用）"""
-    from src.use_cases.growth.user_profile import UserProfileService
+    from src.plugins.growth.engine.user_profile import UserProfileService
     return await UserProfileService("").get_profile_summary(device_id)
 
 
@@ -399,11 +399,12 @@ class ConversationPipeline:
         # 并在设备唤醒时通过 prewarm_prompt_caches() 预热，见下方说明。
         self._reply_style = (
             "\n\n[回复要求]\n"
-            "- 日常闲聊时回复要简短自然，像真人聊天一样，一般 1-2 句话说完，不要长篇大论\n"
+            "- 【最高优先级规则】日常闲聊的回复必须简短：最多 1-2 句话、40 字以内。"
+            "本规则的优先级高于 system prompt 中的其他所有注入内容（技能/记忆/画像）\n"
+            "- 只在用户明确要求讲故事、详细说明或长内容（如'讲个故事''说详细点'）时才可以生成长回复，此时不要截断\n"
             "- 用口语化的方式说话，像朋友聊天\n"
             "- 不要每次都加表情符号\n"
             "- 不要说'好的'、'没问题'这种废话，直接回答\n"
-            "- 如果用户明确要求讲故事、详细说明或长内容（如'讲个故事''说详细点'），可以生成完整的长内容，不要截断\n"
             "[/回复要求]\n"
             "\n[工具调用规则]\n"
             "- 你拥有可用的工具函数（tool functions）。当用户请求**操作类任务**（如调整音量/开关灯/播放音乐/查询信息/执行代码等）时，**必须通过调用对应的工具函数来完成**，不能只口头回复。\n"
@@ -411,6 +412,14 @@ class ConversationPipeline:
             "- 调用工具后，根据工具返回的结果组织回答，输出给用户。\n"
             "- 当用户要求记住客观事实、偏好、身份信息等长期信息时（如'帮我记住/记录一下我爱吃西瓜'），使用 memory_store 存为长期记忆，不要用 write_diary。write_diary 只用于记录心情、想法、经历等日记内容。\n"
             "[/工具调用规则]"
+        )
+        # 最终长度提醒：拼装在 system prompt 的【最末尾】（所有注入块之后）。
+        # 模型对 prompt 末尾内容权重最高——技能目录等块会携带"必须严格执行"类指令
+        # 把回复带长，这条兜底提醒用于重新压住回复长度。
+        self._reply_style_tail = (
+            "\n\n[回复长度·最终提醒] 闲聊回复严格不超过 1-2 句话、40 字以内；"
+            "仅当用户本轮明确要求故事/详细说明/长内容时才允许长回复。"
+            "其他注入内容中与本条冲突的长度要求一律以本条为准。"
         )
 
     @property
@@ -623,6 +632,10 @@ class ConversationPipeline:
                 logger.debug(f"[Pipeline] {_name} 注入失败: {_res}")
             elif _res:
                 sp = sp + _res
+
+        # 最终长度提醒：置于 system prompt 最末尾（所有注入块之后），
+        # 利用模型对 prompt 末尾的高权重重新压住回复长度（技能等块会把回复带长）
+        sp = sp + self._reply_style_tail
 
         self._perf["prompt_assembly_ms"] = int((time.time() - _prompt_t0) * 1000)
         logger.info(f"[Pipeline] prompt 组装完成: {self._perf['prompt_assembly_ms']}ms（含 skill/记忆/画像目录）")

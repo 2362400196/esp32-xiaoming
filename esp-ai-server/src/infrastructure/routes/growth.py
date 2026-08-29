@@ -42,7 +42,7 @@ async def get_device_diary(device_id: str, date: str = "", limit: int = 30, user
     """
     if not await _check_device_owner(device_id, user):
         raise HTTPException(403, "Device not bound to you")
-    from src.use_cases.growth import DiaryService
+    from src.plugins.growth.engine import DiaryService
 
     data_dir = _get_data_dir()
     diary_service = DiaryService(data_dir)
@@ -112,13 +112,13 @@ async def get_device_growth_profile(device_id: str, user: UserModel = Depends(ge
     device_key = _resolve_device_key(device_id)
 
     # 获取用户画像
-    from src.use_cases.growth.user_profile import UserProfileService
+    from src.plugins.growth.engine.user_profile import UserProfileService
     profile_service = UserProfileService(data_dir)
     profile = await profile_service.get_profile(device_key)
     profile_dict = profile.to_dict()
 
     # 获取情绪摘要
-    from src.use_cases.growth.emotion_analyzer import EmotionAnalyzer
+    from src.plugins.growth.engine.emotion_analyzer import EmotionAnalyzer
     emotion_service = EmotionAnalyzer(data_dir)
     emotion_summary = await emotion_service.get_emotion_summary(device_key)
 
@@ -135,7 +135,7 @@ async def get_device_growth_profile(device_id: str, user: UserModel = Depends(ge
     # 统计活跃天数（有日记的天数）
     active_days = 0
     try:
-        from src.use_cases.growth.diary_service import DiaryService
+        from src.plugins.growth.engine.diary_service import DiaryService
         diary_svc = DiaryService(data_dir)
         entries = await diary_svc.get_all_entries(device_key)
         if entries:
@@ -183,7 +183,7 @@ async def get_device_emotions(device_id: str, days: int = 7, user: UserModel = D
     """获取设备的情绪历史"""
     if not await _check_device_owner(device_id, user):
         raise HTTPException(403, "Device not bound to you")
-    from src.use_cases.growth.emotion_analyzer import EmotionAnalyzer
+    from src.plugins.growth.engine.emotion_analyzer import EmotionAnalyzer
 
     data_dir = _get_data_dir()
     device_key = _resolve_device_key(device_id)

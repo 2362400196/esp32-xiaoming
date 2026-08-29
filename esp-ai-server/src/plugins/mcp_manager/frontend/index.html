@@ -10,15 +10,15 @@
 <style>
 :root {
   --mint: #10b981; --mint-deep: #059669; --mint-soft: rgba(16,185,129,0.1);
-  --mint-border: rgba(16,185,129,0.25); --text-main: #1e293b; --text-sub: #64748b;
-  --bg: #f0f5f0; --border: rgba(0,0,0,0.06); --danger: #ef4444; --danger-soft: rgba(239,68,68,0.1);
-  --radius: 16px; --radius-sm: 10px; --shadow: 0 4px 20px rgba(0,0,0,0.06);
+  --mint-border: rgba(16,185,129,0.25); --text-main: #12212e; --text-sub: #5b6b78;
+  --bg: #e9f0f4; --border: rgba(0,0,0,0.06); --danger: #ef4444; --danger-soft: rgba(239,68,68,0.1);
+  --radius: 18px; --radius-sm: 12px; --shadow: 0 2px 10px rgba(23,52,74,0.06);
   --glass: linear-gradient(155deg, rgba(255,255,255,0.85), rgba(255,255,255,0.55));
   --glass-border: rgba(255,255,255,0.6);
 }
 * { box-sizing: border-box; }
 body {
-  margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  margin: 0; padding: 0; font-family: 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', system-ui, sans-serif;
   background: var(--bg); color: var(--text-main); min-height: 100vh;
 }
 .container { max-width: 720px; margin: 0 auto; padding: 20px 16px 40px; }
@@ -29,7 +29,7 @@ body {
   display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 16px; padding: 10px 16px;
   background: var(--glass); border: 1px solid var(--glass-border);
-  border-radius: var(--radius-sm); font-size: 13px; backdrop-filter: blur(12px);
+  border-radius: var(--radius-sm); font-size: 13px; backdrop-filter: blur(14px) saturate(160%);
 }
 .device-bar .device-name { font-weight: 600; }
 .device-bar .no-device { color: var(--danger); font-weight: 600; }
@@ -50,7 +50,7 @@ body {
 .card {
   background: var(--glass); border: 1px solid var(--glass-border);
   border-radius: var(--radius); padding: 18px; margin-bottom: 12px;
-  backdrop-filter: blur(12px); box-shadow: var(--shadow);
+  backdrop-filter: blur(14px) saturate(160%); box-shadow: var(--shadow);
 }
 .card-head { display: flex; gap: 12px; }
 .card-icon {
@@ -77,11 +77,11 @@ body {
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 50px; color: var(--text-sub); }
 /* Modal */
-	.modal-mask { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); backdrop-filter: blur(12px) saturate(140%); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+	.modal-mask { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); backdrop-filter: blur(14px) saturate(160%) saturate(140%); display: flex; align-items: center; justify-content: center; z-index: 1000; }
 	.modal-panel { width: 90%; max-width: 460px; max-height: 90vh; overflow-y: auto; }
 	.modal-title { font-size: 16px; font-weight: 700; margin: 0 0 16px; }
 	/* 确认弹窗 */
-	.confirm-mask { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); backdrop-filter: blur(12px) saturate(140%); display: none; align-items: center; justify-content: center; z-index: 2000; }
+	.confirm-mask { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); backdrop-filter: blur(14px) saturate(160%) saturate(140%); display: none; align-items: center; justify-content: center; z-index: 2000; }
 	.confirm-panel { width: 380px; max-width: 90vw; padding: 36px 30px 28px; text-align: center; }
 	.confirm-icon { width: 56px; height: 56px; border-radius: 50%; margin: 0 auto 20px; display: flex; align-items: center; justify-content: center; font-size: 28px; font-weight: 800; color: #e53e3e; background: var(--danger-soft); border: 2px solid rgba(239,68,68,0.35); }
 	.confirm-title { font-size: 18px; font-weight: 700; margin: 0 0 10px; color: var(--text-main); }
@@ -138,7 +138,7 @@ textarea { resize: vertical; min-height: 60px; }
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
   padding: 10px 24px; background: var(--glass); border: 1px solid var(--glass-border);
   border-radius: var(--radius-sm); font-size: 13px; font-weight: 500;
-  backdrop-filter: blur(12px); box-shadow: 0 8px 30px rgba(0,0,0,0.1); z-index: 2000;
+  backdrop-filter: blur(14px) saturate(160%); box-shadow: 0 10px 32px rgba(23,52,74,0.10); z-index: 2000;
   animation: fadeInUp 0.3s ease;
 }
 @keyframes fadeInUp { from { opacity: 0; transform: translateX(-50%) translateY(16px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }

@@ -40,6 +40,9 @@ from src.use_cases.sdk.music import play_music_url
 from src.use_cases.sdk.io import gpio_write, gpio_read
 from src.use_cases.sdk.utils import json_dumps, get_device_key
 
+# 工具注册（插件第一入口）
+from src.use_cases.sdk.tools import tool, StopPipeline
+
 # 兼容（旧路径，仍可用）
 from src.use_cases._plugin_helpers import send_device_command, http_get_json
 ```
@@ -74,7 +77,7 @@ hello/
 **plugin.py**：
 
 ```python
-from src.use_cases.tools_system import tool
+from src.use_cases.sdk.tools import tool
 
 @tool()
 async def say_hello(name: str = "朋友", tool_manager=None) -> str:
@@ -243,7 +246,7 @@ LLM 传入的参数会自动按类型注解转换：
 工具接管了音频通道（如播放音乐），不希望 LLM 再生成回复时，抛出 `StopPipeline`：
 
 ```python
-from src.use_cases.tools_system import tool, StopPipeline
+from src.use_cases.sdk.tools import tool, StopPipeline
 
 @tool(cache=False)
 async def standby(tool_manager=None) -> str:
@@ -575,7 +578,7 @@ import json
 import struct
 import uuid
 
-from src.use_cases.tools_system import tool
+from src.use_cases.sdk.tools import tool
 from src.use_cases._plugin_helpers import ws_connect, ws_send, ws_recv, ws_close
 
 ASR_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel"
@@ -818,7 +821,7 @@ import json
 import time
 import uuid
 
-from src.use_cases.tools_system import tool
+from src.use_cases.sdk.tools import tool
 from src.use_cases._plugin_helpers import (
     http_stream_open,
     http_stream_read,
@@ -995,7 +998,7 @@ import struct
 import time
 import uuid
 
-from src.use_cases.tools_system import tool
+from src.use_cases.sdk.tools import tool
 from src.use_cases._plugin_helpers import ws_connect, ws_send, ws_recv, ws_close
 
 TTS_URL = "wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream"
@@ -1412,7 +1415,7 @@ PluginManager.update_plugin(name)
 
 | 文件 | 说明 |
 |------|------|
-| `src/use_cases/_plugin_helpers.py` | 插件公共工具库（Plugin SDK），详见[插件公共工具库（Plugin SDK）](./plugin-sdk.md) |
+| `src/use_cases/sdk/` | 插件公共工具库（Plugin SDK）源码目录，详见[插件公共工具库（Plugin SDK）](./plugin-sdk.md) |
 | `src/use_cases/tools_system.py` | 工具系统：`@tool` 装饰器、`StopPipeline`、`PerUserToolManager` |
 | `src/infrastructure/plugin_loader.py` | 插件加载器：扫描目录、进程内加载内置插件、子进程沙箱加载已安装插件、热加载 |
 | `src/infrastructure/plugin_manager.py` | 插件包管理器：安装、卸载、更新、版本检查 |

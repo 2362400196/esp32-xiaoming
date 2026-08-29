@@ -508,7 +508,7 @@ class TestLifespan:
 
         mock_tts.close.assert_called_once()
         mock_asr.close.assert_called_once()
-        mock_llm.close.assert_called_once()
+        mock_llm.aclose.assert_called_once()
         mock_tool.cleanup.assert_called_once()
         mock_shared.cleanup.assert_called_once()
 

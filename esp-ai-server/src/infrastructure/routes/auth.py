@@ -162,8 +162,9 @@ async def login(req: LoginReq):
     return {
         "code": 0, "message": "ok",
         "data": {
-            "access_token": create_access_token(user.id),
-            "refresh_token": create_refresh_token(user.id),
+            # 签发时携带当前 token_version，供 get_current_user / refresh 校验吊销
+            "access_token": create_access_token(user.id, user.token_version or 0),
+            "refresh_token": create_refresh_token(user.id, user.token_version or 0),
             "user_id": user.id,
             "email": user.email,
             "nickname": user.nickname,
@@ -188,9 +189,23 @@ async def refresh(req: RefreshReq):
     if not user_id:
         raise HTTPException(401, "Invalid token payload")
 
+    # 安全修复：refresh 必须查库校验，不能只 decode 就续签——
+    # 否则被禁用用户可永久续期，改密码后旧 refresh_token 依然有效
+    async with get_session_ctx() as session:
+        result = await session.execute(
+            select(UserModel).where(UserModel.id == user_id)
+        )
+        user = result.scalar_one_or_none()
+
+    if not user or not user.is_active:
+        raise HTTPException(401, "Invalid or expired refresh token")
+    # token_version 不匹配（改密码/管理员重置/停用后已吊销）
+    if int(payload.get("token_version", 0) or 0) != int(user.token_version or 0):
+        raise HTTPException(401, "Token revoked, please login again")
+
     return {
         "code": 0, "message": "ok",
-        "data": {"access_token": create_access_token(user_id)},
+        "data": {"access_token": create_access_token(user.id, user.token_version or 0)},
     }
 
 
@@ -237,6 +252,8 @@ async def change_password(req: PasswordChangeReq, user: UserModel = Depends(get_
         raise HTTPException(400, "Old password is incorrect")
 
     user.password_hash = hash_password(req.new_password)
+    # 吊销语义：改密码后 token_version +1，使该用户所有已签发的 JWT（含 refresh）失效
+    user.token_version = (user.token_version or 0) + 1
     async with get_session_ctx() as session:
         session.add(user)
 

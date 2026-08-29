@@ -23,6 +23,8 @@ class UserModel(Base, TimestampMixin):
     role: Mapped[str] = mapped_column(String(16), default="user", nullable=False)  # admin / user
     max_devices: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Token 版本号：修改密码/管理员重置/停用时 +1，使已签发的 JWT 全部失效（吊销）
+    token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_login: Mapped[float | None] = mapped_column(nullable=True, default=None)
     # 开发者字段（复用用户体系，无需单独注册）
     developer_api_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True, index=True)

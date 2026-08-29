@@ -238,7 +238,7 @@ msvcrt / curses / tkinter / winreg / configparser / email / platform / gc / sign
 
 ### 能做的
 
-- 声明 `permissions` 后正常使用 SDK：网络请求、设备指令、记忆读写、数据库访问、LLM 对话、TTS 合成、键值存储
+- 声明 `permissions` 后正常使用 SDK：网络请求、设备指令、**设备 IO（GPIO/PWM/ADC/舵机）**、**音乐播放**、记忆读写、数据库访问、LLM 对话、TTS 合成、键值存储
 - 用白名单标准库（`json`、`datetime`、`asyncio` 等）写业务逻辑
 - 读取和（声明后）写入自己的插件目录与状态目录
 - 读白名单内的环境变量（`<插件id>_` 或 `PLUGIN_` 前缀，或通过 `PLUGIN_ENV_ALLOWLIST` 显式放行）
@@ -263,6 +263,26 @@ msvcrt / curses / tkinter / winreg / configparser / email / platform / gc / sign
 | `插件未声明 network 权限，SDK 操作 http_get_json 已被阻止` | 权限不足 | 在 manifest 声明 `permissions: ["network"]` |
 | `插件未声明 file_write 权限，禁止写入文件` | 尝试写文件 | 声明 `file_write`，且只写插件目录/状态目录 |
 | `PermissionError: 插件「x」尝试读取非白名单环境变量 FOO` | 读环境变量越权 | 用 `<插件id>_FOO` 命名，或加 `PLUGIN_ENV_ALLOWLIST=FOO` |
+
+### 沙箱 SDK 能力对照（RPC 支持的操作）
+
+沙箱内插件调用 SDK 时，经 Adjudicator 裁决后由主进程代为执行。当前支持的操作：
+
+| 操作 | SDK 函数 | 所需权限 | 返回约定 |
+|------|---------|---------|---------|
+| 设备指令 | `send_device_command` / `send_instruct` | `device` | `None`/错误串 |
+| 指令回执 | `send_device_command_ack` / `request_device_result` / `lua_execute` / `get_device_state` / `device_command_ack` | `device` | `(result, status, detail)` |
+| 设备 IO | `gpio_mode` / `gpio_write` / `pwm_write` / `servo_write` | `device` | `"ok"`/错误串 |
+| 设备 IO 读 | `gpio_read` / `adc_read` | `device` | int，失败 `-1` |
+| 音乐播放 | `play_music_url` | `device` | `"ok"`/错误串 |
+| HTTP 请求 | `http_request` / `http_get_json` | `network` | `(resp, err)` |
+| LLM / TTS | `llm_chat` / `llm_generate` / `tts_synthesize` | `llm` / `tts` | 见 API 参考 |
+| 记忆 / KV | LTM 服务 / `kv_*` | `db` / `kv` | 见 API 参考 |
+| 文件持久化 | `plugin_data_*` | `file_read` / `file_write` | 见 API 参考 |
+
+::: warning 尚未进入沙箱 RPC 的 SDK 能力
+`get_device_registry`、`get_wechat_bot`、`speak_to_device`、`get_remote_config_provider` 等基础设施封装仅内置插件可用（它们依赖进程内单例）。沙箱插件需要设备播报时可声明 `device` 权限后走 `send_device_command` 指令通道。
+:::
 
 ---
 

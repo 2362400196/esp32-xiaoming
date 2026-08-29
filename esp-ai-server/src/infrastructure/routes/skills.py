@@ -77,7 +77,9 @@ def _extract_skill_from_upload(file_bytes: bytes, filename: str) -> tuple[str, s
                     raise ValueError("zip 中未找到 SKILL.md")
                 if ".." in skill_md or skill_md.startswith("/") or "\\" in skill_md:
                     raise ValueError("非法的文件路径")
-                content = zf.read(skill_md).decode("utf-8", errors="replace")
+                # 限额读取（防 zip 炸弹：单文件 5MB / 累计 20MB / 文件数 200）
+                from src.infrastructure.routes.marketplace import read_zip_member_checked
+                content = read_zip_member_checked(zf, skill_md).decode("utf-8", errors="replace")
         except zipfile.BadZipFile:
             raise ValueError("无效的 zip 文件")
     elif name_lower.endswith(".md"):

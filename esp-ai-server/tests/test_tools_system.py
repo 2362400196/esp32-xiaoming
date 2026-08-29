@@ -1344,6 +1344,31 @@ class TestPerUserToolManager:
         assert m._mcp_clients == []
         assert m._mcp_tool_map == {}
 
+    async def test_cleanup_shares_global_mcp_skips_close(self):
+        """共享全局 MCP 池时 cleanup 只清引用，不关闭池/断开客户端（防止断连误杀其他设备）"""
+        m = self._make_manager()
+        fake_pool = MagicMock()
+        fake_pool.close = AsyncMock()
+        m._mcp_pools["a"] = fake_pool
+        fake_client = MagicMock()
+        fake_client.disconnect = AsyncMock()
+        m._mcp_clients.append(fake_client)
+        m._mcp_tool_map["x"] = fake_client
+        m._circuit_breakers["a"] = MagicMock()
+        m._mcp_tool_schemas["a"] = []
+        m._shares_global_mcp = True
+
+        await m.cleanup()
+        # 共享池不 close / 不 disconnect，池生命周期归 app.state 全局管理
+        fake_pool.close.assert_not_awaited()
+        fake_client.disconnect.assert_not_awaited()
+        # 但本对象对池的引用被清空
+        assert m._mcp_pools == {}
+        assert m._mcp_clients == []
+        assert m._mcp_tool_map == {}
+        assert m._mcp_tool_schemas == {}
+        assert m._circuit_breakers == {}
+
 
 # ============================================================
 # create_tool_manager 工厂

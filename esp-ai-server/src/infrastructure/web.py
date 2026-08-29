@@ -198,346 +198,37 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"[Alarm] 闹钟管理器启动失败: {e}")
 
-        # 启动 AI 主动推送系统
-        try:
-            from src.use_cases.proactive_brain import ProactiveBrain
-            _brain = ProactiveBrain()
-            _brain.set_registry(_device_registry)
-            await _brain.start()
-            app.state.proactive_brain = _brain
-            logger.info("[Proactive] AI主动推送系统已启动")
-        except Exception as e:
-            logger.warning(f"[Proactive] AI主动推送系统启动失败: {e}")
+        # AI 主动推送系统已迁入 proactive_brain 插件（由插件 on_startup 钩子启动）
 
         logger.info("[Services] Auxiliary services initialized")
     except Exception as e:
         logger.warning(f"[Services] Auxiliary services initialization failed: {e}")
 
     # 启动微信 Bot（如果配置了）
+    # 消息处理回调（绑定/解绑/配对码、设备转发、LLM 回复、语音模式、上下文历史）
+    # 已完整迁入 wechat_bot 插件：src/plugins/wechat_bot/handler.py（一切皆插件）
     try:
-        settings = get_settings()
         # 初始化微信 Bot（加载持久化 token 或 .env 配置）
-        from src.use_cases.wechat_bot import WeChatBot, WeChatClientConfig
-        cfg = settings.wechat_bot
-        bot_config = WeChatClientConfig(
-            token=cfg.token,
-            base_url=cfg.base_url,
-            cdn_base_url=cfg.cdn_base_url,
-            account_id=cfg.account_id,
-            app_id=cfg.app_id,
-            client_version=cfg.client_version,
-        )
-        bot = WeChatBot(bot_config)
+        # 注意：必须用 wechat_bot.py 的单例访问器，绝不能直接 WeChatBot(bot_config)——
+        # 否则与 sdk/infrastructure.get_wechat_bot() 各持一个实例，
+        # 同一 token 双轮询会导致微信服务端 -14 session timeout、token 被误判失效
+        from src.use_cases.wechat_bot import get_or_create_bot
+        bot = get_or_create_bot()
         app.state.wechat_bot = bot
 
-        # 注册消息回调（共用逻辑，无论是否启用）
         from src.use_cases.wechat_binding import get_wechat_binding_manager
         bind_mgr = get_wechat_binding_manager()
         app.state.wechat_binding_manager = bind_mgr
 
-        async def _on_wechat_message(bot_, chat_id, sender_id, message_id, text, context_token):
-            """微信消息回调：查找绑定的设备并转发，然后通过 LLM（含工具）回复"""
-            binding = bind_mgr.get_by_wechat(chat_id)
-            if not binding:
-                # 自动绑定到第一个可用的设备
-                from src.infrastructure.web import get_device_registry
-                registry = get_device_registry()
-                if registry:
-                    device_ids = registry.get_all_ids()
-                    if device_ids:
-                        first_id = device_ids[0]
-                        entry = registry.resolve(first_id)
-                        if entry:
-                            mac = entry.get("mac", "") or entry.get("device_id", "") or first_id
-                            device_key = first_id
-                            bind_mgr.bind(chat_id, sender_id, device_key, device_mac=mac)
-                            binding = bind_mgr.get_by_wechat(chat_id)
-                            try:
-                                await bot_.send_text(chat_id, "已自动绑定设备，现在可以开始对话了")
-                            except Exception:
-                                pass
-                            logger.info(f"[WeChat] 自动绑定: wechat={chat_id[:16]} → device={device_key[:16]}")
-                if not binding:
-                    logger.info(f"[WeChat] 未绑定的微信消息: {chat_id[:16]}, 无在线设备可绑定")
-                    return
-            await bind_mgr.send_wechat_message_to_device(
-                binding.device_key, chat_id, sender_id, text
-            )
-            logger.info(f"[WeChat] 微信消息已转发给设备 {binding.device_key[:16]}: {text[:60]}")
+        # 注册消息/图片回调（由 wechat_bot 插件提供，共用逻辑，无论是否启用）
+        from src.plugins.wechat_bot.handler import on_wechat_message, on_wechat_image
+        bot.on_message = on_wechat_message
+        bot.on_attachment = on_wechat_image
 
-            # 使用完整 LLM（含工具）回复微信消息
-            try:
-                # 优先复用设备 session 的 llm_processor（与语音对话使用相同配置）
-                from src.interfaces.llm_gateways import OpenAILLMGateway, create_llm_gateway
-                from src.infrastructure.web import get_device_registry
-                from src.use_cases.tools_system import PerUserToolManager
-                settings = get_settings()
-
-                registry = get_device_registry()
-                device_tool_mgr = None
-                device_channel = None
-                device_llm = None
-                if registry:
-                    entry = registry.resolve(binding.device_key)
-                    if entry and isinstance(entry, dict):
-                        device_channel = entry.get('channel')
-                        device_tool_mgr = entry.get('tool_manager')
-                        device_llm = entry.get('session', None)
-                        if device_llm:
-                            device_llm = getattr(device_llm, 'llm_processor', None)
-
-                if device_llm:
-                    # 设备在线时，从 session 的 llm_processor 获取配置，创建独立网关（避免修改共享对象）
-                    wechat_prompt = device_llm.system_prompt or ""
-                    llm_api_key = device_llm.api_key
-                    llm_base_url = device_llm.base_url
-                    llm_model = device_llm.model
-                    if not device_tool_mgr:
-                        device_tool_mgr = getattr(device_llm, 'tool_manager', None)
-                    logger.info(f"[WeChat] 使用设备 session 的 LLM 配置（含 MCP 工具）")
-                else:
-                    # 设备不在线时，创建独立的 LLM 网关
-                    shared_tm = getattr(app.state, 'shared_tool_manager', None)
-                    if not shared_tm:
-                        logger.warning(f"[WeChat] 工具管理器不可用")
-                        return
-
-                    if not device_tool_mgr:
-                        shared_tm.ensure_discovered()
-                        device_tool_mgr = PerUserToolManager(shared=shared_tm, channel=device_channel, device_id=binding.device_mac)
-                        logger.info(f"[WeChat] 使用共享工具管理器（无 MCP），channel={device_channel}")
-                    else:
-                        logger.info(f"[WeChat] 使用设备 session 的 tool_manager（含 MCP），channel={device_tool_mgr.channel}")
-
-                    # 从数据库加载设备 LLM 配置
-                    wechat_prompt = ""
-                    llm_api_key = settings.llm.api_key
-                    llm_base_url = settings.llm.base_url
-                    llm_model = settings.llm.model
-                    device_model = None
-                    try:
-                        import asyncio as _asyncio
-                        from src.infrastructure.db.compat.sync_session import get_sync_session
-                        from src.infrastructure.db.models.device import DeviceModel
-                        from sqlalchemy import select
-
-                        def _load_device_model():
-                            with get_sync_session() as sess:
-                                r = sess.execute(select(DeviceModel).where(
-                                    DeviceModel.device_key == binding.device_key))
-                                return r.scalar_one_or_none()
-
-                        device_model = await _asyncio.to_thread(_load_device_model)
-                        if device_model:
-                            if device_model.llm_api_key:
-                                llm_api_key = device_model.llm_api_key
-                            if device_model.llm_base_url:
-                                llm_base_url = device_model.llm_base_url
-                            if device_model.llm_model:
-                                llm_model = device_model.llm_model
-                            if device_model.llm_system_prompt:
-                                wechat_prompt = device_model.llm_system_prompt
-                    except Exception as db_err:
-                        logger.warning(f"[WeChat] 加载设备配置失败: {db_err}")
-
-                    if not wechat_prompt:
-                        wechat_prompt = settings.llm.system_prompt or "你是一个智能语音助手。"
-
-                # ── 注入设备能力边界、技能目录、长期记忆等上下文 ──
-                try:
-                    from src.use_cases import skill_system
-
-                    # 设备能力边界
-                    _tm = device_tool_mgr
-                    if _tm is not None and hasattr(_tm, '_enabled_plugins'):
-                        _installed = _tm._enabled_plugins
-                        if _installed is not None and len(_installed) > 0:
-                            _cap_note = (f"\n\n【设备能力边界】本设备仅启用插件: {'、'.join(sorted(_installed))}。"
-                                         "用户询问的功能如果不在上述插件能力或系统自带能力范围内，"
-                                         "直接回答\"该功能未安装/设备暂不支持\"，"
-                                         "绝不可以用猜测、编造或历史经验回答，也不要假装执行了操作。")
-                            wechat_prompt = (wechat_prompt + _cap_note) if wechat_prompt else _cap_note
-
-                    # Skill 目录（按消息内容动态检索）
-                    skill_catalog = skill_system.render_skills_catalog(device_id=binding.device_key, query=text)
-                    if skill_catalog:
-                        wechat_prompt = wechat_prompt + "\n\n" + skill_catalog if wechat_prompt else skill_catalog
-
-                    # 长期记忆摘要标签
-                    try:
-                        from src.use_cases.memory import LongTermMemoryServiceImpl
-                        from src.infrastructure.db.repositories.ltm_repository import SqlLongTermMemoryRepository
-                        _ltm_repo = SqlLongTermMemoryRepository()
-                        _ltm = LongTermMemoryServiceImpl(repository=_ltm_repo)
-                        _catalog = await _ltm.get_summary_catalog(binding.device_key)
-                        if _catalog:
-                            _ltm_block = (
-                                "\n\n[Long-term Memory Summary Labels]\n"
-                                "用户提到相关话题时，主动调用 memory_recall 回忆（标签见下）：\n"
-                                f"{_catalog}\n"
-                                "[/Long-term Memory]"
-                            )
-                            wechat_prompt = wechat_prompt + _ltm_block if wechat_prompt else _ltm_block
-                    except Exception as e:
-                        logger.debug(f"[WeChat] LTM 注入失败: {e}")
-
-                    # 用户画像
-                    try:
-                        from src.use_cases.growth.user_profile import UserProfileService
-                        _profile_svc = UserProfileService("")
-                        _profile_summary = await _profile_svc.get_profile_summary(binding.device_key)
-                        if _profile_summary and _profile_summary != "暂无用户信息":
-                            _profile_block = (
-                                "\n\n[User Profile]\n"
-                                "以下是该用户的画像信息，帮助你在回答时更个性化：\n"
-                                f"{_profile_summary}\n"
-                                "[/User Profile]"
-                            )
-                            wechat_prompt = wechat_prompt + _profile_block if wechat_prompt else _profile_block
-                    except Exception as e:
-                        logger.debug(f"[WeChat] 用户画像注入失败: {e}")
-                except Exception as e:
-                    logger.warning(f"[WeChat] 注入上下文失败: {e}")
-
-                # WeChat 专属后缀（在注入之后追加，确保不被覆盖）
-                wechat_prompt += " 用户通过微信和你聊天，请用自然口语化的微信聊天风格回复，控制在200字以内。可以适当使用emoji表情符号让回复更生动亲切。不要使用[e:情绪]标签。"
-
-                llm_with_tools = OpenAILLMGateway(
-                    config={
-                        "api_key": llm_api_key,
-                        "base_url": llm_base_url,
-                        "model": llm_model,
-                        "system_prompt": wechat_prompt,
-                    },
-                    tool_manager=device_tool_mgr,
-                )
-
-                # 语音模式开关检测（必须在 LLM 调用之前）
-                if not hasattr(bot_.state, 'voice_mode'):
-                    bot_.state.voice_mode = {}
-                if "打开语音模式" in text:
-                    bot_.state.voice_mode[chat_id] = True
-                    logger.info(f"[WeChat] 语音模式已开启")
-                elif "关闭语音模式" in text:
-                    bot_.state.voice_mode[chat_id] = False
-                    logger.info(f"[WeChat] 语音模式已关闭")
-
-                # 构建对话上下文
-                context_text = text
-                history = bot_.state.conversation_history.get(chat_id, [])
-                if history:
-                    context_lines = ["以下是历史对话上下文："]
-                    for msg in history[-6:]:  # 最近 3 轮
-                        role = "用户" if msg["role"] == "user" else "助手"
-                        context_lines.append(f"{role}: {msg['content'][:100]}")
-                    context_lines.append(f"\n新的用户消息：{text}")
-                    context_text = "\n".join(context_lines)
-
-                # 在上下文中注明当前（已更新后的）语音模式
-                is_voice_mode = bot_.state.voice_mode.get(chat_id, False)
-                if is_voice_mode:
-                    context_text += "\n[当前语音模式已开启，回复会自动语音播报]"
-                else:
-                    context_text += "\n[当前语音模式已关闭，仅文字回复]"
-
-                # 收集工具 LLM 回复（带 30 秒超时）
-                logger.info(f"[WeChat] 开始 LLM 处理消息: {text[:50]}")
-                full_reply = ""
-                try:
-                    async def _collect_reply():
-                        r = ""
-                        async for chunk in llm_with_tools.stream_with_tools(context_text, device_id=binding.device_key):
-                            if chunk:
-                                r += chunk
-                        return r
-                    full_reply = await asyncio.wait_for(_collect_reply(), timeout=30.0)
-                except asyncio.TimeoutError:
-                    logger.warning(f"[WeChat] LLM 处理超时 (30s)")
-                except Exception as stream_err:
-                    logger.error(f"[WeChat] LLM 流式处理异常: {stream_err}", exc_info=True)
-                logger.info(f"[WeChat] LLM 处理完成，回复长度: {len(full_reply)}")
-
-                if full_reply and not full_reply.startswith("LLM not configured"):
-                    import re
-                    clean_reply = re.sub(r'\[e:[^\]]*\]', '', full_reply).strip() or full_reply
-                    # 语音模式下加标识
-                    is_voice = bot_.state.voice_mode.get(chat_id, False) if hasattr(bot_.state, 'voice_mode') else False
-                    display_reply = clean_reply + (" 🔊" if is_voice else "")
-                    await bot_.send_text(chat_id, display_reply)
-                    logger.info(f"[WeChat] LLM 回复已发送: {clean_reply[:80]}")
-
-                    # 保存对话上下文（最多 10 轮）
-                    if not hasattr(bot_.state, 'conversation_history'):
-                        bot_.state.conversation_history = {}
-                    history = bot_.state.conversation_history.setdefault(chat_id, [])
-                    history.append({"role": "user", "content": text})
-                    history.append({"role": "assistant", "content": clean_reply})
-                    if len(history) > 20:
-                        bot_.state.conversation_history[chat_id] = history[-20:]
-
-                    # 回复设备语音：语音模式下所有回复都 TTS 播报
-                    try:
-                        need_speak = bot_.state.voice_mode.get(chat_id, False)
-                        if need_speak:
-                            speaker = getattr(app.state, 'speaker', None)
-                            if speaker and device_channel:
-                                # TTS 播报为后台任务，通过 task_manager 持有引用，失败记 ERROR 日志
-                                background_task(speaker.speak(
-                                    binding.device_key, clean_reply,
-                                    user_config=device_model,
-                                ), name="wechat_device_tts")
-                                logger.info(f"[WeChat] 已触发设备 TTS 播放")
-                    except Exception as tts_err:
-                        logger.warning(f"[WeChat] 设备 TTS 播放失败: {tts_err}")
-            except Exception as llm_err:
-                logger.error(f"[WeChat] LLM 工具回复失败: {llm_err}", exc_info=True)
-
-        bot.on_message = _on_wechat_message
-
-        # 图片消息回调：AI 视觉识别
-        async def _on_wechat_image(bot_, chat_id, sender_id, message_id, payload):
-            """微信图片消息回调：调用视觉 LLM 识别"""
-            if not payload or payload.get("type") != "image":
-                return
-            img_url = payload.get("data_url", "")
-            wechat_chat_id = payload.get("chat_id", "") or chat_id
-            if not img_url:
-                return
-            logger.info(f"[WeChat] 收到图片，调用视觉 LLM 识别")
-            try:
-                llm_raw = getattr(app.state, 'llm_gateway', None)
-                if not llm_raw or not hasattr(llm_raw, 'generate'):
-                    return
-                messages = [
-                    {"role": "system", "content": "请用简短的中文描述这张图片的内容，控制在100字以内。"},
-                    {"role": "user", "content": [
-                        {"type": "text", "text": "请描述这张图片"},
-                        {"type": "image_url", "image_url": {"url": img_url}},
-                    ]},
-                ]
-                reply = await llm_raw.generate(messages)
-                if reply:
-                    import re
-                    clean = re.sub(r'\[e:[^\]]*\]', '', reply).strip()
-                    await bot_.send_text(wechat_chat_id, clean or reply)
-                    logger.info(f"[WeChat] 图片识别结果已发送: {clean[:80]}")
-            except Exception as e:
-                err_str = str(e)
-                if "image_url" in err_str or "vision" in err_str.lower() or "400" in err_str:
-                    await bot_.send_text(wechat_chat_id, "抱歉，当前模型不支持图片识别功能 🤖 请用文字描述你的需求")
-                    logger.info(f"[WeChat] 当前模型不支持图片识别")
-                else:
-                    logger.error(f"[WeChat] 图片识别失败: {e}")
-
-        bot.on_attachment = _on_wechat_image
-
-        # 自动启动轮询
+        # 自动启动轮询（get_or_create_bot 构造时已从 .env/持久化文件加载 token：
+        # 有 token 则 configured=True，无 token 需扫码登录）
         if bot.state.configured:
             await bot.start()
-            # logger.info("[WeChatBot] 微信 Bot 已启动（从文件恢复 token）")
-        elif cfg.token:
-            await bot.start()
-            # logger.info("[WeChatBot] 微信 Bot 已启动（配置了 token）")
         else:
             logger.info("[WeChatBot] 微信 Bot 已创建（无 token，需扫码登录）")
 
@@ -554,6 +245,36 @@ async def lifespan(app: FastAPI):
     logger.info("[Shutdown] Starting graceful shutdown...")
     logger.info("=" * 60)
 
+    # ── 阶段 1：停业务入口，防止新的后台任务继续产生 ──
+    # 必须最先关闭微信 Bot（停止轮询），并取消所有后台任务：
+    # 设备断连通知、闹钟触发等 fire-and-forget 任务如果在网关关闭后
+    # 才执行，会撞上已关闭的 HTTP 客户端/TTS 报错刷屏（历史日志可见）
+    if hasattr(app.state, 'wechat_bot') and app.state.wechat_bot:
+        try:
+            await app.state.wechat_bot.stop()
+            logger.info("[Shutdown] WeChat Bot closed")
+        except Exception as e:
+            logger.error(f"[Shutdown] Error closing WeChat Bot: {e}")
+
+    from src.infrastructure.task_manager import cancel_all
+    try:
+        cancel_all()
+        # 让已取消的任务完成收尾（有界等待，避免卡死关闭流程）
+        await asyncio.sleep(0.3)
+        logger.info("[Shutdown] Background tasks cancelled")
+    except Exception as e:
+        logger.error(f"[Shutdown] Error cancelling background tasks: {e}")
+
+    # ── 阶段 2：关闭设备会话（会话内的 pipeline/ASR 已被 cancel_all 波及）──
+    registry = get_device_registry()
+    if registry:
+        try:
+            await registry.close_all()
+            logger.info("[Shutdown] Device sessions closed")
+        except Exception as e:
+            logger.error(f"[Shutdown] Error closing device sessions: {e}")
+
+    # ── 阶段 3：关闭底层网关与连接池（此时已无业务在途）──
     if hasattr(app.state, 'tts_gateway') and app.state.tts_gateway:
         try:
             await app.state.tts_gateway.close()
@@ -592,11 +313,12 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"[Shutdown] Error closing ASR gateway: {e}")
 
-    # 清理 LLM 网关
+    # 清理 LLM 网关（aclose 释放 AsyncOpenAI 的 SSL 连接，
+    # 避免进程退出时 GC 报 'Event loop is closed'）
     if hasattr(app.state, 'llm_gateway') and app.state.llm_gateway:
         try:
-            if hasattr(app.state.llm_gateway, 'close'):
-                await app.state.llm_gateway.close()
+            if hasattr(app.state.llm_gateway, 'aclose'):
+                await app.state.llm_gateway.aclose()
                 logger.info("[Shutdown] LLM gateway closed")
         except Exception as e:
             logger.error(f"[Shutdown] Error closing LLM gateway: {e}")
@@ -610,17 +332,9 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"[Shutdown] Error closing shared tool manager: {e}")
 
-    # 关闭并发控制模块
+    # 关闭并发控制模块（线程池，最后关）
     shutdown()
     logger.info("[Shutdown] Concurrency module closed")
-
-    # 关闭微信 Bot
-    if hasattr(app.state, 'wechat_bot') and app.state.wechat_bot:
-        try:
-            await app.state.wechat_bot.stop()
-            logger.info("[Shutdown] WeChat Bot closed")
-        except Exception as e:
-            logger.error(f"[Shutdown] Error closing WeChat Bot: {e}")
 
     logger.info("[Shutdown] Graceful shutdown complete")
 
@@ -670,6 +384,7 @@ def create_app() -> FastAPI:
         {"name": "growth", "description": "AI 成长系统：设备日记、用户画像、情绪历史"},
         {"name": "marketplace", "description": "云市场：开发者认证、插件上传/下载、评论、分类聚合"},
         {"name": "admin", "description": "管理员后台：用户管理、设备管理、系统统计"},
+        {"name": "wechat", "description": "微信集成：设备绑定配对码管理"},
     ]
 
     app = FastAPI(
@@ -1080,6 +795,10 @@ def _register_routes(app: FastAPI) -> None:
     # 管理员后台路由
     from src.infrastructure.routes.admin import router as admin_router
     app.include_router(admin_router)
+
+    # 微信集成路由（配对码绑定流程）
+    from src.infrastructure.routes.wechat import router as wechat_router
+    app.include_router(wechat_router)
 
 
 def get_server_ips() -> list[str]:

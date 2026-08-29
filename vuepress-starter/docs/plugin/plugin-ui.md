@@ -88,29 +88,42 @@ plugins/my_plugin/
 
 ## CSS 样式规范
 
-### 系统 CSS 变量
+### 主题机制与系统 CSS 变量
 
-插件页面可以使用以下 CSS 变量，确保与主应用风格统一：
+插件页面通过 iframe 嵌入主应用，**继承不到主站的 CSS 变量**。服务端在返回插件页面 HTML 时会自动注入共享主题（`/api/v1/plugins/theme.css`），包含以下与主应用对齐的设计 token——**无需插件做任何操作**，直接使用即可：
 
 ```css
 :root {
   --mint: #10b981;              /* 主色调 - 薄荷绿 */
   --mint-deep: #059669;         /* 主色调深色 */
-  --mint-soft: rgba(16,185,129,0.1);   /* 主色调浅色背景 */
-  --mint-border: rgba(16,185,129,0.25); /* 主色调边框 */
-  --text-main: #1e293b;         /* 主文字色 */
-  --text-sub: #64748b;          /* 次要文字色 */
-  --bg: #f0f5f0;               /* 背景色 */
-  --border: rgba(0,0,0,0.06);  /* 分割线 */
+  --mint-soft: rgba(16,185,129,0.12);   /* 主色调浅色背景 */
+  --mint-border: rgba(16,185,129,0.35); /* 主色调边框 */
+  --text-main: #12212e;         /* 主文字色 */
+  --text-sub: #5b6b78;          /* 次要文字色 */
+  --text-light: #8fa0ad;        /* 弱文字色 */
+  --bg: #e9f0f4;                /* 背景色 */
+  --border: rgba(0,0,0,0.06);   /* 分割线 */
   --danger: #ef4444;            /* 危险/删除操作 */
   --danger-soft: rgba(239,68,68,0.1);
-  --radius: 16px;               /* 大圆角 */
-  --radius-sm: 10px;            /* 小圆角 */
-  --shadow: 0 4px 20px rgba(0,0,0,0.06);
-  --glass: linear-gradient(155deg, rgba(255,255,255,0.85), rgba(255,255,255,0.55));
-  --glass-border: rgba(255,255,255,0.6);
+  --radius: 18px;               /* 大圆角 */
+  --radius-sm: 12px;            /* 小圆角 */
+  --radius-xs: 8px;             /* 微圆角 */
+  --shadow: 0 2px 10px rgba(23,52,74,0.06);
+  --shadow-lg: 0 10px 32px rgba(23,52,74,0.10);
+  --glass: linear-gradient(155deg, rgba(255,255,255,0.72), rgba(255,255,255,0.38));
+  --glass-border: rgba(255,255,255,0.72);
+}
+body {
+  background: var(--bg); color: var(--text-main);
+  font-family: 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', system-ui, sans-serif;
 }
 ```
+
+::: warning 不要在页面里重新定义这些 token
+注入的主题位于页面自身样式**之后**，同名 token 以主题为准。在页面里硬编码这些值不仅会被覆盖，还会误导后续维护。页面**特有的**变量（如插件专属强调色）正常定义即可，互不冲突。
+
+主题调整只需改服务端 `esp-ai-server/src/infrastructure/routes/plugin_frontend.py` 的 `_THEME_CSS` 一处，所有插件页面即时生效。
+:::
 
 ### 常用组件样式
 
@@ -123,7 +136,7 @@ plugins/my_plugin/
   border-radius: var(--radius);
   padding: 18px;
   margin-bottom: 12px;
-  backdrop-filter: blur(12px);
+  backdrop-filter: blur(14px) saturate(160%);
   box-shadow: var(--shadow);
 }
 ```
@@ -596,7 +609,7 @@ function showToast(msg) {
   padding: 10px 24px; background: var(--glass);
   border: 1px solid var(--glass-border); border-radius: var(--radius-sm);
   font-size: 13px; font-weight: 500;
-  backdrop-filter: blur(12px); box-shadow: 0 8px 30px rgba(0,0,0,0.1);
+  backdrop-filter: blur(14px) saturate(160%); box-shadow: 0 8px 30px rgba(0,0,0,0.1);
   z-index: 2000;
   animation: fadeInUp 0.3s ease;
 }
@@ -618,17 +631,19 @@ function showToast(msg) {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>数据管理</title>
 <style>
+/* 以下 token 由服务端自动注入的 theme.css 提供，这里写出来仅为独立预览；
+   实际运行时以注入的主题为准，请勿在页面里重新定义 */
 :root {
-  --mint: #10b981; --mint-deep: #059669; --mint-soft: rgba(16,185,129,0.1);
-  --mint-border: rgba(16,185,129,0.25); --text-main: #1e293b; --text-sub: #64748b;
-  --bg: #f0f5f0; --border: rgba(0,0,0,0.06); --danger: #ef4444; --danger-soft: rgba(239,68,68,0.1);
-  --radius: 16px; --radius-sm: 10px; --shadow: 0 4px 20px rgba(0,0,0,0.06);
-  --glass: linear-gradient(155deg, rgba(255,255,255,0.85), rgba(255,255,255,0.55));
-  --glass-border: rgba(255,255,255,0.6);
+  --mint: #10b981; --mint-deep: #059669; --mint-soft: rgba(16,185,129,0.12);
+  --mint-border: rgba(16,185,129,0.35); --text-main: #12212e; --text-sub: #5b6b78;
+  --bg: #e9f0f4; --border: rgba(0,0,0,0.06); --danger: #ef4444; --danger-soft: rgba(239,68,68,0.1);
+  --radius: 18px; --radius-sm: 12px; --shadow: 0 2px 10px rgba(23,52,74,0.06);
+  --glass: linear-gradient(155deg, rgba(255,255,255,0.72), rgba(255,255,255,0.38));
+  --glass-border: rgba(255,255,255,0.72);
 }
 * { box-sizing: border-box; }
 body {
-  margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  margin: 0; padding: 0; font-family: 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', system-ui, sans-serif;
   background: var(--bg); color: var(--text-main); min-height: 100vh;
 }
 .container { max-width: 720px; margin: 0 auto; padding: 20px 16px 40px; }
@@ -639,7 +654,7 @@ body {
   display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 16px; padding: 10px 16px;
   background: var(--glass); border: 1px solid var(--glass-border);
-  border-radius: var(--radius-sm); font-size: 13px; backdrop-filter: blur(12px);
+  border-radius: var(--radius-sm); font-size: 13px; backdrop-filter: blur(14px) saturate(160%);
 }
 .device-bar .device-name { font-weight: 600; }
 .device-bar .no-device { color: var(--danger); font-weight: 600; }
@@ -659,7 +674,7 @@ body {
 .card {
   background: var(--glass); border: 1px solid var(--glass-border);
   border-radius: var(--radius); padding: 18px; margin-bottom: 12px;
-  backdrop-filter: blur(12px); box-shadow: var(--shadow);
+  backdrop-filter: blur(14px) saturate(160%); box-shadow: var(--shadow);
 }
 .item-row {
   display: flex; align-items: center; justify-content: space-between;
@@ -953,7 +968,8 @@ if (did) {
 - 检查 postMessage 的 `type` 字段是否正确
 
 **页面样式与主应用不一致**
-- 使用本文档提供的 CSS 变量和样式规范
+- 服务端会自动注入共享主题（`/api/v1/plugins/theme.css`），同名 token 以主题为准
+- 检查页面里是否硬编码了主题 token 的值（应只引用 `var(--xxx)`，不重新定义）
 - 避免使用硬编码的颜色值
 
 ### 热更新
@@ -968,7 +984,7 @@ POST /api/v1/plugins/reload
 
 ## 开发规范
 
-1. **样式统一**：使用系统提供的 CSS 变量，保持与主应用风格一致
+1. **样式统一**：使用系统提供的 CSS 变量，保持与主应用风格一致（见「主题机制与系统 CSS 变量」）
 2. **响应式**：适配移动端和桌面端，建议 `max-width: 720px` 居中布局
 3. **错误处理**：所有 API 请求都应处理失败情况，给用户友好提示
 4. **加载状态**：数据加载时应显示加载动画，避免白屏
@@ -976,3 +992,4 @@ POST /api/v1/plugins/reload
 6. **命名规范**：插件 ID 使用英文小写和下划线，如 `my_plugin`
 7. **文件编码**：所有文件使用 UTF-8 编码
 8. **安全性**：不要在前端暴露敏感信息（密钥、密码等），所有 API 调用走 postMessage 代理，由父应用统一管理 JWT Token；插件配置通过 `save_config` 工具写入 KV 存储，不经过主数据库
+

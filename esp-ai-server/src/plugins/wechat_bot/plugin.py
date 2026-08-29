@@ -151,7 +151,10 @@ async def _api_apply_token():
     bot = get_wechat_bot()
     ok = await bot.apply_qr_token_and_start()
     if ok:
-        # 自动绑定：将扫码用户的微信账号绑定到第一个在线设备
+        # 扫码用户的微信账号自动绑定——但仅在服务器只有一台设备时：
+        # 扫码是在 Web 控制台完成的（操作者即设备主人），单设备场景无歧义；
+        # 多设备时无法推断归属，走配对码流程（Web 控制台生成，微信发"绑定 XXXXXX"）。
+        # 注意：不能无条件绑到"第一台设备"——那是任意陌生人可控制设备的漏洞。
         user_id = bot.state.qr.ilink_user_id
         if user_id:
             from src.use_cases.wechat_binding import get_wechat_binding_manager
@@ -160,18 +163,25 @@ async def _api_apply_token():
             binding = mgr.get_by_wechat(user_id)
             if not binding:
                 registry = get_device_registry()
-                if registry:
-                    device_ids = registry.get_all_ids()
-                    if device_ids:
-                        first_id = device_ids[0]
-                        entry = registry.resolve(first_id)
-                        if entry:
-                            mac = entry.get("mac", "") or entry.get("device_id", "") or first_id
-                            mgr.bind(user_id, user_id, first_id, device_mac=mac)
-                            try:
-                                await bot.send_text(user_id, "已自动绑定设备，现在可以开始对话了")
-                            except Exception:
-                                pass
+                device_ids = registry.get_all_ids() if registry else []
+                if len(device_ids) == 1:
+                    first_id = device_ids[0]
+                    entry = registry.resolve(first_id)
+                    if entry:
+                        mac = entry.get("mac", "") or entry.get("device_id", "") or first_id
+                        mgr.bind(user_id, user_id, first_id, device_mac=mac)
+                        try:
+                            await bot.send_text(user_id, "已自动绑定你的设备，现在可以开始对话了")
+                        except Exception:
+                            pass
+                elif len(device_ids) > 1:
+                    try:
+                        await bot.send_text(
+                            user_id,
+                            "检测到多台设备，请在 Web 控制台生成配对码后发送：绑定 XXXXXX",
+                        )
+                    except Exception:
+                        pass
     return {"ok": ok}
 
 

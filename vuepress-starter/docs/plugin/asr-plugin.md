@@ -1,109 +1,15 @@
 # ASR 插件开发教程
-
-ASR（Automatic Speech Recognition，自动语音识别）插件是系统的 **AI 服务提供商**之一，负责把设备端采集的麦克风音频实时转成文字，是语音交互闭环的第一环：
-
-```
-用户说话 → 设备采集音频 → [ASR 插件] → 识别文本 → LLM 生成回复 → TTS 播报
-```
-
-与天气、闹钟这类普通工具插件不同，ASR 插件**不直接控制设备**，而是把外部语音识别服务接入系统，供核心语音交互流程调用。本文以**火山引擎 SAUC 协议**为例，从原理到完整实现，带你写一个可上架的 ASR 服务插件。
-
 ::: tip 先看这个
 编写前建议先阅读 [插件开发教程](./plugin-dev.md) 了解插件基础概念，以及 [插件公共工具库（Plugin SDK）](./plugin-sdk.md) 了解 SDK 提供的 WebSocket 封装。
 :::
 
-## 一、ASR 插件在系统中的位置
+ASR 插件把外部语音识别服务接入系统：设备采集的麦克风音频实时流给插件，插件返回识别文本。本篇以火山引擎为例给出可直接改编的完整实现。
 
-### 1.1 与普通工具插件的区别
+开发者只需要关心两件事：**按契约实现 5 个工具**（下文表格），以及**对接你选择的 ASR 厂商协议**（直接改编文中的完整示例）。系统如何调度插件、如何与设备对接，框架已全部处理，无需了解。
 
-| 维度 | 普通工具插件 | ASR 服务插件 |
-|------|-------------|-------------|
-| 调用方 | LLM 自主决策调用 | 系统语音流程按固定顺序调用 |
-| 数据形态 | 一次性请求/响应 | **流式**：音频边产生边传输，文本边识别边返回 |
-| 状态管理 | 无状态 | **跨多次调用**保存会话状态 |
-| 底层依赖 | `http_request` | WebSocket（双向流式） |
-| 返回值 | 文本（会被 TTS 播报） | 结构化 dict（`session_id`/`text`/`is_final`） |
-| 声明方式 | 普通 manifest | `provides: {"asr": [...]}` 声明服务能力 |
+先读 [插件开发教程](./plugin-dev.md) 了解基础概念，SDK 的 WebSocket 封装见 [Plugin SDK](./plugin-sdk.md)。
 
-### 1.2 系统如何调用 ASR 插件
-
-系统在设备建立 WebSocket 连接时，通过 `create_plugin_asr_gateway()` 检查是否有已注册的 ASR 服务插件。**只要插件声明了 `provides.asr` 且必需工具齐全，系统就优先走插件网关**，否则回退到内置的传统 ASR 网关（火山/腾讯/阿里/讯飞）。
-
-```
-设备连接
-  ↓
-ws_session_handler 初始化 ASR
-  ├─ 有 ASR 插件 → PluginASRGateway（is_plugin=True）
-  │     └─ 通过 service_plugin_adapter 调用插件工具
-  └─ 无 ASR 插件 → 传统网关（create_asr_gateway）
-```
-
-插件网关 `PluginASRGateway` 实现了与内置 `BaseASRGateway` 相同的 duck-typing 接口，因此 **Session/Pipeline 代码无需任何修改**，插件开发者只需要在 `plugin.py` 中实现约定的工具函数。
-
-## 二、工作原理：双向流式 WebSocket
-
-### 2.1 数据流模型
-
-ASR 是**双向流式**：客户端持续发送音频分片，服务端持续返回识别文本。以火山引擎 SAUC 协议为例：
-
-```
-客户端 → 服务端：初始化配置帧 → 音频数据帧 → 结束帧
-服务端 → 客户端：识别结果帧（增量文本 + 最终标记）
-```
-
-整个会话生命周期：
-
-```
-┌────────────┐      ┌──────────────┐      ┌──────────────┐
-│ start_session │──→│  send_audio   │──→  │  end_session  │
-│  连接+初始化   │      │  循环发送音频   │      │  结束+取最终结果 │
-└────────────┘      └──────────────┘      └──────────────┘
-       │                    │                      │
-       │  返回 session_id    │   get_result 轮询     │  返回 final_text
-       ▼                    ▼                      ▼
-```
-
-- **`start_session`**：建立 WebSocket 连接，发送初始化配置（音频格式、模型参数），返回 `session_id`
-- **`send_audio`**：把设备采集的音频分片（base64）发送给服务端
-- **`get_result`**：从服务端拉取最新识别结果（增量文本 + `is_final` 标记），供上层实时展示
-- **`end_session`**：发送结束帧，读取最终识别结果，关闭连接
-
-### 2.2 SAUC 协议帧格式
-
-火山引擎 SAUC（Streaming Audio Understanding Client）协议是二进制帧协议，每帧由 **4 字节头部 + 4 字节 payload 长度 + payload** 组成：
-
-```
-┌──────────────┬──────────────┬──────────────────────────┐
-│  4 字节头部   │  4 字节长度   │  payload（JSON / 音频）    │
-└──────────────┴──────────────┴──────────────────────────┘
-头部字节：
-  byte0: version(高4位) | header_size(低4位)
-  byte1: message_type(高4位) | flags(低4位)
-  byte2: serialization(高4位) | compression(低4位)
-  byte3: 保留
-```
-
-**message_type 取值**：
-
-| message_type | 含义 |
-|:---:|---|
-| `1` | 客户端初始化配置帧（JSON payload） |
-| `2` | 音频数据帧（payload 为裸 PCM 音频） |
-| `2` + flags=2 | 结束帧（payload 长度为 0） |
-| 服务端返回 | 识别结果帧（JSON payload） |
-
-### 2.3 音频格式要求
-
-| 参数 | 值 |
-|------|-----|
-| 编码 | PCM |
-| 采样率 | 16000 Hz |
-| 位深 | 16 bit |
-| 声道 | 单声道 |
-
-设备端麦克风采集后需转成该格式，再 base64 编码传给 `send_audio`。
-
-## 三、工具约定（系统契约）
+## 一、工具约定（系统契约）
 
 系统通过 `service_plugin_adapter.py` 调用 ASR 插件，**工具名必须严格遵循以下约定**（插件 id 前缀 + 固定后缀）：
 
@@ -123,7 +29,7 @@ ASR 是**双向流式**：客户端持续发送音频分片，服务端持续返
 ```
 :::
 
-### 3.1 返回值约定
+### 1.1 返回值约定
 
 所有 ASR 工具返回**结构化 dict**（而非文本），统一格式：
 
@@ -143,11 +49,11 @@ ASR 是**双向流式**：客户端持续发送音频分片，服务端持续返
 ASR 工具**全部**要设 `@tool(cache=False)`。默认缓存会在相同参数下 300 秒内跳过函数体，导致第二次识别直接返回旧结果。
 :::
 
-## 四、完整代码实现
+## 二、完整代码实现
 
 下面以**火山引擎 ASR 插件**（`asr_volcengine`）为例，给出完整可运行的实现。这是系统内置的参考实现，可直接作为模板。
 
-### 4.1 文件结构
+### 2.1 文件结构
 
 ```
 asr_volcengine/
@@ -155,7 +61,7 @@ asr_volcengine/
 └── plugin.py        # 工具实现
 ```
 
-### 4.2 manifest.json
+### 2.2 manifest.json
 
 ```json
 {
@@ -185,7 +91,7 @@ ASR/LLM/TTS 服务插件**不需要**在 manifest 中声明 `config_fields`。�
 声明 `config_fields` 仅有两个作用：① 配置保存接口的键名白名单校验（防止拼错键名）；② 前端配置表单的字段元数据（标签/类型/默认值）。对服务插件而言这两者都不是必需的，因此可以省略，配置保存接口会接受任意键。
 :::
 
-### 4.3 plugin.py 完整代码
+### 2.3 plugin.py 完整代码
 
 ```python
 """火山引擎 ASR 服务插件。
@@ -201,7 +107,7 @@ import json
 import struct
 import uuid
 
-from src.use_cases.tools_system import tool
+from src.use_cases.sdk.tools import tool
 from src.use_cases._plugin_helpers import ws_connect, ws_send, ws_recv, ws_close, ws_prewarm
 
 # 火山引擎 ASR SAUC 地址
@@ -493,73 +399,13 @@ async def asr_volcengine_end_session(session_id: str,
     return {"final_text": final_text, "error": None}
 ```
 
-## 五、代码逐段解析
+## 三、关键点与常见坑
 
-### 5.1 协议帧构造（`_make_header` / `_make_payload`）
-
-SAUC 协议帧 = 头部 + 长度 + payload。头部 4 字节通过位运算拼装：
-
-- `byte0`：高 4 位 version（`0x1`），低 4 位 header_size（`0x1`，表示 4 字节头部）
-- `byte1`：高 4 位 message_type，低 4 位 flags
-- `byte2`：高 4 位 serialization（`0x1` = JSON），低 4 位 compression（`0x0` = 无压缩）
-
-`_make_payload` 用 `struct.pack(">I", ...)` 生成 **大端序** 4 字节长度前缀，再拼接 JSON 字节。
-
-### 5.2 响应解析（`_parse_response`）
-
-响应帧同样遵循"头部 + 长度 + payload"结构。解析时：
-
-1. 先校验长度（至少 12 字节 = 4 头部 + 4 长度 + 4 最小 payload）
-2. 从 `data[8:12]` 读 payload 长度
-3. 从 `data[12:12+payload_size]` 取 JSON 并解析
-
-### 5.3 文本提取与定稿判断（`_extract_text` / `_is_final`）
-
-火山 ASR 的增量结果结构：
-
-```json
-{
-  "result": {
-    "texts": [{"text": "你好"}],     // 增量文本（累计）
-    "additions": {"definite": true},  // 定稿标记
-    "utterances": [{"text": "...", "definite": true}]
-  },
-  "is_final": true
-}
-```
-
-- `_extract_text`：优先取 `result.texts[0].text`，回退到 `result.text`
-- `_is_final`：`is_final` 字段、`additions.definite`、`utterances[].definite` 任一为真即定稿
-
-### 5.4 会话缓存（`_sessions`）
-
-用模块级字典 `_sessions: dict[str, dict]` 保存会话状态，key 是工具返回给上层的短 ID（`uuid.uuid4().hex[:8]`）：
-
-```python
-_sessions[sess_id] = {
-    "ws_id": ws_id,          # SDK 返回的 WebSocket 会话句柄
-    "current_text": "",      # 累计识别文本
-    "is_final": False,       # 是否已定稿
-    "buffer": [],            # 预留缓冲区
-}
-```
-
-### 5.5 并发 recv 保护（`_ws_recv_lock`）
-
-同一 WebSocket **不能并发 recv**（websockets 库限制），多协程共享连接时用 `asyncio.Lock()` 保护：
-
-```python
-async with _ws_recv_lock:
-    data = await ws_recv(session["ws_id"], timeout=0.1)
-```
-
-## 六、关键点与常见坑
-
-### 6.1 音频格式必须匹配
+### 3.1 音频格式必须匹配
 
 火山 ASR 要求 **16bit PCM / 16kHz / 单声道**。设备端麦克风采集后需转成该格式，再 base64 编码传给 `send_audio`。格式不匹配会导致识别结果乱码或识别失败。
 
-### 6.2 结束帧的坑
+### 3.2 结束帧的坑
 
 **结束帧也必须带 4 字节 payload 长度前缀（值为 0）**，否则火山报 `parse payload size failed: body too short` 并强制断连：
 
@@ -567,11 +413,11 @@ async with _ws_recv_lock:
 end_frame = _make_header(message_type=2, flags=2) + struct.pack(">I", 0)
 ```
 
-### 6.3 增量结果 vs 最终结果
+### 3.3 增量结果 vs 最终结果
 
 `get_result` 返回的 `text` 是**累计文本**（服务端回传的是全量，不是增量），`is_final` 为 `True` 时表示该句已定稿。上层拿到 `is_final=True` 后即可停止轮询，进入 LLM 阶段。
 
-### 6.4 连接池预热（可选但强烈推荐）
+### 3.4 连接池预热（可选但强烈推荐）
 
 ASR 连接建立耗时约几百毫秒，直接影响**首字延迟**。参考实现通过 `ws_prewarm` 在设备连接时预热连接池，并在每次 `start_session` 时后台预取 2 个连接：
 
@@ -588,9 +434,9 @@ ws_id = await ws_connect(ASR_URL, headers, pool="prewarm",
 - `pool="prewarm"`：从预热池取连接，会话结束后真正关闭（ASR 连接是一次性的）
 - `pool_headers`：指定哪些 header 参与连接池分组，避免不同 API Key 的连接混用
 
-## 七、安装与配置
+## 四、安装与配置
 
-### 7.1 打包上传
+### 4.1 打包上传
 
 将 `manifest.json` 和 `plugin.py` 打成 zip 包：
 
@@ -608,7 +454,7 @@ Compress-Archive -Path manifest.json,plugin.py -DestinationPath asr_volcengine-1
 
 登录 Web 管理界面 → **插件市场 → 开发者** tab → 开启开发者模式 → 拖入 zip 上传。
 
-### 7.2 配置 API Key
+### 4.2 配置 API Key
 
 安装后在设备级插件配置中填写：
 
@@ -618,7 +464,7 @@ Compress-Archive -Path manifest.json,plugin.py -DestinationPath asr_volcengine-1
 | `resource_id` | 资源 ID，如 `volc.bigasr.sauc.duration` |
 | `model` | 模型名，如 `volc.asr.222222222` |
 
-### 7.3 验证生效
+### 4.3 验证生效
 
 上传并配置后，查看服务端日志确认服务已注册：
 
@@ -629,9 +475,9 @@ Compress-Archive -Path manifest.json,plugin.py -DestinationPath asr_volcengine-1
 
 设备连接时日志出现 `[WS] 使用 ASR 插件网关` 即表示插件模式生效。若日志出现"缺少必需工具"报错，说明工具名不符合约定，服务未注册。
 
-## 八、调试与排错
+## 五、调试与排错
 
-### 8.1 日志
+### 5.1 日志
 
 插件中可用 `logging.getLogger("plugin.<插件id>")` 打日志，管理员可在 Web 界面查看插件日志：
 
@@ -643,7 +489,7 @@ logger.info(f"收到 {len(data)} bytes, 前16字节: {data[:16].hex()}")
 logger.info(f"解析结果: type={msg['type']}, event={msg['event']}")
 ```
 
-### 8.2 常见问题
+### 5.2 常见问题
 
 | 现象 | 原因 | 排查 |
 |------|------|------|
@@ -656,7 +502,7 @@ logger.info(f"解析结果: type={msg['type']}, event={msg['event']}")
 | 会话 ID 无效 | 会话被清理 | 确认 `start_session` 返回的 ID 与后续调用一致 |
 | 首字延迟高 | 未预热连接 | 实现 `prewarm` 工具 + `pool="prewarm"` 取连接 |
 
-## 九、接入其他 ASR 厂商
+## 六、接入其他 ASR 厂商
 
 换厂商只需替换协议层，工具约定和 manifest 结构不变：
 

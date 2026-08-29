@@ -30,6 +30,12 @@ from src.interfaces.plugin_gateways import (
 from src.use_cases.session_fsm import WSChannel, SessionFSM
 from src.domain.entities import SessionState
 from src.use_cases.session import Session, AUDIO_QUEUE_MAX_SIZE
+from src.use_cases.sdk.events import (
+    publish,
+    EVENT_SESSION_START,
+    EVENT_SESSION_END,
+    EVENT_WECHAT_MESSAGE,
+)
 
 logger = get_logger(__name__)
 
@@ -269,6 +275,9 @@ class WebSocketSessionHandler:
             tool_mgr._mcp_clients = startup_tool_mgr._mcp_clients
             tool_mgr._mcp_pools = startup_tool_mgr._mcp_pools
             tool_mgr._circuit_breakers = startup_tool_mgr._circuit_breakers
+            # 标记共享全局 MCP 池：设备断连 cleanup 时只清引用、不 close 池
+            # （池生命周期归 app.state 全局管理，否则会误杀所有在线设备的 MCP 连接）
+            tool_mgr._shares_global_mcp = True
             # 过滤禁用的服务器和工具
             _ds = set(_disabled_mcp_servers or [])
             _dt = _disabled_mcp_tools or {}
@@ -495,7 +504,7 @@ class WebSocketSessionHandler:
         async def _init_growth_system(ltm_svc):
             _growth = None
             try:
-                from src.use_cases.growth import GrowthSystem
+                from src.plugins.growth.engine import GrowthSystem
                 _growth = GrowthSystem(
                     data_dir="src/data",
                     llm_call_func=self._llm_call_for_growth,
@@ -1220,6 +1229,8 @@ class WebSocketSessionHandler:
                                 # 继续执行下面的正常 start 流程，重新开始会话
 
                             logger.info("[WS] Received start command")
+                            # 新一轮语音会话开始 → 发布事件（publish 内部容错，不阻塞消息循环）
+                            publish(EVENT_SESSION_START, device_key=self.device_key)
 
                             # 标记新一轮唤醒流程进行中：旧 pipeline 被取消时，
                             # _on_tts_complete 不应再启动下一轮 ASR（由 _do_wake_start 负责）
@@ -1336,14 +1347,30 @@ class WebSocketSessionHandler:
                                 # 在后台任务中执行，避免阻塞消息循环
                                 async def _play_next():
                                     try:
-                                        from src.plugins.media_player.plugin import play_random_music_to_channel
-                                        success = await play_random_music_to_channel(channel, tool_manager=self.tool_mgr)
-                                        if not success:
-                                            logger.warning("[WS] 自动续播失败，音乐服务不可用或音乐库为空")
+                                        # 白名单检查：设备未启用 media_player 插件时不再直调插件，
+                                        # 只发送 stop_music 让设备停止自动续播（安全修复）
+                                        checker = getattr(self.tool_mgr, "_device_tool_allowed", None)
+                                        if callable(checker) and not checker("play_music"):
+                                            logger.info("[WS] 音乐插件未启用，跳过自动续播")
                                             await channel.send_json({
                                                 "type": "instruct",
                                                 "command_id": "stop_music",
                                             })
+                                            return
+                                        # 走正规工具调用（song/artist 留空即随机推荐，
+                                        # 等价原 play_random_music_to_channel）；
+                                        # play_music 成功发送后抛 StopPipeline，
+                                        # 正常返回字符串说明音乐未成功发出 → 通知设备停止续播
+                                        from src.use_cases.tools_system import StopPipeline
+                                        try:
+                                            result = await self.tool_mgr.call_tool("play_music", {"song": "", "artist": ""})
+                                            logger.warning(f"[WS] 自动续播失败: {result}")
+                                            await channel.send_json({
+                                                "type": "instruct",
+                                                "command_id": "stop_music",
+                                            })
+                                        except StopPipeline:
+                                            logger.info("[WS] 自动续播已发送")
                                     except Exception as e:
                                         logger.error(f"[WS] 自动续播异常: {e}", exc_info=True)
                                 # 通过 task_manager 执行，持有引用且异常有日志
@@ -1419,12 +1446,17 @@ class WebSocketSessionHandler:
             from src.infrastructure.web import get_device_registry, get_app
             registry = get_device_registry()
             if registry:
-                await registry.unregister(self.device_key)
+                # 传入 self.session 做属主校验：设备断电重连时新会话会先 register 覆盖条目，
+                # 旧 handler 迟到的 cleanup 不能注销/杀掉新会话
+                await registry.unregister(self.device_key, session=self.session)
         except Exception as e:
             logger.warning(f"[WS] 设备注销失败: {e}")
 
         # 设备离线 → 推送 Web 前端
         self._broadcast_device_state(False, "idle")
+
+        # 设备会话结束（连接清理）→ 发布事件（publish 内部容错）
+        publish(EVENT_SESSION_END, device_key=self.device_key)
 
         # 设备断连 → 推送微信通知
         try:
@@ -1478,6 +1510,8 @@ class WebSocketSessionHandler:
             if bot and hasattr(bot, 'send_text') and reply_text:
                 await bot.send_text(wechat_chat_id, reply_text)
                 logger.info(f"[WeChat] LLM 回复已发送到微信 {wechat_chat_id[:20]}: {reply_text[:60]}")
+                # 微信消息事件 → 发布给订阅插件（publish 内部容错）
+                publish(EVENT_WECHAT_MESSAGE, chat_id=wechat_chat_id, text=reply_text)
         except Exception as e:
             logger.error(f"[WeChat] 发送 LLM 回复到微信失败: {e}", exc_info=True)
 

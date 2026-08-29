@@ -36,6 +36,32 @@ logger = get_logger(__name__)
 
 router = APIRouter()
 
+# ============================================================
+# 插件页共享主题（单一事实源）
+# 插件页面在 iframe 中加载，继承不到主站 CSS 变量；历史上各页面
+# 各自硬编码主题并逐渐漂移（背景/玻璃/圆角/阴影/字体与主站不搭）。
+# 现由服务端在返回 HTML 时自动注入 <link>，本文件是唯一事实源：
+# 修改主题只需改这里的 _THEME_CSS，所有插件页面即时生效。
+# token 值与主站 esp-ai-web/src/style.css 对齐。
+# ============================================================
+_THEME_CSS = """:root{
+  --mint:#10b981;--mint-deep:#059669;
+  --mint-soft:rgba(16,185,129,0.12);--mint-border:rgba(16,185,129,0.35);
+  --text-main:#12212e;--text-sub:#5b6b78;--text-light:#8fa0ad;
+  --bg:#e9f0f4;--border:rgba(0,0,0,0.06);
+  --danger:#ef4444;--danger-soft:rgba(239,68,68,0.1);
+  --radius:18px;--radius-sm:12px;--radius-xs:8px;
+  --shadow:0 2px 10px rgba(23,52,74,0.06);
+  --shadow-lg:0 10px 32px rgba(23,52,74,0.10);
+  --glass:linear-gradient(155deg,rgba(255,255,255,0.72),rgba(255,255,255,0.38));
+  --glass-border:rgba(255,255,255,0.72);
+}
+body{
+  background:var(--bg);color:var(--text-main);
+  font-family:'PingFang SC','HarmonyOS Sans SC','Microsoft YaHei',system-ui,sans-serif;
+}"""
+_THEME_LINK = '<link rel="stylesheet" href="/api/v1/plugins/theme.css">'
+
 # 预置图标映射（名称 → SVG 路径，前端渲染时使用）
 PRESET_ICONS = {
     "server": "mcp",
@@ -85,6 +111,17 @@ def _get_frontend_plugins() -> list[dict]:
     return pages
 
 
+@router.get("/api/v1/plugins/theme.css", tags=["plugin-frontend"])
+async def serve_plugin_theme():
+    """插件页共享主题（单一事实源，见 _THEME_CSS 注释）。iframe 内同源可直接引用。"""
+    from fastapi.responses import Response
+    return Response(
+        content=_THEME_CSS,
+        media_type="text/css; charset=utf-8",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
+
+
 @router.get("/api/v1/plugins/frontend-pages", tags=["plugin-frontend"])
 async def list_frontend_pages():
     """列出所有注册了前端页面的插件。"""
@@ -130,7 +167,7 @@ async def serve_plugin_frontend(name: str, path: str):
     }
     media_type = media_types.get(ext, "application/octet-stream")
 
-    # 为 HTML 文件注入全局滚动条样式、统一 viewport 和 box-sizing
+    # 为 HTML 文件注入全局滚动条样式、统一 viewport 和 box-sizing、共享主题
     if ext == ".html":
         try:
             content = requested.read_text("utf-8")
@@ -144,6 +181,9 @@ async def serve_plugin_frontend(name: str, path: str):
                 '::-webkit-scrollbar-thumb{background:rgba(16,185,129,0.2);border-radius:2px}'
                 '::-webkit-scrollbar-thumb:hover{background:rgba(16,185,129,0.4)}'
                 '</style>'
+                # 共享主题放在页面自身 <style> 之后（同优先级按文档顺序取胜），
+                # 用于纠正各页面漂移的主题 token（值见 _THEME_CSS）
+                + _THEME_LINK
             )
             # 注入到 </head> 之前，若无 head 则注入到 <title> 之后
             if "</head>" in content:
@@ -179,12 +219,15 @@ async def plugin_exec(
     前端通过此接口调用插件后端方法，无需为每个插件注册独立 HTTP 路由。
     需 JWT 用户认证（前端页面调用时携带 Bearer Token）。
     """
-    import importlib
-    from src.infrastructure.plugin_loader import _loaded_tools
+    from src.infrastructure.plugin_loader import _loaded_tools, get_plugin_module
     if name not in _loaded_tools:
         return {"code": 1, "message": f"插件不存在: {name}", "data": None}
 
-    plugin_module = importlib.import_module(f"src.plugins.{name}.plugin")
+    # 复用 plugin_loader 已加载的模块实例（esp_ai_plugins_* 合成模块名）。
+    # 不能用 importlib.import_module("src.plugins.{name}.plugin") 再导入一次：
+    # 那会创建第二个模块实例、重复执行 @tool() 装饰器，
+    # 与已注册的同名工具冲突（"插件不允许覆盖系统工具"误报）。
+    plugin_module = get_plugin_module(name)
     if not hasattr(plugin_module, 'frontend_api'):
         return {"code": 1, "message": "该插件没有暴露前端 API", "data": None}
 
@@ -193,5 +236,19 @@ async def plugin_exec(
         return {"code": 1, "message": f"方法 '{body.method}' 不存在", "data": None}
 
     fn = frontend_api[body.method]
-    result = await fn(**body.args)
+
+    # 设置插件权限上下文：exec 桥等同插件后端调用，
+    # SDK 能力入口（require_permission）据此校验 manifest 声明的权限，
+    # 防止前端 exec 绕过权限检查（无上下文时静默放行）。
+    from src.infrastructure.plugin_security import set_plugin_context, reset_plugin_context
+    from src.infrastructure.plugin_loader import _plugin_meta
+    meta = _plugin_meta.get(name, {}) or {}
+    perms = meta.get("permissions") or []
+    if not isinstance(perms, list):
+        perms = []
+    perm_token = set_plugin_context(name, perms)
+    try:
+        result = await fn(**body.args)
+    finally:
+        reset_plugin_context(perm_token)
     return {"code": 0, "message": "ok", "data": result}
