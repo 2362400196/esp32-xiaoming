@@ -2,7 +2,7 @@
 
 # 小明同学 · ESP32 全栈开源语音助手
 
-<img src="assets/case-breadboard-lcd.png" width="460" alt="面包板真机案例"/>
+<img src="assets/case-breadboard-lcd.jpg" width="460" alt="面包板真机案例"/>
 
 **真实案例**：面包板 + ESP32-S3 + INMP441 麦克风 + 1.54" 表情屏，正在待机等待唤醒
 
