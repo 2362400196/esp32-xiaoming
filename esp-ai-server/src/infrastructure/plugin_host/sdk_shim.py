@@ -720,6 +720,15 @@ def install_shims(plugin_id: str, src_dir: str) -> None:
     sandbox.set_allowed_extra([
         "src.use_cases.tools_system",
         "src.use_cases._plugin_helpers",
+        "src.use_cases.sdk",
+        "src.use_cases.sdk.tools",
+        "src.use_cases.sdk.device",
+        "src.use_cases.sdk.http",
+        "src.use_cases.sdk.storage",
+        "src.use_cases.sdk.io",
+        "src.use_cases.sdk.music",
+        "src.use_cases.sdk.utils",
+        "src.use_cases.sdk.services",
         "src.domain",
         "src.domain.entities",
         "src.domain.value_objects",
@@ -728,6 +737,18 @@ def install_shims(plugin_id: str, src_dir: str) -> None:
     helpers_mod = build_helpers_shim()
     sys.modules["src.use_cases.tools_system"] = tools_mod
     sys.modules["src.use_cases._plugin_helpers"] = helpers_mod
+
+    # sdk 子包桩：让插件的推荐导入路径 from src.use_cases.sdk.<域> import x
+    # 在沙箱内可用（与主进程 SDK 同名同签名，实现转发到本文件的 RPC 桩函数）
+    sdk_pkg = types.ModuleType("src.use_cases.sdk")
+    sdk_pkg.__path__ = []
+    sys.modules["src.use_cases.sdk"] = sdk_pkg
+
+    def _sdk_sub(name: str, **attrs) -> None:
+        mod = types.ModuleType(f"src.use_cases.sdk.{name}")
+        mod.__dict__.update(attrs)
+        sys.modules[f"src.use_cases.sdk.{name}"] = mod
+        setattr(sdk_pkg, name, mod)
     # 父包占位：src 指向真实目录（只读数据类可导入），use_cases 用空路径（SDK 已桩化）
     if "src" not in sys.modules:
         src_pkg = types.ModuleType("src")
@@ -737,3 +758,74 @@ def install_shims(plugin_id: str, src_dir: str) -> None:
         uc_pkg = types.ModuleType("src.use_cases")
         uc_pkg.__path__ = []
         sys.modules["src.use_cases"] = uc_pkg
+
+    # 注册 sdk 子模块桩（tools/device/http/storage/io/music/utils/services）
+    def _sdk_sub(name: str, **attrs) -> None:
+        mod = types.ModuleType(f"src.use_cases.sdk.{name}")
+        mod.__dict__.update(attrs)
+        sys.modules[f"src.use_cases.sdk.{name}"] = mod
+        setattr(sdk_pkg, name, mod)
+
+    _sdk_sub("tools", tool=_tool_decorator, StopPipeline=StopPipeline)
+    _sdk_sub(
+        "device",
+        send_instruct=send_instruct,
+        send_device_command=send_device_command,
+        send_device_command_ack=send_device_command_ack,
+        request_device_result=request_device_result,
+        device_is_online=device_is_online,
+        device_get_info=device_get_info,
+    )
+    _sdk_sub(
+        "http",
+        http_request=http_request,
+        http_get_json=http_get_json,
+        http_stream_open=http_stream_open,
+        http_stream_read=http_stream_read,
+        http_stream_close=http_stream_close,
+    )
+    _sdk_sub(
+        "storage",
+        kv_get=kv_get,
+        kv_set=kv_set,
+        kv_delete=kv_delete,
+        kv_list=kv_list,
+        plugin_data_read=plugin_data_read,
+        plugin_data_write=plugin_data_write,
+        plugin_data_list=plugin_data_list,
+        plugin_data_delete=plugin_data_delete,
+    )
+    _sdk_sub(
+        "io",
+        gpio_mode=gpio_mode,
+        gpio_write=gpio_write,
+        gpio_read=gpio_read,
+        pwm_write=pwm_write,
+        adc_read=adc_read,
+        servo_write=servo_write,
+    )
+    _sdk_sub("music", play_music_url=play_music_url)
+    _sdk_sub(
+        "utils",
+        get_device_key=get_device_key,
+        resolve_device_key=resolve_device_key,
+        get_plugin_config_or_env=get_plugin_config_or_env,
+        generate_uuid=generate_uuid,
+        current_timestamp=current_timestamp,
+        json_dumps=json_dumps,
+        json_loads=json_loads,
+        mask_secret=mask_secret,
+    )
+    _sdk_sub(
+        "services",
+        llm_chat=llm_chat,
+        llm_generate=llm_generate,
+        tts_synthesize=tts_synthesize,
+        get_ltm_service=get_ltm_service,
+        get_default_ltm_service=get_default_ltm_service,
+        get_diary_repository=get_diary_repository,
+        get_device_repository=get_device_repository,
+        skill_catalog_text=skill_catalog_text,
+        plugin_log=plugin_log,
+        get_user_profile_summary=get_user_profile_summary,
+    )

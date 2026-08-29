@@ -271,7 +271,18 @@ async def _load_plugin(plugin_name: str) -> bool:
             if t in _tool_owner and _tool_owner[t] != plugin_name:
                 conflicts.append((t, f"插件 {_tool_owner[t]}"))
             elif is_builtin_tool(t):
-                conflicts.append((t, "系统/内置工具"))
+                registered = get_tool(t)
+                if registered is not None and get_plugin_of_tool(t) != plugin_name:
+                    # 注册表实体归属其它来源 → 真实的系统工具占用
+                    conflicts.append((t, "系统/内置工具"))
+                else:
+                    # 孤儿内置标记（注册表无实体，或实体本就属于本插件）：
+                    # 异常中断留下的陈旧标记，自动清除让本次加载通过
+                    from src.use_cases.tools_system import clear_stale_builtin_flag
+                    clear_stale_builtin_flag(t)
+                    logger.warning(
+                        f"[插件] {plugin_name} 检测到工具 {t} 的陈旧内置标记（注册表无占用实体），已自动清除"
+                    )
         if conflicts:
             logger.error(
                 f"[插件] {plugin_name} 的工具名 {[c[0] for c in conflicts]} "

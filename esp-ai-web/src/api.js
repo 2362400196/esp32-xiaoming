@@ -16,7 +16,7 @@ export function setAuth(token, user) {
 
 export function isLoggedIn() { return !!_token }
 
-async function request(path, method = 'GET', body = null) {
+export async function request(path, method = 'GET', body = null) {
   const headers = { 'Content-Type': 'application/json' }
   if (_token) headers['Authorization'] = 'Bearer ' + _token
   try {

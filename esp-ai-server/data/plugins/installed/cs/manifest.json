@@ -1,0 +1,20 @@
+{
+  "id": "cs",
+  "name": "cs",
+  "version": "1.0.0",
+  "description": "",
+  "api_version": "1.0",
+  "frontend": true,
+  "frontend_config": {
+    "nav_label": "我的插件",
+    "nav_icon": "box",
+    "width": "full"
+  },
+  "category": "general",
+  "tags": [],
+  "requires": [],
+  "permissions": [
+    "device"
+  ],
+  "config_fields": []
+}

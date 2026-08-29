@@ -14,7 +14,7 @@
           @select="selectDevice" @speak="speakToDevice" @stop="stopDevice" @settings="openDeviceSettings"
           @unbind="onDeviceUnbind" @bound="onDeviceBound" @toast="toast" />
         <StoreView v-else-if="tab === 'store'" :key="'store'" @toast="toast" @plugin-changed="syncPluginNav" />
-        <DeveloperView v-else-if="tab === 'developer'" :key="'developer'" @toast="toast" @editor-change="onEditorChange" />
+        <DeveloperView v-else-if="tab === 'developer'" :key="'developer'" :current-device="currentDevice" @toast="toast" @editor-change="onEditorChange" />
         <ControlView v-else-if="tab === 'control'" :key="'control'" :current-device="currentDevice"
           :devices="devices" :plugin-count="pluginCount"
           @toast="toast" @select-device="selectDevice" />

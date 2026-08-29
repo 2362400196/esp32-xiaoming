@@ -30,7 +30,9 @@ from src.infrastructure.plugin_loader import (
     INSTALLED_PLUGINS_DIR,
     _plugin_meta,
     _loaded_tools,
+    _tool_owner,
 )
+from src.use_cases.tools_system import get_tool
 
 logger = get_logger(__name__)
 
@@ -109,6 +111,29 @@ def _get_frontend_plugins() -> list[dict]:
             "entry": f"/api/v1/plugins/{name}/frontend/index.html",
         })
     return pages
+
+
+@router.get("/api/v1/plugins/{name}/tools", tags=["plugin-frontend"])
+async def list_plugin_tools(
+    name: str,
+    user: UserModel = Depends(get_current_user),
+):
+    """列出插件注册的全部工具及其 schema（开发者运行测试用）"""
+    tool_names = _loaded_tools.get(name) or []
+    tools = []
+    for tn in tool_names:
+        td = get_tool(tn)
+        if td is None:
+            continue
+        schema = td.to_openai_schema()
+        # openai 格式的 parameters 嵌在 function 层下
+        fn = schema.get("function") or {}
+        tools.append({
+            "name": fn.get("name", td.name),
+            "description": fn.get("description", ""),
+            "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+        })
+    return {"code": 0, "message": "ok", "data": tools}
 
 
 @router.get("/api/v1/plugins/theme.css", tags=["plugin-frontend"])

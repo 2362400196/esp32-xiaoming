@@ -259,6 +259,14 @@ export function getMonaco() {
     defineThemes(monaco)
     registerPythonCompletion(monaco)
     registerPythonConfig(monaco)
+    // JSON 语法校验（manifest.json 等）：语法错误实时红线
+    try {
+      monaco.languages.json.jsonDefaults.setDiagnosticsOptions({
+        validate: true,
+        allowComments: false,
+        enableSchemaRequest: false,
+      })
+    } catch (e) { console.warn('[Monaco] JSON 校验启用失败:', e) }
     _monaco = monaco
     return monaco
   })

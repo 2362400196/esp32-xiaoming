@@ -187,6 +187,15 @@ def is_builtin_tool(name: str) -> bool:
     return name in _builtin_tool_names
 
 
+def clear_stale_builtin_flag(name: str) -> None:
+    """清除孤儿的内置标记（标记残留但注册表中无该工具）。
+
+    热重载自愈用：正常流程不会产生孤儿标记；一旦出现（异常中断等），
+    会让后续同名插件加载被冲突检测误挡，这里直接清除并让调用方打日志。
+    """
+    _builtin_tool_names.discard(name)
+
+
 def get_openai_tools_schema() -> list[dict]:
     return [t.to_openai_schema() for t in _registry.values()]
 

@@ -192,6 +192,7 @@ async def call_plugin_tool(
         def __init__(self):
             self.plugin_configs = {}
             self.device_id = ""
+            self.channel = None
         def get_plugin_config(self, plugin: str, key: str, default: str = "") -> str:
             return str((self.plugin_configs.get(plugin) or {}).get(key) or default)
 
@@ -211,6 +212,19 @@ async def call_plugin_tool(
             real_device_id = found[0]
             config_dict = await repo.get_device_config(real_device_id) or {}
             tool_manager.plugin_configs = config_dict.get("plugin_configs") or {}
+
+        # 设备在线时复用其真实会话的 tool_manager（带 channel）：
+        # 让"运行测试"的设备指令真正下发到硬件，而不是被"设备未连接"挡住
+        try:
+            from src.infrastructure.web import get_device_registry
+            registry = get_device_registry()
+            entry = registry.resolve(device_id) if registry else None
+            if entry and isinstance(entry, dict):
+                real_tm = entry.get("tool_manager")
+                if real_tm is not None:
+                    tool_manager = real_tm
+        except Exception as e:
+            logger.debug(f"[插件工具调用] 复用设备 tool_manager 失败（回退 Mock）: {e}")
 
     # 调用插件工具函数（注入插件上下文，使 kv_set/kv_get 能找到正确的插件 ID）
     from src.infrastructure.plugin_security import set_plugin_context, reset_plugin_context
