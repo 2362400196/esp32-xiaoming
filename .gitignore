@@ -12,6 +12,7 @@ Desktop.ini
 node_modules/
 unpackage/
 .hbuilderx/
+.reasonix/
 
 # ========== esp-ai-idf-client（ESP-IDF 固件） ==========
 build/
