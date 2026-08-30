@@ -1,21 +1,30 @@
 // 插件脚手架模板与权限清单（从 DeveloperView 迁出，供在线编辑器使用）
 
-export const TEMPLATE_PLUGIN = `"""插件：在此编写工具函数"""
+export const TEMPLATE_PLUGIN = `"""插件：在此编写工具函数（默认示例：语音播报）
+
+输入一段话，直接让当前绑定的设备播放出来（服务端边合成边推流，设备实时出声）。
+"""
 
 from src.use_cases.sdk.tools import tool
+from src.use_cases.sdk.services import speak_to_device
 
 
-@tool()
-def hello(name: str) -> str:
-    """打招呼
+@tool(cache=False)
+async def speak_text(text: str = "", tool_manager=None) -> str:
+    """语音播报：输入一段话，直接让当前绑定的设备播放出来。
 
     Args:
-        name: 对方名字
+        text: 要播报的文本（一段话）
 
     Returns:
-        问候语
+        播报结果说明
     """
-    return f"你好，{name}！"
+    if not text or not text.strip():
+        return "播报失败：请先输入要播报的文本"
+    ok = await speak_to_device("", text, tool_manager=tool_manager)
+    if not ok:
+        return "播报失败：设备离线或语音服务不可用"
+    return "正在播报"
 `
 
 export const templateManifest = (slug, name, desc, perms) => JSON.stringify({
@@ -97,6 +106,6 @@ export const ALL_PERMS = [
   { id: 'env_read', desc: '读取环境变量（获取 API Key 等配置）' },
   { id: 'file_read', desc: '读取插件目录和状态目录的文件' },
   { id: 'file_write', desc: '写入插件目录和状态目录' },
-  { id: 'subprocess', desc: '执行子进程命令（危险，需审核）' },
-  { id: 'exec', desc: '动态执行代码（危险，需审核）' },
+  // 注意：subprocess / exec 未纳入可选权限——沙箱 RPC 未实现这两个操作
+  // （声明了也无法执行），且属于高危能力，不提供给第三方插件
 ]

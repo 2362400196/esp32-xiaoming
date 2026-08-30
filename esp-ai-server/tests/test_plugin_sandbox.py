@@ -153,3 +153,41 @@ def test_sandbox_import_blocklist(sandbox_plugin):
                           ignore_errors=True)
 
     asyncio.run(scenario())
+
+
+def test_plugin_tool_route_catches_stop_pipeline(sandbox_plugin):
+    """运行测试接口：工具抛 StopPipeline 时返回 code 0 可读提示，而不是 500。"""
+    from src.infrastructure.routes.plugins import PluginToolCallRequest, call_plugin_tool
+
+    async def scenario():
+        loaded = await loader.load_plugins()
+        assert PLUGIN_ID in loaded
+        resp = await call_plugin_tool(
+            PLUGIN_ID,
+            "sbx_stop",
+            PluginToolCallRequest(args={}, device_id=""),
+            user=object(),
+        )
+        assert resp["code"] == 0
+        assert "StopPipeline" in resp["data"]
+
+    asyncio.run(scenario())
+
+
+def test_plugin_tool_route_normal_result_ok(sandbox_plugin):
+    """运行测试接口：普通工具正常返回 code 0（回归，确保捕获逻辑不影响正常路径）。"""
+    from src.infrastructure.routes.plugins import PluginToolCallRequest, call_plugin_tool
+
+    async def scenario():
+        loaded = await loader.load_plugins()
+        assert PLUGIN_ID in loaded
+        resp = await call_plugin_tool(
+            PLUGIN_ID,
+            "sbx_echo",
+            PluginToolCallRequest(args={"message": "hi"}, device_id=""),
+            user=object(),
+        )
+        assert resp["code"] == 0
+        assert resp["data"] == "echo:hi"
+
+    asyncio.run(scenario())

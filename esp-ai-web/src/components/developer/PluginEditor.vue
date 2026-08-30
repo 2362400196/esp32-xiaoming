@@ -172,6 +172,7 @@ import {
   openedTabs, openFile, closeTab, isDirty, fileIcon,
   activeFileEntry, fileLang,
   savePluginCode, saveLocalFromEditor, createLocalFromEditor,
+  queueDraftSave,
   newFileDialog, newFileName, closeNewFileDialog, confirmNewFile,
   renameDialog, renameName, closeRenameDialog, confirmRename,
 } from '../../composables/usePluginEditor'

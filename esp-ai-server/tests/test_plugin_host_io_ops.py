@@ -1,8 +1,8 @@
-"""沙箱新增 SDK 操作（设备 IO / 音乐播放）的裁决器单元测试。
+"""沙箱新增 SDK 操作（设备 IO / 音乐播放 / 语音播报）的裁决器单元测试。
 
 覆盖：
     - 权限门禁：未声明 device 权限时被 PermissionDenied 拦截
-    - 复用主进程 SDK 实现：无设备时的返回约定（写操作错误串 / 读操作 -1）
+    - 复用主进程 SDK 实现：无设备时的返回约定（写操作错误串 / 读操作 -1 / 播报 False）
     - 设备作用域：显式指定非绑定设备被拦截
 """
 
@@ -18,10 +18,10 @@ def _ctx(device_key: str = "") -> CallContext:
 
 
 def test_io_ops_require_device_permission():
-    """未声明 device 权限 → 新 IO/音乐操作被拒绝。"""
+    """未声明 device 权限 → 新 IO/音乐/播报操作被拒绝。"""
     adj = Adjudicator("p_no_perm", permissions=[])
     for op in ("gpio_mode", "gpio_write", "gpio_read", "pwm_write",
-               "adc_read", "servo_write", "play_music_url"):
+               "adc_read", "servo_write", "play_music_url", "speak_text"):
         with pytest.raises(PermissionDenied):
             asyncio.run(adj.handle(op, {}, _ctx()))
 
@@ -91,3 +91,68 @@ def test_io_ops_with_bound_device_key_allowed():
         _ctx(device_key="bound_demo"),
     ))
     assert isinstance(result, str)
+
+
+# ════════════════════════════════════════════════════════════
+# speak_text（语音播报：需 device + tts 双权限）
+# ════════════════════════════════════════════════════════════
+
+_TTS_PERMS = ["device", "tts"]
+
+
+def test_speak_text_requires_both_device_and_tts():
+    """speak_text 需同时声明 device 与 tts，缺任一都被拦截。"""
+    for perms in ([], ["device"], ["tts"]):
+        adj = Adjudicator("p", permissions=perms)
+        with pytest.raises(PermissionDenied):
+            asyncio.run(adj.handle("speak_text", {"text": "你好"}, _ctx()))
+
+
+def test_speak_text_without_device_returns_false():
+    """无设备时 speak_text 返回 False（复用 speak_to_device 约定），不抛异常。"""
+    adj = Adjudicator("p", permissions=_TTS_PERMS)
+    result = asyncio.run(adj.handle("speak_text", {"text": "你好"}, _ctx()))
+    assert result is False
+
+
+def test_speak_text_empty_text_returns_false():
+    adj = Adjudicator("p", permissions=_TTS_PERMS)
+    result = asyncio.run(adj.handle("speak_text", {"text": ""}, _ctx()))
+    assert result is False
+
+
+def test_speak_text_rejects_other_device_scope():
+    """插件绑定设备 A 时，显式指定设备 B 的播报被拦截。"""
+    adj = Adjudicator("p", permissions=_TTS_PERMS)
+    with pytest.raises(PermissionDenied):
+        asyncio.run(adj.handle(
+            "speak_text", {"text": "你好", "device_key": "bound_other"},
+            _ctx(device_key="bound_demo"),
+        ))
+
+
+def test_speak_text_forwards_to_speak_to_device():
+    """绑定设备时，speak_text 把 text/device_key 透传给主进程 speak_to_device。"""
+    from unittest.mock import AsyncMock, patch
+
+    adj = Adjudicator("p", permissions=_TTS_PERMS)
+    with patch(
+        "src.use_cases.sdk.infrastructure.speak_to_device",
+        new=AsyncMock(return_value=True),
+    ) as m:
+        result = asyncio.run(adj.handle(
+            "speak_text", {"text": "你好", "device_key": "bound_demo"},
+            _ctx(device_key="bound_demo"),
+        ))
+    assert result is True
+    m.assert_awaited_once_with("bound_demo", "你好")
+
+
+def test_speak_text_with_bound_device_returns_false_without_registry():
+    """绑定设备但主进程注册表不可用 → 返回 False（设备未连接语义）。"""
+    adj = Adjudicator("p", permissions=_TTS_PERMS)
+    result = asyncio.run(adj.handle(
+        "speak_text", {"text": "你好", "device_key": "bound_demo"},
+        _ctx(device_key="bound_demo"),
+    ))
+    assert result is False

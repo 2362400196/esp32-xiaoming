@@ -107,7 +107,7 @@ async def tts_synthesize(text: str, voice: str | None = None, tool_manager=None)
 
     Args:
         text: 要合成的文本
-        voice: 可选，音色（如 "BV001_streaming"），不传使用全局配置
+        voice: 可选，音色（如 "BV001_streaming"），不传使用设备/全局配置
         tool_manager: 自动传入
 
     Returns:
@@ -115,8 +115,42 @@ async def tts_synthesize(text: str, voice: str | None = None, tool_manager=None)
     """
     require_permission("tts", "调用 TTS 语音合成")
     from src.interfaces.tts_gateways import create_tts_gateway
-    config = {}
+    from src.infrastructure.config import get_settings
+    settings = get_settings()
+
+    # 优先使用设备数据库 TTS 配置（user_config.tts_config），
+    # 缺失时按 device_id 直接查库，最后才回退全局 .env 配置
+    user_cfg = None
+    user_config = getattr(tool_manager, "user_config", None) if tool_manager else None
+    if user_config and getattr(user_config, "tts_config", None):
+        user_cfg = user_config.tts_config
+    else:
+        device_id = getattr(tool_manager, "device_id", "") if tool_manager else ""
+        if device_id:
+            try:
+                from src.infrastructure.db.repositories.device_repository import DeviceRepository
+                raw = await DeviceRepository().get_device_config(device_id)
+                if raw and raw.get("tts_config"):
+                    user_cfg = raw.get("tts_config")
+            except Exception:
+                user_cfg = None
+
+    config = None
+    if user_cfg:
+        config = {
+            "api_key": user_cfg.get("api_key", settings.tts.api_key),
+            "resource_id": user_cfg.get("resource_id") or settings.tts.resource_id or "",
+            "voice_type": user_cfg.get("voice_type") or settings.tts.voice_type or "BV001_streaming",
+            "sample_rate": settings.tts.sample_rate or 24000,
+            "speed_ratio": user_cfg.get("speed_ratio", settings.tts.speed_ratio or 1.0),
+            "volume_ratio": user_cfg.get("volume_ratio", settings.tts.volume_ratio or 1.0),
+            "pitch_ratio": user_cfg.get("pitch_ratio", settings.tts.pitch_ratio or 1.0),
+            "explicit_dialect": user_cfg.get("explicit_dialect", settings.tts.explicit_dialect or ""),
+            "enable_pool": user_cfg.get("enable_pool", settings.tts.enable_pool),
+        }
     if voice:
+        if config is None:
+            config = {}
         config["voice_type"] = voice
     tts = create_tts_gateway(config)
     chunks = []

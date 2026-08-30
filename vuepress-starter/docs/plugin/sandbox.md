@@ -238,7 +238,7 @@ msvcrt / curses / tkinter / winreg / configparser / email / platform / gc / sign
 
 ### 能做的
 
-- 声明 `permissions` 后正常使用 SDK：网络请求、设备指令、**设备 IO（GPIO/PWM/ADC/舵机）**、**音乐播放**、记忆读写、数据库访问、LLM 对话、TTS 合成、键值存储
+- 声明 `permissions` 后正常使用 SDK：网络请求、设备指令、**设备 IO（GPIO/PWM/ADC/舵机）**、**音乐播放**、**语音播报**、记忆读写、数据库访问、LLM 对话、TTS 合成、键值存储
 - 用白名单标准库（`json`、`datetime`、`asyncio` 等）写业务逻辑
 - 读取和（声明后）写入自己的插件目录与状态目录
 - 读白名单内的环境变量（`<插件id>_` 或 `PLUGIN_` 前缀，或通过 `PLUGIN_ENV_ALLOWLIST` 显式放行）
@@ -275,13 +275,18 @@ msvcrt / curses / tkinter / winreg / configparser / email / platform / gc / sign
 | 设备 IO | `gpio_mode` / `gpio_write` / `pwm_write` / `servo_write` | `device` | `"ok"`/错误串 |
 | 设备 IO 读 | `gpio_read` / `adc_read` | `device` | int，失败 `-1` |
 | 音乐播放 | `play_music_url` | `device` | `"ok"`/错误串 |
+| 语音播报 | `speak_to_device` | `device` + `tts` | `True`/`False` |
 | HTTP 请求 | `http_request` / `http_get_json` | `network` | `(resp, err)` |
 | LLM / TTS | `llm_chat` / `llm_generate` / `tts_synthesize` | `llm` / `tts` | 见 API 参考 |
 | 记忆 / KV | LTM 服务 / `kv_*` | `db` / `kv` | 见 API 参考 |
 | 文件持久化 | `plugin_data_*` | `file_read` / `file_write` | 见 API 参考 |
 
+::: tip 设备语音播报
+沙箱插件声明 `device` + `tts` 权限后可直接调用 `speak_to_device(device_key="", text=...)` 让设备播报一段文本：主进程会完成 TTS 合成并按帧推流到设备实时播放（不经过 LLM 流程），`device_key` 留空时自动回退到本次调用绑定的设备。设备离线 / 语音服务不可用时返回 `False`。
+:::
+
 ::: warning 尚未进入沙箱 RPC 的 SDK 能力
-`get_device_registry`、`get_wechat_bot`、`speak_to_device`、`get_remote_config_provider` 等基础设施封装仅内置插件可用（它们依赖进程内单例）。沙箱插件需要设备播报时可声明 `device` 权限后走 `send_device_command` 指令通道。
+`get_device_registry`、`get_wechat_bot`、`get_remote_config_provider` 等基础设施封装仅内置插件可用（它们依赖进程内单例）。
 :::
 
 ---

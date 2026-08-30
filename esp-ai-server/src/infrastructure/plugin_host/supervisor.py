@@ -317,6 +317,12 @@ class SandboxedPlugin:
                 try:
                     msg = decode(line)
                 except ProtocolError:
+                    # 非协议行 = 插件代码里的 print() 输出，写入插件日志
+                    _add_plugin_log(self.plugin_id, "stdout", line)
+                    continue
+                if not isinstance(msg.get("type"), str):
+                    # 能解析成 JSON 但不是协议消息（如 print(dict)），也当作 stdout
+                    _add_plugin_log(self.plugin_id, "stdout", line)
                     continue
                 await self._dispatch(msg)
         except (asyncio.CancelledError, OSError, ValueError):

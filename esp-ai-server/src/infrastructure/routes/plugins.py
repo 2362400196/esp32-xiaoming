@@ -265,10 +265,16 @@ async def call_plugin_tool(
         # 无法内省签名时退回原始行为（保守起见仍剔除保留参数）
         kwargs = {k: v for k, v in body.args.items() if k not in reserved}
         kwargs["tool_manager"] = tool_manager
+    from src.use_cases.tools_system import StopPipeline
     try:
         result = td.func(**kwargs)
         if asyncio.iscoroutine(result):
             result = await result
+    except StopPipeline as e:
+        # 工具主动接管屏幕/音频通道而终止流程（如倒计时结束播报）。
+        # 这是正常结束而非错误：运行测试直调工具时返回可读提示，避免 500。
+        msg = str(e).strip() or "工具已接管屏幕/音频通道，流程结束"
+        return {"code": 0, "message": "ok", "data": f"[StopPipeline] {msg}"}
     finally:
         reset_plugin_context(perm_token)
 

@@ -59,6 +59,7 @@ _OP_PERMS: dict[str, str] = {
     "adc_read": "device",
     "servo_write": "device",
     "play_music_url": "device",
+    "speak_text": ("device", "tts"),  # 播报 = 设备动作 + 使用 TTS 合成，需双重权限
     "plugin_data_read": "file_read",
     "plugin_data_write": "file_write",
     "plugin_data_list": "file_read",
@@ -237,12 +238,18 @@ class Adjudicator:
 
     def _check(self, op: str) -> None:
         perm = _OP_PERMS.get(op)
-        if perm and perm not in self.permissions:
+        if perm is None:
+            if op not in _NO_PERM_OPS:
+                raise PermissionDenied(f"未知的 SDK 操作: {op}")
+            return
+        # 值为 str 时要求单个权限；值为 tuple 时要求全部权限
+        required = perm if isinstance(perm, tuple) else (perm,)
+        missing = [p for p in required if p not in self.permissions]
+        if missing:
             raise PermissionDenied(
-                f"插件「{self.plugin_id}」未声明 {perm} 权限，SDK 操作 {op} 已被阻止"
+                f"插件「{self.plugin_id}」未声明 {', '.join(missing)} 权限，"
+                f"SDK 操作 {op} 已被阻止"
             )
-        if perm is None and op not in _NO_PERM_OPS:
-            raise PermissionDenied(f"未知的 SDK 操作: {op}")
 
     # ── 主入口 ──────────────────────────────────────────────
 
@@ -402,6 +409,20 @@ class Adjudicator:
             lyric_url=str(params.get("lyric_url", "") or ""),
             lyrics_offset=int(params.get("lyrics_offset", 0) or 0),
         )
+
+    async def _op_speak_text(self, params, ctx) -> bool:
+        """让设备用语音直接播报文本（TTS 合成后推流播放）。
+
+        复用主进程 speak_to_device（内部经 speaker.speak_direct 完成合成与
+        逐帧推流），沙箱插件无需持有 channel/session/fsm 即可触发播报。
+        """
+        from src.use_cases.sdk.infrastructure import speak_to_device
+
+        device_key = self._resolve_io_device_key(params, ctx, "speak_text")
+        text = str(params.get("text", ""))
+        if not text:
+            return False
+        return await speak_to_device(device_key, text)
 
     # ── HTTP ────────────────────────────────────────────────
 

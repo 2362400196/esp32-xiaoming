@@ -287,6 +287,17 @@ async def play_music_url(url: str, title: str = "", artist: str = "",
     ) or ""
 
 
+async def speak_to_device(device_key: str = "", text: str = "", tool_manager=None) -> bool:
+    """让设备用语音直接播报文本（TTS 合成后推流播放）。
+
+    device_key 留空时由主进程回退到本次调用绑定的设备（与其它设备 IO 一致）。
+    返回 True 表示播报已提交；设备离线 / TTS 不可用等返回 False。
+    """
+    return bool(await client.send_async(
+        "speak_text", {"text": text, "device_key": device_key or ""}
+    ))
+
+
 # ── 插件配置 ────────────────────────────────────────────────
 
 
@@ -693,6 +704,7 @@ def build_helpers_shim() -> types.ModuleType:
         "adc_read": adc_read,
         "servo_write": servo_write,
         "play_music_url": play_music_url,
+        "speak_to_device": speak_to_device,
         # WebSocket 操作
         "ws_connect": ws_connect,
         "ws_send": ws_send,
@@ -759,7 +771,7 @@ def install_shims(plugin_id: str, src_dir: str) -> None:
         uc_pkg.__path__ = []
         sys.modules["src.use_cases"] = uc_pkg
 
-    # 注册 sdk 子模块桩（tools/device/http/storage/io/music/utils/services）
+    # 注册 sdk 子模块桩（tools/device/http/storage/io/music/utils/services/ws）
     def _sdk_sub(name: str, **attrs) -> None:
         mod = types.ModuleType(f"src.use_cases.sdk.{name}")
         mod.__dict__.update(attrs)
@@ -821,6 +833,7 @@ def install_shims(plugin_id: str, src_dir: str) -> None:
         llm_chat=llm_chat,
         llm_generate=llm_generate,
         tts_synthesize=tts_synthesize,
+        speak_to_device=speak_to_device,
         get_ltm_service=get_ltm_service,
         get_default_ltm_service=get_default_ltm_service,
         get_diary_repository=get_diary_repository,
@@ -828,4 +841,12 @@ def install_shims(plugin_id: str, src_dir: str) -> None:
         skill_catalog_text=skill_catalog_text,
         plugin_log=plugin_log,
         get_user_profile_summary=get_user_profile_summary,
+    )
+    _sdk_sub(
+        "ws",
+        ws_connect=ws_connect,
+        ws_send=ws_send,
+        ws_recv=ws_recv,
+        ws_close=ws_close,
+        ws_prewarm=ws_prewarm,
     )

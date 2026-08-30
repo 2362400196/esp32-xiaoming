@@ -926,6 +926,36 @@ if not ok:
 
 返回 `True` 表示已下发播报；设备不在线、无 Speaker 或播报异常均返回 `False`。
 
+### 完整示例：让设备直接播报一段话（工具函数）
+
+最常用的用法是把播报封装成一个 `@tool()` 工具：用户输入一段话，设备直接开口播放（服务端边合成边推流，设备实时出声），不经过 LLM 对话流程：
+
+```python
+from src.use_cases.sdk.tools import tool
+from src.use_cases.sdk.services import speak_to_device
+
+
+@tool(cache=False)
+async def speak_text(text: str = "", tool_manager=None) -> str:
+    """语音播报：输入一段话，直接让当前绑定的设备播放出来（边合成边推流播放）。
+
+    不经过 LLM 对话流程，直接把文本转成语音，让设备开口说话。
+    """
+    if not text or not text.strip():
+        return "播报失败：请先输入要播报的文本"
+    ok = await speak_to_device("", text, tool_manager=tool_manager)
+    if not ok:
+        return "播报失败：设备离线或语音服务不可用"
+    return "正在播报"
+```
+
+要点：
+
+- `device_key` 传空字符串时自动解析为**当前调用绑定的设备**，无需手动指定；
+- 需要 `device` + `tts` 双权限：manifest.json 的 `permissions` 里加 `"device"` 和 `"tts"`（播报既是设备动作，也会用到 TTS 合成）；
+- `@tool(cache=False)` 保证每次都真实执行（播报结果不应被缓存）；
+- 设备离线或语音服务不可用时返回失败说明，方便调用方（如 LLM）感知。
+
 旧的 `speak_direct(channel, ctx, fsm, text)` 要求拿到框架内部对象且 SDK 无途径获取，已标注废弃。
 
 ---

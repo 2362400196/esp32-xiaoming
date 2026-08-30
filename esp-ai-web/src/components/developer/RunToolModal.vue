@@ -67,8 +67,11 @@
 
           <!-- 运行日志 -->
           <div v-if="logs.length" class="run-logs">
-            <div class="run-logs-head">运行日志（最新 {{ logs.length }} 条）</div>
-            <div class="run-logs-body">
+            <div class="run-logs-head">
+              <span class="run-logs-title">运行日志（最新 {{ logs.length }} 条）</span>
+              <button class="run-logs-clear" :disabled="clearingLogs" @click="clearLogs">清空日志</button>
+            </div>
+            <div ref="logsBody" class="run-logs-body">
               <div v-for="(e, i) in logs" :key="i" class="ec-line" :class="'log-' + e.level">
                 <span class="ec-time">{{ fmtTime(e.time) }}</span>
                 <span class="ec-msg">{{ e.message }}</span>
@@ -82,7 +85,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, nextTick } from 'vue'
 import { request } from '../../api'
 
 const props = defineProps({
@@ -111,6 +114,8 @@ const running = ref(false)
 const result = ref(null)   // 格式化后的结果字符串
 const isError = ref(false)
 const logs = ref([])
+const logsBody = ref(null)
+const clearingLogs = ref(false)
 
 const currentTool = computed(() => tools.value.find(t => t.name === selectedTool.value) || null)
 
@@ -144,6 +149,37 @@ async function loadData() {
     }
   } catch {}
   toolsLoading.value = false
+  // 打开时加载最近日志并滚动到底部（最新在下方）
+  await loadLogs()
+}
+
+// 拉取插件日志（后端返回最新在前，反转为最新在底部显示）
+async function loadLogs() {
+  if (!props.plugin) return
+  try {
+    const res = await request('/api/v1/plugins/' + encodeURIComponent(props.plugin) + '/logs?limit=20')
+    if (res.status === 200 && res.data?.code === 0) {
+      logs.value = [...(res.data.data || [])].reverse()
+    }
+  } catch {}
+  scrollLogsToBottom()
+}
+
+function scrollLogsToBottom() {
+  nextTick(() => {
+    const el = logsBody.value
+    if (el) el.scrollTop = el.scrollHeight
+  })
+}
+
+async function clearLogs() {
+  if (clearingLogs.value) return
+  clearingLogs.value = true
+  try {
+    const res = await request('/api/v1/plugins/' + encodeURIComponent(props.plugin) + '/logs', 'DELETE')
+    if (res.status === 200 && res.data?.code === 0) logs.value = []
+  } catch {}
+  clearingLogs.value = false
 }
 
 // 选中工具 → 初始化参数草稿（用 schema 默认值）
@@ -185,10 +221,7 @@ async function run() {
       '2. 插件尚未创建',
       '处理：按日志提示修复后，重新保存插件即可热重载；若日志显示"已被占用"，重启服务端后重新保存一次即可自愈',
     ].join('\n')
-    try {
-      const res = await request('/api/v1/plugins/' + encodeURIComponent(props.plugin) + '/logs?limit=20')
-      if (res.status === 200 && res.data?.code === 0) logs.value = (res.data.data || []).slice(0, 20)
-    } catch {}
+    await loadLogs()
     running.value = false
     return
   }
@@ -210,11 +243,8 @@ async function run() {
     isError.value = true
   }
   running.value = false
-  // 运行后拉取该插件最新日志（含本次执行的 plugin_log 输出与错误）
-  try {
-    const res = await request('/api/v1/plugins/' + encodeURIComponent(props.plugin) + '/logs?limit=20')
-    if (res.status === 200 && res.data?.code === 0) logs.value = (res.data.data || []).slice(0, 20)
-  } catch {}
+  // 运行后拉取该插件最新日志（含本次执行的 plugin_log 输出与错误），自动滚动到底部
+  await loadLogs()
 }
 
 function fmtTime(ts) {
@@ -298,23 +328,37 @@ watch(() => props.visible, (v) => { if (v) loadData() })
 .run-btn:hover:not(:disabled) { filter: brightness(1.06); transform: translateY(-1px); }
 .run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.run-result { border-radius: 10px; overflow: hidden; border: 1px solid var(--glass-border, rgba(0,0,0,0.08)); }
+.run-result {
+  display: flex; flex-direction: column;
+  flex: 1 1 0; min-height: 280px;
+  border-radius: 10px; overflow: hidden; border: 1px solid var(--glass-border, rgba(0,0,0,0.08));
+}
 .run-result-head {
+  flex-shrink: 0;
   padding: 7px 14px; font-size: 12px; font-weight: 700;
   background: var(--mint-soft, rgba(16,185,129,0.12)); color: var(--mint-deep, #059669);
 }
 .run-result-head.err { background: var(--danger-soft, rgba(239,68,68,0.1)); color: var(--danger, #ef4444); }
 .run-result-body {
-  margin: 0; padding: 12px 14px; max-height: 320px; overflow: auto;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  margin: 0; padding: 12px 14px;
   background: #0d1117; color: #e6edf3;
   font-family: 'SF Mono', Consolas, monospace; font-size: 12px; line-height: 1.6;
   white-space: pre-wrap; word-break: break-word;
 }
-.run-logs { border-radius: 10px; overflow: hidden; border: 1px solid var(--glass-border, rgba(0,0,0,0.08)); display: flex; flex-direction: column; flex: 1; min-height: 220px; }
+.run-logs { border-radius: 10px; overflow: hidden; border: 1px solid var(--glass-border, rgba(0,0,0,0.08)); display: flex; flex-direction: column; flex: 1 1 0; min-height: 180px; }
 .run-logs-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 6px 14px; font-size: 11px; font-weight: 700;
   background: rgba(23,52,74,0.05); color: var(--text-sub, #5b6b78);
 }
+.run-logs-clear {
+  border: none; background: transparent; color: var(--text-dim, #8fa0ad);
+  font-size: 11px; font-weight: 600; cursor: pointer; padding: 2px 8px;
+  border-radius: 6px; transition: all 0.2s;
+}
+.run-logs-clear:hover:not(:disabled) { background: var(--danger-soft, rgba(239,68,68,0.1)); color: var(--danger, #ef4444); }
+.run-logs-clear:disabled { opacity: 0.5; cursor: not-allowed; }
 .run-logs-body {
   flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px;
   background: #0d1117;

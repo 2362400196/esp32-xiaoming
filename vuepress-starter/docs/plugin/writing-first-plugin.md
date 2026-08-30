@@ -98,11 +98,13 @@ LLM 解析后调用 `say_hello(name="张三")`，设备播报："你好，张三
 | `env_read` | `get_plugin_config_or_env` 读环境变量 | 读取白名单内的环境变量 | 从环境变量读取 API Key 等配置 |
 | `file_read` | `open()` 读模式 / `Path.read_text()` / `plugin_data_read` / `plugin_data_list` | 读取插件目录和状态目录的文件 | 读本地数据文件 |
 | `file_write` | `open()` 写模式 / `Path.write_text()` / `plugin_data_write` / `plugin_data_delete` | 写入插件目录和状态目录 | 缓存数据、写日志、管理文件 |
-| `subprocess` | `subprocess.*` / `os.system` / `os.popen` 等 | 执行子进程命令 | **需要审核**，运行外部工具 |
-| `exec` | `eval()` / `exec()` / `compile()` | 动态执行代码 | **需要审核**，运行用户脚本 |
 | `llm` | `llm_chat` / `llm_generate` | 调用 LLM 大模型对话 | 文本分析、智能回复、内容生成 |
 | `tts` | `tts_synthesize` | 文本转语音合成 | 让设备说话、语音播报 |
 | `kv` | `kv_get` / `kv_set` / `kv_delete` / `kv_list` | 插件专属键值存储 | 持久化配置、缓存数据 |
+
+::: warning 关于 subprocess / exec
+`subprocess`（执行子进程命令）与 `exec`（动态执行代码）属于高危能力，**不提供给第三方插件**：沙箱运行时已通过 import 黑名单和审计钩子直接禁止 `subprocess` / `os.system` / `os.popen` / `eval` / `exec` 等调用，编辑器权限列表也不再提供这两项。仅框架内置（受信任）插件可能持有。
+:::
 
 ### 声明方式
 
@@ -312,16 +314,20 @@ async def show_text(text: str = "Hello", tool_manager=None) -> str:
     """在设备屏幕上显示文字（支持中英文）。
     当用户说"屏幕上显示 xxx"、"写 xxx 在屏幕上"时调用。
     参数 text: 要显示的文字（支持中英文）"""
-    # 构建 Lua 脚本：在屏幕上创建一个 label 并设置文字
-    # 固件默认字体即中文字体，中文无需额外设置
+    # 1. 先清空表情/字幕层，避免 Lua label 被盖住
+    err = await send_device_command(tool_manager, "clear_screen")
+    if err:
+        return f"显示失败: {err}"
+
+    # 2. Lua 引号转义，防止文字里的引号拼坏脚本
+    safe = text.replace('\\', '\\\\').replace('"', '\\"')
     lua_code = (
         'local lv = require("lvgl")\n'
         'local scr = lv.scr_act()\n'
         'local label = lv.label(scr)\n'
-        f'lv.label_set_text(label, "{text}")\n'
+        f'lv.label_set_text(label, "{safe}")\n'
         'lv.obj_center(label)'
     )
-
     err = await send_device_command(tool_manager, "execute_lua", lua_code)
     if err:
         return f"显示失败: {err}"

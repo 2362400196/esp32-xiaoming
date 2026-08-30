@@ -1,6 +1,6 @@
 {
-  "id": "cs",
-  "name": "cs",
+  "id": "aa",
+  "name": "aa",
   "version": "1.0.0",
   "description": "",
   "api_version": "1.0",
@@ -14,7 +14,10 @@
   "tags": [],
   "requires": [],
   "permissions": [
-    "device"
+    "exec",
+    "llm",
+    "file_read",
+    "file_write"
   ],
   "config_fields": []
 }
