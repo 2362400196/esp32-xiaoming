@@ -62,8 +62,10 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy
 
-# 创建运行时需要的目录并赋权（数据、日志、固件、表情包）
-RUN mkdir -p /app/src/data /app/src/firmware /app/src/emos /app/logs \
+# 创建运行时需要的目录并赋权（数据、设备数据、固件、表情包、日志）
+# /app/data 存 SQLite 数据库 (data/espai.db)、插件、备份、微信数据
+RUN mkdir -p /app/src/data /app/src/firmware /app/src/emos \
+        /app/data /app/logs \
     && chown -R espai:espai /app
 
 USER espai

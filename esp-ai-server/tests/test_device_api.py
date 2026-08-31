@@ -1093,6 +1093,15 @@ class TestDeviceWSTestAPI:
 class TestSDKOTAQuery:
     """SDK OTA 查询接口测试"""
 
+    @pytest.fixture(autouse=True)
+    def _no_active_firmware(self, monkeypatch, tmp_path):
+        # 隔离固件管理状态：本组测试针对配置合并与比对逻辑，
+        # 不受仓库 src/firmware/ 中已上传固件（启用中）的干扰
+        from src.infrastructure import device_api
+        fw = tmp_path / 'fw'; fw.mkdir()
+        monkeypatch.setattr(device_api, 'FIRMWARE_DIR', fw)
+        monkeypatch.setattr(device_api, 'FIRMWARE_META_FILE', tmp_path / 'meta.json')
+
     def test_ota_disabled(self, client, mock_settings):
         """OTA 禁用时返回不可用"""
         mock_settings.ota.enabled = False

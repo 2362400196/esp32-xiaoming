@@ -20,6 +20,8 @@ main/boards/
 │   ├── breadboard_1.54_lcd.h   # 面包板 1.54寸 LCD
 │   ├── breadboard_1.54_lcd_official.h  # 官方服务版
 │   └── your_board.h            # ← 你的板型定义（新建）
+├── extras/                # ★ 板级扩展组件（LED/传感器等，见「板级扩展组件（Extras）」）
+│   └── extras_led.c/.h         # 示例组件：状态 LED
 └── audio_codec/es8311.c   # ES8311 编解码器驱动
 ```
 
@@ -197,32 +199,161 @@ static const board_config_t BOARD_CONFIG = {
 | 宏 | 说明 |
 |----|------|
 | `BOARD_EXTRAS_NONE()` | 无扩展组件（`extras = NULL`） |
+| `BOARD_EXTRAS_LED(gpio, active_low)` | 挂载状态 LED 组件（示例组件，支持 `led_set`/`led_get` 指令、唤醒双闪） |
 
-## 扩展组件（触摸屏 / LED / 传感器等）
+## 扩展组件（Extras：LED / 传感器 / 灯带等）
 
-**1000+ 板型架构**的非核心硬件通过 `board_extra_t` 描述符插拔，无需改动 `board_config_t` 核心结构：
+除了上面的静态配置，板级包还内置了一套**扩展组件机制**：让每个板型挂载自己的专属功能组件，挂载后自动获得：
 
-```c
-// 实现你的组件（放在你的板型文件或独立 .c/.h 中）
-static esp_err_t my_led_init(const void *cfg) { ... }        // 初始化
-static esp_err_t my_led_cmd(const char *cmd, const char *args,
-                            char *resp, size_t resp_len) { ... }  // 命令处理
-static void my_led_event(board_event_t ev, void *data) { ... }    // 事件回调
+- **系统事件通知**：唤醒、音频播放开始/结束、网络连上/断开、OTA 开始/完成
+- **服务端指令**：服务器下发 `instruct` 指令时自动流转到组件处理，并回传应答
 
-static const board_extra_t MY_LED_EXTRA = {
-    .type = "led",
-    .config = &my_led_cfg,
-    .init = my_led_init,
-    .deinit = NULL,
-    .handle_command = my_led_cmd,
-    .on_event = my_led_event,
-};
+组件放在 `main/boards/extras/`（每个组件一个 `.c/.h`，现有示例 `extras_led.c`），板型定义末尾的 `extras` 数组决定挂载哪些组件。`board_init()` 会依次调用每个组件的 `init(config)`（在 `app_main` 早期、WiFi 之前），失败仅告警不影响启动。
 
-// 在板型定义中挂载
-static const board_extra_t *const MY_EXTRAS[] = { &MY_LED_EXTRA, NULL };
+### 组件接口
+
+每个组件是一个 `board_extra_t`（定义在 `board_interface.h`），四个回调全部可选：
+
+| 回调 | 说明 | 调用时机 |
+|------|------|----------|
+| `init(config)` | 初始化，`config` 是组件自定义的配置结构体 | `board_init()`，单线程阶段 |
+| `deinit(void)` | 反初始化（可为 NULL） | `board_deinit()` |
+| `handle_command(cmd, args, resp, resp_len)` | 处理服务端指令，返回 JSON 文本到 `resp` | 服务端下发 instruct 指令时 |
+| `on_event(event, data)` | 接收系统事件通知（可为 NULL） | 各模块关键节点（见下表） |
+
+`handle_command` 返回 `ESP_OK` 表示"我处理了"；返回 `ESP_ERR_NOT_FOUND` 表示"不是我的命令"，框架自动尝试下一个组件。
+
+### 系统事件列表
+
+| 事件 | 触发点 | data |
+|------|--------|------|
+| `BOARD_EVENT_INIT` | `board_init()` 完成 | NULL |
+| `BOARD_EVENT_DEINIT` | `board_deinit()` | NULL |
+| `BOARD_EVENT_WAKEUP` | 唤醒词/按钮触发，对话开始 | NULL |
+| `BOARD_EVENT_AUDIO_START` | 扬声器开始播放 | NULL |
+| `BOARD_EVENT_AUDIO_STOP` | 播放结束（显式停止或自然播完） | NULL |
+| `BOARD_EVENT_NETWORK_UP` | WiFi 获取到 IP | NULL |
+| `BOARD_EVENT_NETWORK_DOWN` | WiFi 断开 | NULL |
+| `BOARD_EVENT_OTA_START` | OTA 升级开始 | NULL |
+| `BOARD_EVENT_OTA_DONE` | OTA 升级结束（成功或失败） | NULL |
+
+::: warning 回调上下文
+`on_event` / `handle_command` 分别运行在 **esp_event / WebSocket 任务 / 主任务**上下文中，**必须快速返回，不得长时间阻塞**。需要耗时操作时用 `esp_timer` 或独立任务异步完成（参考 `extras_led` 的闪烁实现）。
+:::
+
+### 服务端指令链路
+
+服务器下发：
+
+```json
+{"type": "instruct", "command_id": "led_set", "data": {"on": true, "brightness": 80}}
 ```
 
-`board_init()` 会遍历 `extras` 依次调用 `init`；运行时通过 `board_extra_dispatch()` 分发命令、`board_extra_broadcast_event()` 广播唤醒/播放/网络等事件、`board_deinit()` 逆序反初始化。三者均可为 NULL（仅需 init 的简单组件不用实现命令/事件）。
+客户端分发顺序：**`commands/` 注册指令表 → 板级 extras 组件**。第一个处理的组件生效；组件的响应会被带回应答报文：
+
+```json
+{"type": "instruct_ack", "command_id": "led_set", "data": {"success": true, "on": true, "brightness": 80}}
+```
+
+::: tip 响应格式
+组件应返回 JSON 文本（作为 ack 的 `data` 字段嵌入）；返回非 JSON 文本会按字符串嵌入，不会损坏报文。返回空缓冲时 `data` 为空字符串。
+:::
+
+同时，设备连接时上报的 `device_info` 包含 `"extras": ["led", ...]` 能力列表，服务端可据此决定对哪些设备下发哪些板级指令（如无 LED 的设备不下发 `led_set`）。
+
+### 示例组件：状态 LED（extras_led）
+
+`main/boards/extras/extras_led.c` 是第一个真实组件，LEDC PWM 调光，覆盖了组件开发的全部要素：
+
+- **命令处理**：`led_set`（开关+亮度）、`led_get`（查询状态）
+- **事件联动**：收到唤醒事件后 LED 双闪两次（esp_timer 每 100ms 翻转一次，非阻塞）
+- **状态自持**：组件内部保存开关/亮度状态，命令与事件回调操作同一份状态
+
+核心代码结构（完整实现见源文件）：
+
+```c
+esp_err_t extras_led_command(const char *cmd, const char *args,
+                             char *resp, size_t resp_len)
+{
+    if (strcmp(cmd, "led_set") == 0) {
+        // 解析 args（整条 instruct 消息的 JSON）→ 更新 PWM 占空比
+        ...
+        snprintf(resp, resp_len, "{\"success\":true,\"on\":%s,\"brightness\":%d}", ...);
+        return ESP_OK;
+    }
+    if (strcmp(cmd, "led_get") == 0) { ... return ESP_OK; }
+
+    return ESP_ERR_NOT_FOUND;  // 不是本组件的命令，交给下一个组件
+}
+
+void extras_led_on_event(board_event_t event, void *data)
+{
+    if (event == BOARD_EVENT_WAKEUP && ...) {
+        // 启动 esp_timer 双闪，立即返回不阻塞唤醒流程
+    }
+}
+```
+
+### 新写一个组件的步骤
+
+以"蜂鸣器"组件为例：
+
+**1. 新建 `main/boards/extras/extras_buzzer.c/.h`**，实现接口：
+
+```c
+// extras_buzzer.h
+typedef struct {
+    int gpio;
+} buzzer_extra_config_t;
+
+esp_err_t extras_buzzer_init(const void *config);
+void      extras_buzzer_deinit(void);
+esp_err_t extras_buzzer_command(const char *cmd, const char *args,
+                                char *resp, size_t resp_len);
+void      extras_buzzer_on_event(board_event_t event, void *data);
+```
+
+**2. 在 `main/CMakeLists.txt` 的源文件列表加入** `"boards/extras/extras_buzzer.c"`。
+
+**3. 在 `boards/defs/board_templates.h` 加挂载宏**（照抄 `BOARD_EXTRAS_LED` 的写法）：
+
+```c
+#define BOARD_EXTRAS_BUZZER(gpio_) \
+    .extras = (const board_extra_t *const[]){ \
+        &(const board_extra_t){ \
+            .type = "buzzer", \
+            .config = &(const buzzer_extra_config_t){ .gpio = (gpio_) }, \
+            .init = extras_buzzer_init, \
+            .deinit = extras_buzzer_deinit, \
+            .handle_command = extras_buzzer_command, \
+            .on_event = extras_buzzer_on_event }, \
+        NULL }
+```
+
+**4. 在板型定义里挂载**：把 `BOARD_EXTRAS_NONE()` 换成 `BOARD_EXTRAS_BUZZER(45)`。
+
+**5. 重新编译烧录**，从服务端或调试工具下发 `{"type":"instruct","command_id":"buzzer_beep",...}` 验证。
+
+#### 多组件挂载
+
+一个板子可以挂任意多个组件，数组逗号分隔、NULL 结尾：
+
+```c
+#define BOARD_EXTRAS_MY_BOARD() \
+    .extras = (const board_extra_t *const[]){ \
+        &led_component,       // 复用现成组件实例 \
+        &buzzer_component,    // 自己的组件 \
+        NULL }
+```
+
+命令会按数组顺序流转：返回 `ESP_ERR_NOT_FOUND` 的组件被跳过，直到有人处理或全部拒绝（此时回 `instruct_ack` 不带 data，且日志提示"未注册的指令"）。
+
+::: tip 组件写法约定
+- 命令名加组件前缀（`led_set` / `buzzer_beep`），避免多组件命令冲突
+- `args` 是**整条 instruct 消息**的 JSON 字符串，用 cJSON 解析取 `data` 等字段
+- 状态量大时放 `init` 里分配，`deinit` 释放；组件卸载后不得再被引用
+- 不要在回调里创建高优先级任务或长时间持锁
+:::
 
 ## 显示驱动
 

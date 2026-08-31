@@ -27,6 +27,17 @@ static TaskHandle_t s_task_handle = NULL;
 static char *s_current_url = NULL;
 // 等待旧任务退出的调用者任务句柄（任务通知同步用）
 static TaskHandle_t s_waiter_handle = NULL;
+// 播放代次：每次 network_audio_play 递增，任务启动时记录自己的代次。
+// 停止等待超时（旧任务可能仍在 drain）后新播放会推进代次；旧任务清理时
+// 发现代次已变即跳过所有共享状态操作（s_playing/s_current_url/UI），
+// 否则会杀死新播放或释放新 URL（双任务竞态）。
+static volatile uint32_t s_generation = 0;
+
+// 任务参数（任务自行释放）
+typedef struct {
+    char *url;
+    uint32_t gen;
+} net_audio_params_t;
 // 自动续播标志：歌曲自然结束后自动请求下一首随机歌曲
 // 由 cmd_play_music 设置为 true，由 network_audio_stop / cmd_stop_music / 唤醒清为 false
 static volatile bool s_auto_continue = false;
@@ -56,7 +67,11 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 // 网络音频播放任务
 static void network_audio_task(void *pvParameters)
 {
-    char *url = (char *)pvParameters;
+    net_audio_params_t *params = (net_audio_params_t *)pvParameters;
+    char *url = params->url;
+    const uint32_t my_gen = params->gen;
+    free(params);
+
     // should_continue 必须在所有 goto cleanup 之前声明并初始化，
     // 否则编译器会报 maybe-uninitialized（goto 跳过变量初始化）
     bool should_continue = false;
@@ -114,7 +129,8 @@ static void network_audio_task(void *pvParameters)
     }
 
     int total_read = 0;
-    while (s_playing) {
+    // 代次检查：被新播放顶替时立即退出，避免新旧两个任务同时写音频管道
+    while (s_playing && s_generation == my_gen) {
         int read_len = esp_http_client_read(client, buf, HTTP_READ_BUF);
         if (read_len < 0) {
             ESP_LOGE(TAG, "HTTP 读取错误: %d", read_len);
@@ -140,7 +156,7 @@ static void network_audio_task(void *pvParameters)
     // 等待播放管道 drain（解码+I2S 播放完毕）
     // audio_spk_check_drain_done 由 websocket 主循环检测，这里等待标志
     int wait_count = 0;
-    while (s_playing && wait_count < 600) {  // 最多等 60 秒
+    while (s_playing && s_generation == my_gen && wait_count < 600) {  // 最多等 60 秒
         if (audio_spk_check_drain_done()) {
             break;
         }
@@ -148,14 +164,14 @@ static void network_audio_task(void *pvParameters)
         wait_count++;
     }
 
-    // 判断是否为自然结束（未被用户停止）
-    // s_playing 仍为 true 表示循环因 read_len==0（HTTP 读取完成）退出，而非用户停止
-    bool natural_end = s_playing;
-    if (natural_end) {
-        should_continue = s_auto_continue;
+    // 判断是否为自然结束（未被用户停止、未被新播放顶替）
+    if (s_generation == my_gen) {
+        if (s_playing) {
+            should_continue = s_auto_continue;
+        }
+        // 无论是否续播，都清除标志（续播时由服务端响应的 play_music 重新设置）
+        s_auto_continue = false;
     }
-    // 无论是否续播，都清除标志（续播时由服务端响应的 play_music 重新设置）
-    s_auto_continue = false;
 
 cleanup:
     if (client) {
@@ -163,41 +179,50 @@ cleanup:
         esp_http_client_cleanup(client);
     }
 
-    s_playing = false;
+    if (s_generation == my_gen) {
+        // 本任务仍是当前播放：正常收尾共享状态
+        s_playing = false;
 
-    if (should_continue) {
-        // 自动续播：重置歌词和进度条（清空旧歌词、停止进度定时器、进度归零），
-        // 但不隐藏音乐播放器界面，等待下一首歌的 music_meta/lyric_line 刷新
-        lyric_commands_reset();
-        audio_spk_stop();
-        ESP_LOGI(TAG, "自动续播：请求下一首随机歌曲");
+        if (should_continue) {
+            // 自动续播：重置歌词和进度条（清空旧歌词、停止进度定时器、进度归零），
+            // 但不隐藏音乐播放器界面，等待下一首歌的 music_meta/lyric_line 刷新
+            lyric_commands_reset();
+            audio_spk_stop();
+            ESP_LOGI(TAG, "自动续播：请求下一首随机歌曲");
+        } else {
+            // 正常结束或用户停止：重置歌词/进度条状态，隐藏音乐播放器
+            lyric_commands_reset();
+            eeui_port_hide_music_player();
+            // 回待机省电：音乐长时播放时服务器不发 session_end（工具接管），
+            // WiFi 会一直停在 NONE。音乐结束主动切回待机（WiFi modem sleep + 屏保计时）
+            power_manager_set_active(false);
+        }
+
+        if (s_current_url) {
+            free(s_current_url);
+            s_current_url = NULL;
+        }
+        // 先清空 s_task_handle，再通知等待者
+        s_task_handle = NULL;
+
+        // 自动续播：通知服务端播放下一首随机歌曲
+        if (should_continue) {
+            websocket_send_text("{\"type\":\"music_play_next\"}");
+        }
+
+        // 通过任务通知告知等待者（network_audio_stop/play）本任务已退出
+        TaskHandle_t waiter = s_waiter_handle;
+        if (waiter) {
+            xTaskNotifyGive(waiter);
+        }
     } else {
-        // 正常结束或用户停止：重置歌词/进度条状态，隐藏音乐播放器
-        lyric_commands_reset();
-        eeui_port_hide_music_player();
-        // 回待机省电：音乐长时播放时服务器不发 session_end（工具接管），
-        // WiFi 会一直停在 NONE。音乐结束主动切回待机（WiFi modem sleep + 屏保计时）
-        power_manager_set_active(false);
+        // 已被新播放顶替（停止等待超时后新播放已启动）：
+        // 只回收自己的 URL，绝不触碰 s_playing/s_current_url/s_task_handle/UI——
+        // 那些已属于新播放任务
+        ESP_LOGW(TAG, "播放任务退出时代次已变（被新播放顶替），跳过共享状态清理");
     }
 
-    // 释放 URL 并置 NULL
-    if (s_current_url) {
-        free(s_current_url);
-        s_current_url = NULL;
-    }
-    // 先清空 s_task_handle，再通知等待者
-    s_task_handle = NULL;
-
-    // 自动续播：通知服务端播放下一首随机歌曲
-    if (should_continue) {
-        websocket_send_text("{\"type\":\"music_play_next\"}");
-    }
-
-    // 通过任务通知告知等待者（network_audio_stop/play）本任务已退出
-    TaskHandle_t waiter = s_waiter_handle;
-    if (waiter) {
-        xTaskNotifyGive(waiter);
-    }
+    free(url);
 
     ESP_LOGI(TAG, "网络音频播放任务结束%s", should_continue ? "（等待下一首）" : "");
     vTaskDelete(NULL);
@@ -222,11 +247,20 @@ esp_err_t network_audio_play(const char *url)
         return ESP_FAIL;
     }
 
-    // 确认旧任务已退出后再分配新 URL
-    s_current_url = strdup(url);
-    if (!s_current_url) {
+    // 确认旧任务已退出后再分配新 URL。URL 由任务持有并自行释放，
+    // params 同时传递代次，防止与旧任务清理窗口产生竞态
+    net_audio_params_t *params = malloc(sizeof(net_audio_params_t));
+    if (!params) {
         return ESP_ERR_NO_MEM;
     }
+    params->url = strdup(url);
+    if (!params->url) {
+        free(params);
+        return ESP_ERR_NO_MEM;
+    }
+    params->gen = ++s_generation;
+    // 占位 s_current_url：旧任务清理窗口期间阻止并发播放
+    s_current_url = params->url;
 
     s_playing = true;
 
@@ -236,11 +270,12 @@ esp_err_t network_audio_play(const char *url)
     // 创建播放任务：s_task_handle 仅在新任务成功创建后由 xTaskCreate 写入，
     // 避免与旧任务退出时清空 s_task_handle 产生竞态
     BaseType_t ret = xTaskCreate(network_audio_task, "net_audio", 8192,
-                                 s_current_url, 5, &s_task_handle);
+                                 params, 5, &s_task_handle);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "创建播放任务失败");
         s_playing = false;
-        free(s_current_url);
+        free(params->url);
+        free(params);
         s_current_url = NULL;
         return ESP_FAIL;
     }

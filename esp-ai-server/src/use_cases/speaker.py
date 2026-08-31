@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import base64
 import io
 import json
@@ -191,6 +192,11 @@ class Speaker:
             return False
 
         logger.info(f"[Wakeup] 当前状态: {fsm.get()}")
+        # 记录唤醒时间（管理后台设备详情展示）
+        try:
+            setattr(session, "last_wakeup_time", time.time())
+        except Exception:
+            pass
 
         try:
             await channel.send_json({"type": "session_start", "session_id": SID_CONNECTED})

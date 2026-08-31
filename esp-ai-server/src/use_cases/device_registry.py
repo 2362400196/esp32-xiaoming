@@ -50,6 +50,7 @@ class DeviceRegistry:
         tool_manager=None,
         mac: str = "",
         firmware_version: str = "",
+        bin_id: str = "",
     ):
         async with self._lock:
             # 清理旧条目（设备重连时避免资源泄漏）
@@ -87,6 +88,7 @@ class DeviceRegistry:
                 "llm_processor": getattr(session, "llm_processor", None),
                 "mac": mac,
                 "firmware_version": firmware_version,
+                "bin_id": bin_id,
                 "ota_updating": False,
                 "ota_progress": 0.0,
                 "pending_ota": None,
@@ -100,8 +102,33 @@ class DeviceRegistry:
             self._stats["register_count"] += 1
             logger.info(f"[DeviceRegistry] 已注册设备: key={device_id} mac={mac or device_id}, firmware={firmware_version}, 总数: {len(self._devices)}")
 
+        # 后台落库设备在线状态（devices.last_seen / is_online，管理后台展示用）
+        _t = asyncio.create_task(self._sync_online_state(device_id, True))
+        self._bg_tasks.add(_t)
+        _t.add_done_callback(self._bg_tasks.discard)
+
         # 注册成功 → 发布设备上线事件（publish 内部容错，不影响注册流程）
         publish(EVENT_DEVICE_ONLINE, device_id=device_id)
+
+    async def _sync_online_state(self, device_id: str, online: bool) -> None:
+        """同步设备在线状态到数据库（last_seen + is_online），失败仅记日志"""
+        try:
+            import time as _time
+            from src.infrastructure.db.session import get_session_ctx
+            from src.infrastructure.db.models.device import DeviceModel
+            from sqlalchemy import or_, select as _select
+            async with get_session_ctx() as session:
+                row = (await session.execute(
+                    _select(DeviceModel).where(
+                        or_(DeviceModel.device_key == device_id, DeviceModel.device_id == device_id)
+                    )
+                )).scalar_one_or_none()
+                if row:
+                    row.last_seen = _time.time()
+                    row.is_online = online
+                    session.add(row)
+        except Exception as e:
+            logger.debug(f"[DeviceRegistry] 更新设备在线状态失败: {e}")
 
     async def unregister(self, device_id: str, session=None):
         """注销设备。
@@ -166,6 +193,11 @@ class DeviceRegistry:
                 logger.info(f"[DeviceRegistry] 已注销设备: {device_id}, 剩余: {len(self._devices)}")
                 # 实际删除后 → 发布设备离线事件（publish 内部容错）
                 publish(EVENT_DEVICE_OFFLINE, device_id=device_id)
+
+            # 后台落库离线状态（在锁外执行，避免持锁做 DB IO）
+            _t = asyncio.create_task(self._sync_online_state(device_id, False))
+            self._bg_tasks.add(_t)
+            _t.add_done_callback(self._bg_tasks.discard)
 
     def get(self, device_id: str):
         self._stats["lookup_count"] += 1

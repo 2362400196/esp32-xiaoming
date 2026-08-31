@@ -2,7 +2,7 @@
   <header class="navbar">
     <div class="nav-inner">
       <div class="nav-brand" @click="$emit('switch', 'home')">
-        <span class="brand-logo">🤖</span>
+        <span class="brand-logo"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4m-2 0h4"/><circle cx="9" cy="13" r="0.5" fill="currentColor"/><circle cx="15" cy="13" r="0.5" fill="currentColor"/><path d="M9 17h6"/></svg></span>
         <span class="brand-name">ESP-<span class="text-mint">AI</span></span>
       </div>
 

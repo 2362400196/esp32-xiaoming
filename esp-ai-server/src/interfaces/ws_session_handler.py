@@ -129,11 +129,12 @@ class WebSocketSessionHandler:
     call_times、_growth_cooldown_task 等）在此通过实例属性访问。
     """
 
-    def __init__(self, websocket, device_key, device_mac, device_firmware_version, trace_id) -> None:
+    def __init__(self, websocket, device_key, device_mac, device_firmware_version, trace_id, device_bin_id="") -> None:
         self.websocket = websocket
         self.device_key = device_key
         self.device_mac = device_mac
         self.device_firmware_version = device_firmware_version
+        self.device_bin_id = device_bin_id
         self.trace_id = trace_id
         self.settings = get_settings()
 
@@ -180,6 +181,7 @@ class WebSocketSessionHandler:
         device_key = self.device_key
         device_mac = self.device_mac
         device_firmware_version = self.device_firmware_version
+        device_bin_id = self.device_bin_id
         trace_id = self.trace_id
 
         # 将 trace_id / device_id 写入 contextvar，确保本会话所有日志都携带这些字段。
@@ -595,6 +597,7 @@ class WebSocketSessionHandler:
                 tool_manager=tool_mgr,
                 mac=mac_addr,
                 firmware_version=device_firmware_version,
+                bin_id=device_bin_id,
             )
 
         # 设备上线 → 推送 Web 前端

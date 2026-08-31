@@ -1266,6 +1266,62 @@ def list_firmwares() -> List[FirmwareInfo]:
     return sorted(firmwares, key=lambda x: x.created_time, reverse=True)
 
 
+FIRMWARE_META_FILE = Path(__file__).parent.parent.parent / "data" / "firmware_meta.json"
+
+
+def load_firmware_meta() -> dict:
+    """加载固件元数据（bin_id/version/uploaded_by/active），文件缺失返回空 dict"""
+    try:
+        import json as _json
+        if FIRMWARE_META_FILE.exists():
+            return _json.loads(FIRMWARE_META_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        logger.warning(f"[Firmware] 读取固件元数据失败: {e}")
+    return {}
+
+
+def save_firmware_meta(meta: dict) -> None:
+    import json as _json
+    FIRMWARE_META_FILE.parent.mkdir(parents=True, exist_ok=True)
+    FIRMWARE_META_FILE.write_text(
+        _json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def get_active_firmware() -> Optional[dict]:
+    """获取"启用中"的固件（OTA 无显式配置时的回退目标）。
+
+    返回 {filename, bin_id, version, download_url, size}，无启用固件返回 None。
+    """
+    meta = load_firmware_meta()
+    for filename, m in meta.items():
+        if not m.get("active"):
+            continue
+        info = get_firmware_info(filename)
+        if not info:
+            continue  # 文件已被手动删除，元数据悬空
+        return {
+            "filename": filename,
+            "bin_id": m.get("bin_id", ""),
+            "version": m.get("version", ""),
+            "download_url": info.download_url,
+            "size": info.size,
+        }
+    return None
+
+
+def set_active_firmware(filename: str) -> bool:
+    """设置启用中的固件（单选，其余取消启用）。文件不存在返回 False。"""
+    if not (FIRMWARE_DIR / filename).exists():
+        return False
+    meta = load_firmware_meta()
+    meta.setdefault(filename, {})
+    for name, m in meta.items():
+        m["active"] = (name == filename)
+    save_firmware_meta(meta)
+    return True
+
+
 @router.post("/firmware/upload", response_model=FirmwareListResponse)
 async def upload_firmware(
     file: UploadFile,
@@ -2147,7 +2203,8 @@ async def sdk_query_new_ota(
                     }
 
             import asyncio
-            device_ota = await asyncio.to_thread(_query_device)
+            # 设备未找到时 _query_device 返回 None，兜底为空字典避免后续 .get() 崩溃
+            device_ota = await asyncio.to_thread(_query_device) or {}
             if device_ota:
                 device_ota_enabled = device_ota.get("ota_enabled", True)
                 logger.info(f"[SDK OTA] 设备 {mac} 级配置: "
@@ -2162,16 +2219,26 @@ async def sdk_query_new_ota(
     if not device_ota_enabled:
         return {"success": True, "data": {"latest": True, "bin_url": ""}}
 
-    # ── 2. 合并配置：设备级优先，全局回退 ──
+    # ── 2. 合并配置：设备级 → 固件管理"启用中"固件 → 全局环境变量 ──
     global_bin_id = getattr(ota, 'bin_id', '') if ota else ''
     global_bin_url = getattr(ota, 'bin_url', '') if ota else ''
     global_version = getattr(ota, 'version', '') if ota else ''
 
-    effective_bin_id = device_ota.get("ota_bin_id", "") or global_bin_id
-    effective_bin_url = device_ota.get("ota_bin_url", "") or global_bin_url
-    effective_version = device_ota.get("ota_version", "") or global_version
+    active = get_active_firmware()
+    active_bin_id = (active or {}).get("bin_id", "")
+    active_bin_url = (active or {}).get("download_url", "")
+    active_version = (active or {}).get("version", "")
 
-    # 回退到本地上传的固件
+    effective_bin_id = device_ota.get("ota_bin_id", "") or active_bin_id or global_bin_id
+    effective_bin_url = device_ota.get("ota_bin_url", "") or active_bin_url or global_bin_url
+    effective_version = device_ota.get("ota_version", "") or active_version or global_version
+
+    if active_bin_id or active_bin_url:
+        source = "设备级配置" if (device_ota.get("ota_bin_id") or device_ota.get("ota_bin_url")) else                  ("固件管理启用中固件" if active_bin_url else "全局环境变量")
+        logger.info(f"[SDK OTA] OTA 目标来源: {source}, bin_id='{effective_bin_id}', "
+                    f"version='{effective_version}', url='{effective_bin_url}'")
+
+    # 最终兜底：三者都为空时使用最新上传的固件文件
     if not effective_bin_url:
         firmwares = list_firmwares()
         if firmwares:

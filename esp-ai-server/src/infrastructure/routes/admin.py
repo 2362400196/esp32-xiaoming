@@ -11,12 +11,14 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import secrets
 import time
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import csv
 import io
@@ -24,7 +26,7 @@ import logging
 import re
 import shutil
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select, update
@@ -121,7 +123,7 @@ def _device_online(device: DeviceModel) -> bool:
     return bool(channel and getattr(channel, "connected", False))
 
 
-def _serialize_device(device: DeviceModel, owner_email: str = "") -> dict:
+def _serialize_device(device: DeviceModel, owner_email: str = "", owner_nickname: str = "") -> dict:
     return {
         "device_id": device.device_id,
         "name": device.name,
@@ -129,6 +131,7 @@ def _serialize_device(device: DeviceModel, owner_email: str = "") -> dict:
         "device_key": device.device_key,
         "user_id": device.user_id,
         "owner_email": owner_email,
+        "owner_nickname": owner_nickname,
         "online": _device_online(device),
         "bound_at": device.bound_at,
         "last_seen": device.last_seen,
@@ -140,7 +143,72 @@ def _serialize_device(device: DeviceModel, owner_email: str = "") -> dict:
     }
 
 
+async def _load_owner_map(session, user_ids: set[str | None]) -> dict:
+    """批量查询设备归属用户信息，返回 user_id -> {email, nickname}"""
+    ids = {u for u in user_ids if u}
+    if not ids:
+        return {}
+    rows = await session.execute(
+        select(UserModel.id, UserModel.email, UserModel.nickname).where(UserModel.id.in_(ids))
+    )
+    return {uid: {"email": email, "nickname": nickname} for uid, email, nickname in rows}
+
+
 # ==================== 统计 ====================
+
+@router.get("/metrics")
+async def admin_metrics(_: UserModel = Depends(require_admin)):
+    """管理员性能指标（JSON）。
+
+    /system/metrics 返回的是 Prometheus 文本格式，前端无法解析——
+    此端点提供结构化指标供仪表盘展示：
+    - system: CPU/内存/线程
+    - concurrency: 全局并发信号量 + 后台任务计数（活跃/排队/已完成）
+    - pools: 各连接池状态
+    - uptime: 进程启动时间戳
+    """
+    import os
+
+    import psutil
+
+    from src.infrastructure import task_manager
+    from src.infrastructure.concurrency import get_stats as get_concurrency_stats
+    from src.infrastructure.connection_pool import PoolManager
+
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    # CPU 显示整机使用率：服务器进程空闲时自身占用≈0%，看进程值没有参考意义
+    cpu_percent = psutil.cpu_percent(interval=0.2)
+    conc = get_concurrency_stats()
+
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "system": {
+                "cpu_percent": cpu_percent,
+                "memory_mb": memory_info.rss / 1024 / 1024,
+                "memory_percent": process.memory_percent(),
+                "num_threads": process.num_threads(),
+            },
+            "concurrency": {
+                "semaphore_size": conc.get("global_concurrency_max"),
+                "semaphore_available": conc.get("global_concurrency_available"),
+                "limit_enabled": conc.get("global_concurrency_limit_enabled", False),
+                # 后台任务：asyncio task 无排队概念，排队恒为 0
+                "active_tasks": task_manager.get_active_count(),
+                "queued_tasks": 0,
+                "completed_tasks": task_manager.get_completed_count(),
+                # 活跃任务明细：[{name, elapsed}]，供仪表盘点击查看
+                "active_task_list": task_manager.list_active_tasks(),
+                # 最近完成的任务（最新在前，最多 20 条）：任务多为毫秒级短命任务，
+                # 仅靠活跃快照大多数时刻是空的，配最近完成才能看清跑过什么
+                "recent_task_list": task_manager.list_recent_completed(),
+            },
+            "pools": PoolManager.get_all_stats(),
+            "uptime": process.create_time(),
+        },
+    }
 
 @router.get("/stats")
 async def admin_stats(_: UserModel = Depends(require_admin)):
@@ -295,23 +363,37 @@ async def list_devices(_: UserModel = Depends(require_admin)):
         devices = (await session.execute(
             select(DeviceModel).order_by(DeviceModel.created_at.desc())
         )).scalars().all()
+        owners = await _load_owner_map(session, {d.user_id for d in devices})
 
-        user_ids = {d.user_id for d in devices if d.user_id}
-        owners: dict[str, str] = {}
-        if user_ids:
-            owner_rows = await session.execute(
-                select(UserModel.id, UserModel.email).where(UserModel.id.in_(user_ids))
-            )
-            owners = {uid: email for uid, email in owner_rows}
+    # 注册表快照（诊断用：核对运行时连接与数据库设备的映射关系）
+    registry_snapshot = []
+    registry = get_device_registry()
+    if registry:
+        for key in registry.get_all_ids():
+            entry = registry.resolve(key)
+            if not entry:
+                continue
+            channel = entry.get("channel")
+            registry_snapshot.append({
+                "key": key,
+                "mac": entry.get("mac", ""),
+                "connected": bool(channel and getattr(channel, "connected", False)),
+                "register_time": entry.get("register_time", 0),
+            })
 
     return {
         "code": 0,
         "message": "ok",
         "data": {
             "devices": [
-                _serialize_device(d, owners.get(d.user_id or "", ""))
+                _serialize_device(
+                    d,
+                    owners.get(d.user_id or "", {}).get("email", ""),
+                    owners.get(d.user_id or "", {}).get("nickname", ""),
+                )
                 for d in devices
             ],
+            "registry_devices": registry_snapshot,
         },
     }
 
@@ -403,7 +485,346 @@ async def admin_batch_speak(req: BatchSpeakReq, _: UserModel = Depends(require_a
     return {"code": 0, "message": "已向所有在线设备广播", "data": {"text": req.text}}
 
 
+# ==================== 固件管理 ====================
+
+FIRMWARE_ALLOWED_EXT = {".bin", ".elf", ".hex"}
+FIRMWARE_MAX_BYTES = 32 * 1024 * 1024  # 32MB（固件约 6MB，留足余量）
+
+
+def _firmware_meta() -> dict:
+    from src.infrastructure.device_api import load_firmware_meta
+    return load_firmware_meta()
+
+
+def _sanitize_firmware_name(name: str) -> str:
+    return "".join(c for c in name if c.isalnum() or c in "._-")
+
+
+@router.get("/firmwares")
+async def admin_list_firmwares(_: UserModel = Depends(require_admin)):
+    # 固件列表（含 bin_id/版本/上传者/启用状态）
+    from src.infrastructure.device_api import list_firmwares
+    meta = _firmware_meta()
+    items = []
+    for f in await asyncio.to_thread(list_firmwares):
+        m = meta.get(f.filename, {})
+        items.append({
+            "filename": f.filename,
+            "size": f.size,
+            "created_time": f.created_time,
+            "download_url": f.download_url,
+            "bin_id": m.get("bin_id", ""),
+            "version": m.get("version", "") or f.version or "",
+            "uploaded_by": m.get("uploaded_by", ""),
+            "uploaded_at": m.get("uploaded_at"),
+            "active": bool(m.get("active")),
+        })
+    # 启用中的排最前，其余按时间倒序
+    items.sort(key=lambda x: (not x["active"], -x["created_time"]))
+    return {"code": 0, "message": "ok", "data": {"firmwares": items}}
+
+
+@router.post("/firmwares/upload")
+async def admin_upload_firmware(
+    request: Request,
+    file: UploadFile = File(...),
+    bin_id: str = Form(""),
+    version: str = Form(""),
+    admin: UserModel = Depends(require_admin),
+):
+    # 上传固件并登记 bin_id/版本（上传后自动设为启用中，作为设备 OTA 回退目标）
+    from src.infrastructure.device_api import (
+        FIRMWARE_DIR, load_firmware_meta, save_firmware_meta,
+    )
+    import time as _time
+
+    if not file.filename:
+        raise HTTPException(400, "未选择文件")
+    ext = Path(file.filename).suffix.lower()
+    if ext not in FIRMWARE_ALLOWED_EXT:
+        raise HTTPException(400, "仅支持固件格式: " + ", ".join(sorted(FIRMWARE_ALLOWED_EXT)))
+
+    safe_filename = _sanitize_firmware_name(file.filename)
+    if not safe_filename:
+        raise HTTPException(400, "文件名不合法")
+
+    content = await file.read(FIRMWARE_MAX_BYTES + 1)
+    if len(content) > FIRMWARE_MAX_BYTES:
+        raise HTTPException(400, "固件文件过大（>32MB）")
+
+    def _write():
+        FIRMWARE_DIR.mkdir(parents=True, exist_ok=True)
+        (FIRMWARE_DIR / safe_filename).write_bytes(content)
+
+    await asyncio.to_thread(_write)
+
+    # 元数据登记：新上传自动设为启用中（单选）
+    meta = load_firmware_meta()
+    for name, m in meta.items():
+        m["active"] = False
+    meta[safe_filename] = {
+        "bin_id": bin_id.strip(),
+        "version": version.strip(),
+        "uploaded_by": admin.email,
+        "uploaded_at": _time.time(),
+        "active": True,
+    }
+    await asyncio.to_thread(save_firmware_meta, meta)
+
+    _add_oplog(admin.email, "firmware_upload", "上传固件 " + safe_filename + "（bin_id=" + (bin_id or "未填写") + "）")
+    logger.info("[Admin] 固件上传: %s（%d 字节, bin_id=%s, 上传者 %s）",
+                safe_filename, len(content), bin_id or "未填写", admin.email)
+    return {
+        "code": 0,
+        "message": "固件已上传并设为启用中",
+        "data": {"filename": safe_filename, "bin_id": bin_id, "version": version, "active": True},
+    }
+
+
+@router.post("/firmwares/{filename}/set-active")
+async def admin_set_active_firmware(filename: str, admin: UserModel = Depends(require_admin)):
+    # 设置启用中的固件（设备 OTA 无显式配置时的回退目标）
+    from src.infrastructure.device_api import set_active_firmware
+    safe_filename = _sanitize_firmware_name(filename)
+    ok = await asyncio.to_thread(set_active_firmware, safe_filename)
+    if not ok:
+        raise HTTPException(404, "固件文件不存在")
+    _add_oplog(admin.email, "firmware_set_active", "启用固件 " + safe_filename)
+    return {"code": 0, "message": "已启用固件 " + safe_filename}
+
+
+@router.delete("/firmwares/{filename}")
+async def admin_delete_firmware(filename: str, admin: UserModel = Depends(require_admin)):
+    # 删除固件文件及其元数据
+    from src.infrastructure.device_api import FIRMWARE_DIR, load_firmware_meta, save_firmware_meta
+    safe_filename = _sanitize_firmware_name(filename)
+    filepath = FIRMWARE_DIR / safe_filename
+    if not filepath.exists():
+        raise HTTPException(404, "固件文件不存在")
+
+    def _delete():
+        filepath.unlink()
+
+    await asyncio.to_thread(_delete)
+    meta = load_firmware_meta()
+    was_active = bool(meta.get(safe_filename, {}).get("active"))
+    meta.pop(safe_filename, None)
+    await asyncio.to_thread(save_firmware_meta, meta)
+
+    _add_oplog(admin.email, "firmware_delete", "删除固件 " + safe_filename)
+    return {"code": 0, "message": "固件已删除", "data": {"was_active": was_active}}
+
+
 # ==================== 用户管理增强 ====================
+
+@router.post("/devices/{device_id}/wakeup")
+async def admin_device_wakeup(device_id: str, _: UserModel = Depends(require_admin)):
+    """管理员远程唤醒单台设备（复用设备控制内部逻辑，跳过归属校验）"""
+    from src.infrastructure.routes.devices import _wakeup
+    return await _wakeup(device_id)
+
+
+@router.get("/devices/{device_id}/detail")
+async def admin_device_detail(device_id: str, _: UserModel = Depends(require_admin)):
+    """设备详情：基本信息 + 运行时状态（连接时长/会话/固件/OTA）"""
+    async with get_session_ctx() as session:
+        device = await session.get(DeviceModel, device_id)
+        if not device:
+            raise HTTPException(404, "Device not found")
+        owners = await _load_owner_map(session, {device.user_id})
+    owner = owners.get(device.user_id or "", {})
+
+    registry = get_device_registry()
+    entry = None
+    if registry:
+        entry = registry.resolve(device.device_id)
+        if not entry and device.mac_address:
+            entry = registry.get_by_mac(device.mac_address)
+        if not entry and device.device_key:
+            entry = registry.resolve(device.device_key)
+
+    channel = (entry or {}).get("channel")
+    online = bool(channel and getattr(channel, "connected", False))
+    session_obj = (entry or {}).get("session")
+    fsm = (entry or {}).get("fsm")
+    register_time = (entry or {}).get("register_time")
+
+    detail = _serialize_device(device, owner.get("email", ""), owner.get("nickname", ""))
+    detail.update({
+        # 运行时（仅在线时有值）
+        "online_seconds": round(time.time() - register_time, 0) if (online and register_time) else None,
+        "connected_at": register_time if online else None,
+        "session_id": (getattr(session_obj, "session_id", "") or "") if session_obj else "",
+        "device_state": (fsm.get() if fsm and hasattr(fsm, "get") else "unknown") if fsm else "unknown",
+        "tts_playing": bool(getattr(session_obj, "tts_playing", False)) if session_obj else False,
+        "last_wakeup_time": getattr(session_obj, "last_wakeup_time", None) if session_obj else None,
+        # 固件与 OTA
+        "firmware_version": (entry or {}).get("firmware_version", "") or "",
+        "bin_id": (entry or {}).get("bin_id", "") or "",
+        "ota_updating": (entry or {}).get("ota_updating", False),
+        "ota_progress": (entry or {}).get("ota_progress", 0.0),
+        # 其他
+        "enabled_plugins": device.enabled_plugins or [],
+    })
+    return {"code": 0, "message": "ok", "data": detail}
+
+
+@router.get("/devices/{device_id}/ota-check")
+async def admin_device_ota_check(device_id: str, _: UserModel = Depends(require_admin)):
+    """检测设备是否有可用升级（与 /sdk/query_new_ota 同一套判断逻辑，面向管理员）"""
+    from src.infrastructure.config import get_settings
+
+    async with get_session_ctx() as session:
+        device = await session.get(DeviceModel, device_id)
+        if not device:
+            raise HTTPException(404, "Device not found")
+
+    registry = get_device_registry()
+    entry = None
+    if registry:
+        entry = registry.resolve(device.device_id)
+        if not entry and device.mac_address:
+            entry = registry.get_by_mac(device.mac_address)
+        if not entry and device.device_key:
+            entry = registry.resolve(device.device_key)
+    current_version = (entry or {}).get("firmware_version", "") or ""
+    device_bin_id = (entry or {}).get("bin_id", "") or ""
+
+    settings = get_settings()
+    ota = settings.ota
+    ota_enabled = bool(device.ota_enabled) and bool(ota.enabled if ota else True)
+
+    # OTA 目标优先级：设备级配置 → 固件管理「启用中」固件 → 全局环境变量
+    from src.infrastructure.device_api import get_active_firmware
+    active = get_active_firmware()
+    if device.ota_bin_id or device.ota_bin_url or device.ota_version:
+        target_version = device.ota_version
+        target_url = device.ota_bin_url
+        target_bin_id = device.ota_bin_id
+        target_source = "设备级配置"
+    elif active:
+        target_version = active["version"]
+        target_url = active["download_url"]
+        target_bin_id = active["bin_id"]
+        target_source = "固件管理（启用中固件）"
+    else:
+        target_version = ota.version if ota else ""
+        target_url = ota.bin_url if ota else ""
+        target_bin_id = ota.bin_id if ota else ""
+        target_source = "全局环境变量"
+
+    has_update = False
+    reason = ""
+    if not ota_enabled:
+        reason = "OTA 已停用（设备级或全局）"
+    elif not target_url:
+        reason = "未配置固件下载地址"
+    # ── 优先级 1：bin_id 比对（与设备自检 /sdk/query_new_ota 同一套语义）──
+    # bin_id 是固件包唯一标识，两侧都有且一致即视为最新，不看版本号
+    elif target_bin_id and device_bin_id:
+        if target_bin_id == device_bin_id:
+            reason = f"固件 bin_id 一致，已是最新（当前 {current_version or '未知'}）"
+        else:
+            has_update = True
+            reason = f"固件 bin_id 不同（设备 {device_bin_id} / 目标 {target_bin_id}），需要升级"
+    elif not current_version:
+        reason = "设备固件版本未知（需设备在线并重连一次上报版本）"
+    elif not target_version:
+        reason = f"未配置目标版本号，视为最新（当前 {current_version}）"
+    # ── 优先级 2：版本号语义化比对（bin_id 缺失任一侧时回退到这里）──
+    else:
+        comparable = True
+        try:
+            from packaging.version import Version
+            if Version(target_version) <= Version(current_version):
+                reason = f"已是最新版本 {current_version}（目标 {target_version}）"
+            else:
+                has_update = True
+                reason = f"发现新版本 {target_version}（当前 {current_version}）"
+        except Exception:
+            comparable = False
+        if not comparable:
+            # 版本号无法解析时退化为字符串相等判断
+            if target_version == current_version:
+                reason = f"已是最新版本 {current_version}"
+            else:
+                has_update = True
+                reason = f"发现新版本 {target_version}（当前 {current_version}）"
+
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "has_update": has_update,
+            "reason": reason,
+            "current_version": current_version,
+            "target_version": target_version,
+            "target_url": target_url,
+            "target_source": target_source,
+            "ota_enabled": ota_enabled,
+        },
+    }
+
+
+@router.post("/devices/{device_id}/ota-force")
+async def admin_device_ota_force(device_id: str, admin: UserModel = Depends(require_admin)):
+    """强制设备 OTA 升级：直接下发固件 URL（跳过版本比对，设备收到即下载刷写）。
+
+    前提：设备在线，且设备固件支持 ota_update 指令（v1.4+ 客户端）。
+    """
+    from src.infrastructure.config import get_settings
+    from src.infrastructure.device_api import _send_ota_to_device
+
+    async with get_session_ctx() as session:
+        device = await session.get(DeviceModel, device_id)
+        if not device:
+            raise HTTPException(404, "Device not found")
+
+    registry = get_device_registry()
+    entry = None
+    if registry:
+        entry = registry.resolve(device.device_id)
+        if not entry and device.mac_address:
+            entry = registry.get_by_mac(device.mac_address)
+        if not entry and device.device_key:
+            entry = registry.resolve(device.device_key)
+    channel = (entry or {}).get("channel")
+    if not (channel and getattr(channel, "connected", False)):
+        raise HTTPException(400, "设备不在线，无法下发升级指令")
+
+    # OTA 目标优先级与「检测升级」一致：设备级 → 固件管理启用中固件 → 全局环境变量
+    settings = get_settings()
+    ota = settings.ota
+    from src.infrastructure.device_api import get_active_firmware
+    active = get_active_firmware()
+    if device.ota_bin_url:
+        url = device.ota_bin_url
+        version = device.ota_version
+    elif active:
+        url = active["download_url"]
+        version = active["version"]
+    else:
+        url = ota.bin_url if ota else ""
+        version = ota.version if ota else ""
+    if not url:
+        raise HTTPException(400, "未配置固件下载地址：请在固件管理上传固件，或配置 OTA_BIN_URL")
+    if "your-server-ip" in url or "your-server" in url or "localhost" in url:
+        # .env.example 的占位地址/回环地址设备不可达，直接拒绝并给出明确指引
+        raise HTTPException(400, "固件下载地址不可达（含占位符 your-server-ip 或 localhost），"
+                                 "请在固件管理上传固件（自动生成本机局域网地址）或修正 OTA_BIN_URL")
+
+    result = await _send_ota_to_device(device.device_key, url, version)
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error", "下发失败"))
+
+    _add_oplog(admin.email, "force_ota", f"强制升级设备 {device_id}，固件: {url}")
+    logger.info(f"[Admin] 强制 OTA 下发: device={device_id}, url={url}, version={version}")
+    return {
+        "code": 0,
+        "message": "升级指令已下发，设备将在数秒内开始下载固件",
+        "data": {"url": url, "version": version},
+    }
+
 
 @router.get("/users/{user_id}/devices")
 async def admin_user_devices(user_id: str, _: UserModel = Depends(require_admin)):
@@ -529,11 +950,43 @@ async def admin_logs(lines: int = Query(200, ge=1, le=5000), _: UserModel = Depe
         return {"code": 0, "message": "ok", "data": {"path": str(path), "lines": []}}
 
     try:
-        content = path.read_text(encoding="utf-8", errors="replace")
-        all_lines = content.splitlines()
-        return {"code": 0, "message": "ok", "data": {"path": str(path), "lines": all_lines[-lines:]}}
+        content = await asyncio.to_thread(path.read_text, "utf-8")
     except Exception as e:
         raise HTTPException(500, f"读取日志失败: {e}")
+    all_lines = content.splitlines()
+    formatted = [
+        l if (l := _format_log_line(raw)) is not None else raw
+        for raw in all_lines[-lines:]
+    ]
+    return {"code": 0, "message": "ok", "data": {"path": str(path), "lines": formatted}}
+
+
+def _format_log_line(raw: str) -> str | None:
+    """把 JSON-lines 文件日志格式化成与终端控制台一致的可读样式。
+
+    文件日志是给日志收集用的 JSON（ts/level/msg/trace_id/session_id/device_id），
+    终端是给人看的 `[时间] [级别] [trace/session/device] 消息`；
+    非 JSON 行（uvicorn 访问日志等）原样返回 None 由调用方兜底。
+    """
+    raw = raw.strip()
+    if not raw.startswith("{"):
+        return None
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict) or "msg" not in obj:
+        return None
+    ts = str(obj.get("ts", ""))
+    # ISO 时间戳 → 终端同款 HH:MM:SS.mmm
+    short_ts = ts[11:23] if len(ts) >= 23 else ts
+    ids = "/".join([
+        str(obj.get("trace_id", "-") or "-"),
+        str(obj.get("session_id", "-") or "-"),
+        str(obj.get("device_id", "-") or "-"),
+    ])
+    level = str(obj.get("level", "INFO"))
+    return f"[{short_ts}] [{level}] [{ids}] {obj['msg']}"
 
 
 # ==================== 数据库备份 ====================
@@ -716,24 +1169,55 @@ async def admin_update_llm_config(device_id: str, req: LLMConfigUpdateReq, _: Us
 
 @router.get("/conversations")
 async def admin_conversations(device_id: Optional[str] = Query(None), limit: int = Query(50, ge=1, le=200), _: UserModel = Depends(require_admin)):
-    """查看对话历史（从短期记忆表读取）"""
+    """查看对话历史（短期记忆表）。
+
+    注意：短期记忆按 WS 会话的 device_key（bound_* 随机标识）存储，
+    而 devices 表主键是 MAC 式 device_id —— 历史版本按 device_id 查记忆
+    导致列表恒为空。此处以记忆表实际存在的 device_id 为准，再映射回设备。
+    """
+    from src.infrastructure.db.models.memory import ShortTermMemoryModel
     from src.infrastructure.db.repositories.short_term_memory_repo import SqlShortTermMemoryRepository
+
     repo = SqlShortTermMemoryRepository()
-    if not device_id:
-        conversations = []
-        async with get_session_ctx() as session:
-            devices = (await session.execute(select(DeviceModel))).scalars().all()
-            for d in devices:
-                msgs = repo.load(d.device_id)
-                if msgs:
-                    conversations.append({"device_id": d.device_id, "device_name": d.name, "messages": msgs[-10:]})
-        return {"code": 0, "data": {"conversations": conversations}}
+
+    async with get_session_ctx() as session:
+        devices = (await session.execute(select(DeviceModel))).scalars().all()
+        owners = await _load_owner_map(session, {d.user_id for d in devices})
+        # 记忆表实际存有对话的会话设备标识（去重）
+        memory_ids = (await session.execute(
+            select(ShortTermMemoryModel.device_id).distinct()
+        )).scalars().all()
+
+    # 记忆键 → 设备：device_key 优先（bound_*），回退 device_id（遗留数据）
+    by_key = {d.device_key: d for d in devices if d.device_key}
+    by_id = {d.device_id: d for d in devices}
+
+    if device_id:
+        # 前端筛选传的是 devices 表 device_id，转换为记忆键后查询
+        dev = by_id.get(device_id)
+        mem_key = (dev.device_key if dev else None) or device_id
+        target_keys = [mem_key]
     else:
-        msgs = repo.load(device_id)
-        async with get_session_ctx() as session:
-            device = await session.get(DeviceModel, device_id)
-            name = device.name if device else device_id
-        return {"code": 0, "data": {"device_id": device_id, "device_name": name, "messages": msgs[-limit:]}}
+        target_keys = list(memory_ids)
+
+    conversations = []
+    for mem_id in target_keys:
+        # 同步仓储走线程池，避免阻塞事件循环
+        msgs = await asyncio.to_thread(repo.load, mem_id)
+        if not msgs:
+            continue
+        dev = by_key.get(mem_id) or by_id.get(mem_id)
+        owner = owners.get(dev.user_id or "", {}) if dev else {}
+        conversations.append({
+            "device_id": dev.device_id if dev else mem_id,
+            "device_key": mem_id,
+            "device_name": (dev.name if dev and dev.name else None) or mem_id,
+            "owner_email": owner.get("email", "") if dev else "",
+            "messages": msgs[-limit:],
+        })
+
+    conversations.sort(key=lambda c: max((m.get("timestamp") or 0) for m in c["messages"]), reverse=True)
+    return {"code": 0, "data": {"conversations": conversations}}
 
 
 # ==================== WebSocket 状态 ====================
@@ -762,6 +1246,195 @@ async def admin_ws_status(_: UserModel = Depends(require_admin)):
 
 
 # ==================== 系统健康检查 ====================
+
+# ==================== 健康检查扩展 ====================
+
+async def _first_device_with(predicate) -> Optional[DeviceModel]:
+    """返回第一个满足条件的设备（用于全局未配置时回退到设备级配置）"""
+    async with get_session_ctx() as session:
+        devices = (await session.execute(select(DeviceModel))).scalars().all()
+        for d in devices:
+            if predicate(d):
+                return d
+    return None
+
+
+async def _check_llm_connectivity() -> dict:
+    """LLM 连通性：发送极简 chat 请求（max_tokens=1），验证 Key/端点可用"""
+    from src.infrastructure.config import get_settings
+    settings = get_settings()
+    api_key = settings.llm.api_key
+    base_url = settings.llm.base_url
+    model = settings.llm.model
+    if not api_key:
+        dev = await _first_device_with(lambda d: bool(d.llm_api_key))
+        if dev:
+            api_key = dev.llm_api_key
+            base_url = dev.llm_base_url or base_url
+            model = dev.llm_model or model
+    if not api_key:
+        return {"status": "skipped", "reason": "未配置 LLM API Key"}
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url or None,
+            timeout=10,
+            max_retries=0,
+        )
+        start = time.monotonic()
+        try:
+            await client.chat.completions.create(
+                model=model or "gpt-3.5-turbo",
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=1,
+            )
+        finally:
+            await client.close()
+        return {"status": "ok", "latency_ms": round((time.monotonic() - start) * 1000)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)[:200]}
+
+
+async def _check_tts_connectivity() -> dict:
+    """TTS 连通性：建立到火山引擎 TTS 的 WebSocket 连接（验证可达性与鉴权）"""
+    from src.infrastructure.config import get_settings
+    settings = get_settings()
+    api_key = settings.tts.api_key
+    voice_type = settings.tts.voice_type
+    if not api_key:
+        dev = await _first_device_with(lambda d: bool((d.tts_config or {}).get("api_key")))
+        if dev:
+            tts_cfg = dev.tts_config or {}
+            api_key = tts_cfg.get("api_key")
+            voice_type = tts_cfg.get("voice_type") or voice_type
+    if not api_key:
+        return {"status": "skipped", "reason": "未配置 TTS API Key"}
+    try:
+        from src.interfaces.tts_gateways import VolcEngineTTSGateway
+        gateway = VolcEngineTTSGateway({"api_key": api_key, "voice_type": voice_type})
+        start = time.monotonic()
+        conn = await asyncio.wait_for(gateway._create_connection(), timeout=10)
+        try:
+            await conn.close()
+        except Exception:
+            pass
+        return {"status": "ok", "latency_ms": round((time.monotonic() - start) * 1000)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)[:200]}
+
+
+async def _check_asr_connectivity() -> dict:
+    """ASR 连通性：建立到火山引擎 ASR 的 WebSocket 连接（验证可达性与鉴权）"""
+    from src.infrastructure.config import get_settings
+    settings = get_settings()
+    api_key = settings.asr.volcengine_api_key
+    resource_id = settings.asr.volcengine_resource_id
+    model_name = settings.asr.volcengine_model
+    if not api_key:
+        dev = await _first_device_with(lambda d: bool((d.asr_config or {}).get("volcengine", {}).get("api_key")))
+        if dev:
+            asr_cfg = (dev.asr_config or {}).get("volcengine", {})
+            api_key = asr_cfg.get("api_key")
+            resource_id = asr_cfg.get("resource_id") or resource_id
+            model_name = asr_cfg.get("model_name") or model_name
+    if not api_key:
+        return {"status": "skipped", "reason": "未配置 ASR API Key"}
+    try:
+        import websockets
+        from src.interfaces.asr.volcengine import VolcEngineASRGateway
+        gateway = VolcEngineASRGateway({
+            "api_key": api_key,
+            "resource_id": resource_id,
+            "model_name": model_name,
+        })
+        start = time.monotonic()
+        conn = await asyncio.wait_for(
+            websockets.connect(gateway._build_url(), additional_headers=gateway._get_headers(), open_timeout=10),
+            timeout=10,
+        )
+        try:
+            await conn.close()
+        except Exception:
+            pass
+        return {"status": "ok", "latency_ms": round((time.monotonic() - start) * 1000)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)[:200]}
+
+
+def _check_system_resources() -> dict:
+    """系统资源：进程内存/CPU、系统内存占用"""
+    try:
+        import psutil
+        proc = psutil.Process()
+        rss_mb = round(proc.memory_info().rss / (1024**2), 1)
+        cpu_pct = proc.cpu_percent(interval=0.3)
+        vm = psutil.virtual_memory()
+        return {
+            "status": "ok",
+            "process_memory_mb": rss_mb,
+            "process_cpu_pct": cpu_pct,
+            "system_memory_used_pct": round(vm.percent, 1),
+            "system_memory_total_gb": round(vm.total / (1024**3), 1),
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)[:200]}
+
+
+def _count_recent_errors(log_path: Path, minutes: int = 30) -> int:
+    """统计日志文件最近 N 分钟内的 ERROR/CRITICAL 条数"""
+    if not log_path.exists():
+        return 0
+    cutoff = time.time() - minutes * 60
+    count = 0
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()[-2000:]
+    except Exception:
+        return 0
+    for line in lines:
+        try:
+            obj = json.loads(line)
+            if obj.get("level") not in ("ERROR", "CRITICAL"):
+                continue
+            ts = obj.get("ts", "")
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if dt.timestamp() >= cutoff:
+                    count += 1
+            except Exception:
+                count += 1
+        except Exception:
+            continue
+    return count
+
+
+def _check_runtime_status() -> dict:
+    """运行时状态：在线设备数、ASR/TTS 连接池、最近错误日志"""
+    result = {"status": "ok"}
+    try:
+        registry = get_device_registry()
+        result["online_devices"] = len(registry.get_all_ids()) if registry else 0
+    except Exception as e:
+        result["online_devices"] = -1
+        result["registry_error"] = str(e)[:200]
+    try:
+        from src.interfaces.asr.volcengine import VolcEngineASRGateway
+        from src.interfaces.tts_gateways import VolcEngineTTSGateway
+        asr_pools = VolcEngineASRGateway._pools
+        tts_pools = VolcEngineTTSGateway._pools
+        result["asr_pools"] = len(asr_pools)
+        result["tts_pools"] = len(tts_pools)
+        result["asr_active_conns"] = sum(p._active_count for p in asr_pools.values() if not p.is_closed)
+        result["tts_active_conns"] = sum(p._active_count for p in tts_pools.values() if not p.is_closed)
+    except Exception as e:
+        result["pool_error"] = str(e)[:200]
+    try:
+        result["errors_last_30m"] = _count_recent_errors(_project_root() / "logs" / "esp_ai.log", minutes=30)
+    except Exception as e:
+        result["log_error"] = str(e)[:200]
+    return result
+
 
 @router.get("/health")
 async def admin_health_check(_: UserModel = Depends(require_admin)):
@@ -795,8 +1468,29 @@ async def admin_health_check(_: UserModel = Depends(require_admin)):
         devices = (await session.execute(select(DeviceModel))).scalars().all()
         asr_configured = sum(1 for d in devices if d.asr_provider)
         llm_configured = sum(1 for d in devices if d.llm_type)
-        tts_configured = sum(1 for d in devices if d.tts_type)
+        # TTS 实际生效依赖 tts_config.api_key（tts_type 仅前端创建时写入，
+        # 通过 WebSocket 自动注册/网页保存的设备可能为空），故两者任一非空即视为已配置
+        tts_configured = sum(1 for d in devices if d.tts_type or (d.tts_config or {}).get("api_key"))
         results["services"] = {"status": "ok", "asr_configured": asr_configured, "llm_configured": llm_configured, "tts_configured": tts_configured}
+
+    # 5. 系统资源
+    results["system"] = _check_system_resources()
+
+    # 6. 运行时状态
+    results["runtime"] = _check_runtime_status()
+
+    # 7. 外部服务连通性（并发执行，各限时 10s；未配置的服务跳过，不算异常）
+    ext = await asyncio.gather(
+        _check_llm_connectivity(),
+        _check_tts_connectivity(),
+        _check_asr_connectivity(),
+    )
+    results["external_services"] = {
+        "status": "ok" if all(r.get("status") != "error" for r in ext) else "degraded",
+        "llm": ext[0],
+        "tts": ext[1],
+        "asr": ext[2],
+    }
 
     overall = "ok" if all(r.get("status") == "ok" for r in results.values()) else "degraded"
     return {"code": 0, "data": {"overall": overall, "checks": results}}
@@ -833,10 +1527,25 @@ def _add_oplog(admin_email: str, action: str, detail: str = "") -> None:
 
 
 @router.get("/operation-logs")
-async def admin_operation_logs(limit: int = Query(100, ge=1, le=500), _: UserModel = Depends(require_admin)):
-    """查看操作日志"""
-    logs = _load_oplogs()
-    return {"code": 0, "data": {"logs": logs[:limit]}}
+async def admin_operation_logs(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    _: UserModel = Depends(require_admin),
+):
+    """分页查看操作日志（按时间倒序，最新在前）"""
+    logs = _load_oplogs()  # _add_oplog 用 insert(0) 写入，文件序即最新在前
+    total = len(logs)
+    start = (page - 1) * page_size
+    return {
+        "code": 0,
+        "data": {
+            "logs": logs[start:start + page_size],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": max(1, (total + page_size - 1) // page_size),
+        },
+    }
 
 
 # ==================== 表情包管理 ====================
@@ -978,81 +1687,305 @@ async def admin_delete_scheduled_task(task_id: str, _: UserModel = Depends(requi
     return {"code": 0, "message": "定时任务已删除"}
 
 
-# ==================== 全局配置 ====================
+# ==================== 系统设置（网站设置） ====================
 
-# 全局配置中文标签与说明
-GLOBAL_CONFIG_LABELS = {
-    "app_name": ("应用名称", "设备显示的应用名称"),
-    "deploy_mode": ("部署模式", "single=单用户, multi=多用户"),
-    "asr_provider": ("ASR 提供商", "语音识别服务商，如 volc(火山引擎)、tencent(腾讯云)"),
-    "asr_language": ("ASR 语言", "语音识别语言，如 zh(中文)、en(英文)"),
-    "llm_type": ("LLM 类型", "大模型提供商，如 openai、deepseek、qwen"),
-    "llm_base_url": ("LLM 地址", "API 地址，兼容 OpenAI 格式"),
-    "llm_model": ("LLM 模型", "使用的模型名称，如 gpt-4o、deepseek-chat"),
-    "tts_type": ("TTS 类型", "语音合成类型，如 volc_tts"),
-    "tts_voice": ("TTS 音色", "语音合成使用的音色标识"),
-    "wake_word": ("唤醒词", "设备唤醒的关键词"),
-    "max_connections": ("最大连接数", "服务端同时接受的最大 WebSocket 连接数"),
-}
+# 设置项分组（仪表盘「设置」页签的分区展示）
+SETTING_GROUPS = [
+    {"id": "basic", "label": "基础"},
+    {"id": "llm", "label": "大模型 (LLM)"},
+    {"id": "asr", "label": "语音识别 (ASR)"},
+    {"id": "tts", "label": "语音合成 (TTS)"},
+    {"id": "session", "label": "唤醒与会话"},
+    {"id": "music", "label": "音乐"},
+    {"id": "ota", "label": "固件 OTA"},
+    {"id": "emotion", "label": "表情"},
+    {"id": "perf", "label": "性能与限流"},
+]
 
-@router.get("/config/export")
-async def admin_export_config(_: UserModel = Depends(require_admin)):
-    """导出系统配置（.env 中的关键配置）"""
+# 可编辑设置项定义。
+# key 为 Settings 扁平字段名的大写形式（即 .env 键名，与 pydantic-settings 映射一致）。
+# type: str/text/int/float/bool/secret/select
+# restart: True 表示该项在 AI 服务商连接池/启动逻辑中快照，修改需重启服务才完全生效
+SETTING_DEFS: list[dict[str, Any]] = [
+    # ---- 基础 ----
+    {"key": "DEPLOY_MODE", "group": "basic", "label": "部署模式", "type": "select",
+     "options": ["single", "multi"], "restart": True,
+     "desc": "single=单用户，multi=多用户（AI 配置改从数据库读取）"},
+    {"key": "CORS_ORIGINS", "group": "basic", "label": "CORS 允许来源", "type": "str",
+     "restart": True, "desc": "逗号分隔的域名，如 https://a.com,https://b.com；留空禁止跨域"},
+    {"key": "SHUTDOWN_GRACE_PERIOD", "group": "basic", "label": "关机宽限期（秒）", "type": "int",
+     "restart": True, "desc": "服务停止时等待后台任务完成的秒数"},
+    # ---- LLM ----
+    {"key": "LLM_API_KEY", "group": "llm", "label": "API Key", "type": "secret",
+     "restart": True, "desc": "大模型服务密钥"},
+    {"key": "LLM_BASE_URL", "group": "llm", "label": "API 地址", "type": "str",
+     "restart": True, "desc": "兼容 OpenAI 格式的接口地址"},
+    {"key": "LLM_MODEL", "group": "llm", "label": "模型名称", "type": "str",
+     "restart": True, "desc": "如 deepseek-chat、gpt-4o"},
+    {"key": "LLM_TEMPERATURE", "group": "llm", "label": "温度", "type": "float",
+     "restart": True, "desc": "0-2，越高回答越随机"},
+    {"key": "LLM_MAX_TOKENS", "group": "llm", "label": "最大 Token", "type": "int",
+     "restart": True, "desc": "单次回复的最大 token 数"},
+    {"key": "LLM_SYSTEM_PROMPT", "group": "llm", "label": "系统提示词", "type": "text",
+     "restart": True, "desc": "设备对话的全局系统提示词（留空使用内置默认）"},
+    {"key": "LLM_MEMORY_ENABLED", "group": "llm", "label": "对话记忆", "type": "bool",
+     "restart": True, "desc": "是否携带历史对话上下文"},
+    {"key": "LLM_MEMORY_MAX_MESSAGES", "group": "llm", "label": "记忆条数上限", "type": "int",
+     "restart": True, "desc": ""},
+    {"key": "LLM_MEMORY_MAX_TOKENS", "group": "llm", "label": "记忆 Token 上限", "type": "int",
+     "restart": True, "desc": ""},
+    {"key": "LLM_MEMORY_LONG_TERM_ENABLED", "group": "llm", "label": "长期记忆", "type": "bool",
+     "restart": True, "desc": ""},
+    # ---- ASR ----
+    {"key": "ASR_PROVIDER", "group": "asr", "label": "识别服务商", "type": "select",
+     "options": ["tencent", "volcengine", "aliyun", "xunfei"], "restart": True,
+     "desc": "语音识别服务商"},
+    {"key": "ASR_TENCENT_APP_ID", "group": "asr", "label": "腾讯云 AppID", "type": "str",
+     "restart": True, "desc": "provider=tencent 时使用"},
+    {"key": "ASR_TENCENT_SECRET_ID", "group": "asr", "label": "腾讯云 SecretId", "type": "str",
+     "restart": True, "desc": ""},
+    {"key": "ASR_TENCENT_SECRET_KEY", "group": "asr", "label": "腾讯云 SecretKey", "type": "secret",
+     "restart": True, "desc": ""},
+    {"key": "ASR_TENCENT_ENGINE", "group": "asr", "label": "腾讯云引擎", "type": "str",
+     "restart": True, "desc": "如 16k_zh"},
+    {"key": "ASR_VOLCENGINE_API_KEY", "group": "asr", "label": "火山引擎 Key", "type": "secret",
+     "restart": True, "desc": "provider=volcengine 时使用"},
+    {"key": "ASR_VOLCENGINE_RESOURCE_ID", "group": "asr", "label": "火山引擎资源 ID", "type": "str",
+     "restart": True, "desc": ""},
+    {"key": "ASR_VOLCENGINE_MODEL", "group": "asr", "label": "火山引擎模型", "type": "str",
+     "restart": True, "desc": ""},
+    {"key": "ASR_NO_SPEECH_TIMEOUT", "group": "asr", "label": "无语音超时（秒）", "type": "int",
+     "restart": True, "desc": ""},
+    {"key": "ASR_SILENCE_TIMEOUT", "group": "asr", "label": "静音超时（秒）", "type": "int",
+     "restart": True, "desc": ""},
+    {"key": "ASR_MAX_CONCURRENCY", "group": "asr", "label": "最大并发", "type": "int",
+     "restart": True, "desc": ""},
+    # ---- TTS ----
+    {"key": "TTS_VOLCENGINE_API_KEY", "group": "tts", "label": "火山引擎 API Key", "type": "secret",
+     "restart": True, "desc": "语音合成服务密钥"},
+    {"key": "TTS_VOLCENGINE_RESOURCE_ID", "group": "tts", "label": "资源 ID", "type": "str",
+     "restart": True, "desc": ""},
+    {"key": "TTS_VOLCENGINE_VOICE_TYPE", "group": "tts", "label": "默认音色", "type": "str",
+     "restart": True, "desc": "如 BV001_streaming"},
+    {"key": "TTS_VOLCENGINE_SPEED", "group": "tts", "label": "语速倍率", "type": "float",
+     "restart": True, "desc": "1.0 为正常语速"},
+    {"key": "TTS_VOLCENGINE_VOLUME", "group": "tts", "label": "音量倍率", "type": "float",
+     "restart": True, "desc": ""},
+    {"key": "TTS_VOLCENGINE_PITCH", "group": "tts", "label": "音调倍率", "type": "float",
+     "restart": True, "desc": ""},
+    {"key": "TTS_VOLCENGINE_DIALECT", "group": "tts", "label": "方言", "type": "str",
+     "restart": True,
+     "desc": "可选 beijing/dongbei/henan/shaanxi/shanghai/sichuan/tianjin/yue，留空为普通话"},
+    # ---- 唤醒与会话（运行时动态读取，保存后即时生效）----
+    {"key": "WAKEUP_TEXT", "group": "session", "label": "唤醒回复语", "type": "str",
+     "restart": False, "desc": "设备唤醒后 TTS 播报的第一句话"},
+    {"key": "WAKE_AUDIO_CACHE_ENABLED", "group": "session", "label": "唤醒音频缓存", "type": "bool",
+     "restart": False, "desc": ""},
+    {"key": "WAKE_AUDIO_PLAY_ENABLED", "group": "session", "label": "唤醒音频播放", "type": "bool",
+     "restart": False, "desc": ""},
+    {"key": "GROWTH_COOLDOWN_SECONDS", "group": "session", "label": "成长任务冷却（秒）", "type": "int",
+     "restart": False, "desc": "对话结束后等待多少秒无新对话才触发 AI 成长任务，0 为立即"},
+    # ---- 音乐（即时生效）----
+    {"key": "MUSIC_API_URL", "group": "music", "label": "音乐服务地址", "type": "str",
+     "restart": False, "desc": "网络音乐播放的 HTTP 服务地址"},
+    {"key": "LYRICS_OFFSET", "group": "music", "label": "歌词偏移（毫秒）", "type": "int",
+     "restart": False, "desc": "正数提前、负数延后"},
+    # ---- OTA（即时生效）----
+    {"key": "OTA_ENABLED", "group": "ota", "label": "启用 OTA", "type": "bool",
+     "restart": False, "desc": ""},
+    {"key": "OTA_BIN_URL", "group": "ota", "label": "固件地址", "type": "str",
+     "restart": False, "desc": ""},
+    {"key": "OTA_VERSION", "group": "ota", "label": "固件版本", "type": "str",
+     "restart": False, "desc": ""},
+    {"key": "OTA_BIN_ID", "group": "ota", "label": "固件 ID", "type": "str",
+     "restart": False, "desc": "与客户端板型 bin_id 对应"},
+    {"key": "OTA_IS_OFFICIAL", "group": "ota", "label": "官方固件标记", "type": "str",
+     "restart": False, "desc": "0/1"},
+    # ---- 表情（即时生效）----
+    {"key": "SERVER_EMOTION_ENABLED", "group": "emotion", "label": "情绪检测", "type": "bool",
+     "restart": False, "desc": "LLM 回复末尾解析 [e:情绪] 标签并下发表情"},
+    {"key": "SERVER_EMOTION_GIF_DIR", "group": "emotion", "label": "GIF 目录", "type": "str",
+     "restart": False, "desc": ""},
+    {"key": "SERVER_EMOTION_STATIC_DIR", "group": "emotion", "label": "静态表情目录", "type": "str",
+     "restart": False, "desc": ""},
+    # ---- 性能与限流（启动时快照，需重启）----
+    {"key": "PERF_GLOBAL_MAX_CONCURRENT_SESSIONS", "group": "perf", "label": "最大并发会话", "type": "int",
+     "restart": True, "desc": ""},
+    {"key": "PERF_ENABLE_GLOBAL_CONCURRENCY_LIMIT", "group": "perf", "label": "启用并发限制", "type": "bool",
+     "restart": True, "desc": ""},
+    {"key": "PERF_RATE_LIMIT_GLOBAL_RPM", "group": "perf", "label": "全局 RPM 限制", "type": "int",
+     "restart": True, "desc": ""},
+    {"key": "PERF_MAX_MESSAGES_PER_SESSION", "group": "perf", "label": "单会话消息上限", "type": "int",
+     "restart": True, "desc": ""},
+    {"key": "PERF_AUDIO_QUEUE_MAX_SIZE", "group": "perf", "label": "音频队列上限", "type": "int",
+     "restart": True, "desc": ""},
+    {"key": "PERF_SEND_QUEUE_MAX_SIZE", "group": "perf", "label": "发送队列上限", "type": "int",
+     "restart": True, "desc": ""},
+]
+
+_SETTINGS_BY_KEY = {d["key"]: d for d in SETTING_DEFS}
+
+
+def _format_env_value(value: str) -> str:
+    """将值格式化为 .env 字段：含换行/引号的值用双引号包裹（python-dotenv 支持 \\n 转义）"""
+    if value == "":
+        return '""'
+    if '"' in value or "\n" in value or "\r" in value:
+        escaped = (
+            value.replace("\r", "")
+            .replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+        )
+        return f'"{escaped}"'
+    return value
+
+
+def _update_env_content(content: str, key: str, value: str) -> str:
+    """更新 .env 内容中指定键；键不存在则追加。
+
+    原值若为多行引号包裹（含未闭合引号），会吞掉后续行直到引号闭合后再替换，
+    避免多行值残留中间行破坏文件结构。
+    """
+    lines = content.split("\n")
+    pattern = re.compile(rf"^{re.escape(key)}=")
+    out: list[str] = []
+    replaced = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not replaced and pattern.match(line):
+            out.append(f"{key}={_format_env_value(value)}")
+            replaced = True
+            raw = line.split("=", 1)[1] if "=" in line else ""
+            while ((raw.count('"') % 2 == 1 or raw.count("'") % 2 == 1)
+                   and i + 1 < len(lines)):
+                i += 1
+                raw += "\n" + lines[i]
+            i += 1
+            continue
+        out.append(line)
+        i += 1
+    if not replaced:
+        if out and out[-1] != "":
+            out.append("")
+        out.append(f"{key}={_format_env_value(value)}")
+    return "\n".join(out)
+
+
+def _to_env_str(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _convert_setting_value(d: dict, value: Any) -> Any:
+    """按设置项定义做类型转换与取值校验，非法值抛 HTTPException(400)"""
+    t = d["type"]
+    if t == "bool":
+        if isinstance(value, bool):
+            return value
+        s = str(value).strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off"):
+            return False
+        raise HTTPException(400, f"{d['key']} 需为布尔值")
+    if t == "int":
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{d['key']} 需为整数")
+    if t == "float":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{d['key']} 需为数字")
+    if t == "select":
+        s = str(value)
+        if s not in (d.get("options") or []):
+            raise HTTPException(400, f"{d['key']} 仅支持: {', '.join(d.get('options') or [])}")
+        return s
+    return str(value)
+
+
+@router.get("/settings")
+async def admin_get_settings(_: UserModel = Depends(require_admin)):
+    """获取可编辑的系统设置（按分组返回；密钥类只回是否已设置，不回明文）"""
     from src.infrastructure.config import get_settings
     settings = get_settings()
-    config = {
-        "export_time": time.time(),
-        "app_name": settings.APP_NAME,
-        "deploy_mode": settings.DEPLOY_MODE,
-        "asr_provider": settings.ASR_PROVIDER,
-        "asr_language": settings.ASR_LANGUAGE,
-        "llm_type": settings.LLM_TYPE,
-        "llm_base_url": settings.LLM_BASE_URL,
-        "llm_model": settings.LLM_MODEL,
-        "tts_type": settings.TTS_TYPE,
-        "tts_voice": settings.TTS_VOICE,
-        "wake_word": settings.WAKE_WORD,
-        "max_connections": settings.MAX_CONNECTIONS,
-    }
-    items = []
-    for k, v in config.items():
-        if k == "export_time":
-            continue
-        label, desc = GLOBAL_CONFIG_LABELS.get(k, (k, ""))
-        items.append({"key": k, "label": label, "desc": desc, "value": v})
-    return {"code": 0, "data": {"items": items}}
-
-
-@router.post("/config/import")
-async def admin_import_config(data: dict, _: UserModel = Depends(require_admin)):
-    """导入系统配置"""
-    # 合法环境变量名白名单：仅允许大写字母/下划线开头，后接大写字母/数字/下划线
-    _env_key_pattern = r"^[A-Z_][A-Z0-9_]*$"
+    groups = []
+    for g in SETTING_GROUPS:
+        items = []
+        for d in SETTING_DEFS:
+            if d["group"] != g["id"]:
+                continue
+            current = getattr(settings, d["key"].lower(), None)
+            item = {k: v for k, v in d.items()}
+            if d["type"] == "secret":
+                item["value"] = ""
+                item["has_value"] = bool(current)
+            else:
+                item["value"] = current
+            items.append(item)
+        groups.append({**g, "items": items})
     env_path = _project_root() / ".env"
-    if not env_path.exists():
-        raise HTTPException(400, ".env 文件不存在")
-    content = env_path.read_text(encoding="utf-8")
-    for key, val in data.items():
-        if val is None:
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {"groups": groups, "env_file_exists": env_path.exists()},
+    }
+
+
+@router.put("/settings")
+async def admin_update_settings(data: dict, admin: UserModel = Depends(require_admin)):
+    """更新系统设置：白名单校验 → 写入 .env → 热应用内存配置。
+
+    - 密钥类字段留空表示保持现有值不覆盖
+    - "restart": true 的项（AI 服务商连接池等启动时快照）需重启服务才完全生效，
+      其余项更新内存配置后立即生效
+    """
+    if not isinstance(data, dict) or not data:
+        raise HTTPException(400, "请求体不能为空")
+
+    updates: dict[str, tuple[dict, Any]] = {}
+    for key, value in data.items():
+        d = _SETTINGS_BY_KEY.get(key)
+        if not d:
+            raise HTTPException(400, f"不支持的配置项: {key}")
+        if d["type"] == "secret" and (value is None or str(value).strip() == ""):
+            continue  # 密钥留空 = 保持现有值
+        if value is None:
             continue
-        # key 白名单校验：不合法的环境变量名直接拒绝，防止注入任意配置项
-        if not re.match(_env_key_pattern, str(key)):
-            raise HTTPException(400, f"非法配置项名: {key}")
-        # value 过滤换行符，防止伪造多行 .env 内容注入额外配置
-        value = str(val).replace("\n", " ").replace("\r", " ")
-        # key 用 re.escape 转义；替换文本用 lambda 返回，避免 value 中的反斜杠被当作正则替换引用
-        if re.search(rf"^{re.escape(str(key))}=", content, re.MULTILINE):
-            content = re.sub(
-                rf"^{re.escape(str(key))}=.*",
-                lambda _m: f"{key}={value}",
-                content,
-                flags=re.MULTILINE,
-            )
-        else:
-            content += f"\n{key}={value}"
-    env_path.write_text(content, encoding="utf-8")
-    logger.info(f"[Admin] 导入系统配置: {list(data.keys())}")
-    return {"code": 0, "message": "配置已导入，重启后生效"}
+        updates[key] = (d, _convert_setting_value(d, value))
+    if not updates:
+        return {"code": 0, "message": "没有需要保存的修改",
+                "data": {"updated": 0, "restart_keys": []}}
+
+    # 1. 写入 .env（同步文件 IO 放线程池）
+    env_path = _project_root() / ".env"
+    content = ""
+    if env_path.exists():
+        content = await asyncio.to_thread(env_path.read_text, "utf-8")
+    for key, (_d, typed) in updates.items():
+        content = _update_env_content(content, key, _to_env_str(typed))
+    await asyncio.to_thread(lambda: env_path.write_text(content, encoding="utf-8"))
+
+    # 2. 热应用：更新内存单例的扁平字段后重跑 flat→nested 映射（与重启加载等效）
+    from src.infrastructure.config import get_settings
+    settings = get_settings()
+    for key, (_d, typed) in updates.items():
+        setattr(settings, key.lower(), typed)
+    settings.model_post_init(None)
+
+    restart_keys = [k for k, (d, _t) in updates.items() if d.get("restart")]
+    _add_oplog(admin.email, "update_settings", f"修改系统设置: {', '.join(sorted(updates.keys()))}")
+    logger.info(f"[Admin] 更新系统设置: {sorted(updates.keys())}，需重启项: {restart_keys}")
+    return {
+        "code": 0,
+        "message": f"已保存 {len(updates)} 项设置",
+        "data": {"updated": len(updates), "restart_keys": restart_keys},
+    }
 
 
 # ==================== 动态日志级别 ====================
@@ -1233,6 +2166,24 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .refresh-btn { background: #2a5a7a; color: #fff; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: background 0.2s; }
 .refresh-btn:hover { background: #3a7a9a; }
 @media (max-width: 900px) { .row-4 { grid-template-columns: repeat(2, 1fr); } .row-3 { grid-template-columns: 1fr; } .row-2 { grid-template-columns: 1fr; } }
+.settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+.setting-item { background: #0f1923; border: 1px solid #1e3a4a; border-radius: 8px; padding: 14px; }
+.setting-item .setting-label { font-size: 13px; color: #e0e6ed; font-weight: 600; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+.setting-item .setting-desc { font-size: 11px; color: #667788; margin-bottom: 8px; line-height: 1.5; }
+.setting-item input[type=text], .setting-item input[type=password], .setting-item input[type=number], .setting-item select, .setting-item textarea {
+  width: 100%; padding: 8px 12px; background: #1a2a3a; border: 1px solid #1e3a4a; border-radius: 6px; color: #e0e6ed; font-size: 13px; outline: none; font-family: inherit;
+}
+.setting-item input:focus, .setting-item select:focus, .setting-item textarea:focus { border-color: #2a5a7a; }
+.setting-item textarea { resize: vertical; font-family: monospace; }
+.setting-item .switch-row { display: flex; align-items: center; gap: 10px; font-size: 13px; color: #e0e6ed; cursor: pointer; }
+.setting-item .switch-row input[type=checkbox] { width: 18px; height: 18px; accent-color: #2a5a7a; cursor: pointer; }
+.restart-badge { font-size: 10px; color: #ffb74d; border: 1px solid #ffb74d; border-radius: 4px; padding: 1px 6px; font-weight: 400; }
+.save-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 14px 18px; background: #1a2a3a; border: 1px solid #1e3a4a; border-radius: 10px; }
+.save-bar .hint { font-size: 12px; color: #667788; }
+.settings-actions { display: flex; gap: 10px; }
+.save-btn { background: #2e7d32; color: #fff; border: none; padding: 9px 28px; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 600; }
+.save-btn:hover { background: #388e3c; }
+.save-btn:disabled { background: #455a64; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -1259,17 +2210,18 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 </div>
 <div id="dashboardPage" style="display:none;">
   <div class="nav-tabs">
-    <button class="nav-tab active" onclick="switchTab('overview',this)">&#x1F4CA; 概览</button>
-    <button class="nav-tab" onclick="switchTab('metrics',this)">&#x2699; 性能指标</button>
-    <button class="nav-tab" onclick="switchTab('pools',this)">&#x1F4E1; 连接池</button>
-    <button class="nav-tab" onclick="switchTab('system',this)">&#x1F4BB; 系统信息</button>
+    <button class="nav-tab active" onclick="switchTab('overview',this)">概览</button>
+    <button class="nav-tab" onclick="switchTab('settings',this)">设置</button>
+    <button class="nav-tab" onclick="switchTab('metrics',this)">性能指标</button>
+    <button class="nav-tab" onclick="switchTab('pools',this)">连接池</button>
+    <button class="nav-tab" onclick="switchTab('system',this)">系统信息</button>
   </div>
 
   <div id="tab-overview" class="tab-content active">
     <div class="row row-4" id="statsCards">
       <div class="card loading" style="grid-column:1/-1;">加载统计信息中...</div>
     </div>
-    <div class="section-title">&#x1F504; 实时动态</div>
+    <div class="section-title">实时动态</div>
     <div class="row row-2">
       <div class="card" id="lastLogsCard">
         <div class="label">最近的日志</div>
@@ -1286,14 +2238,25 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
     <div class="row row-3" id="metricsCards">
       <div class="card loading" style="grid-column:1/-1;">加载性能指标中...</div>
     </div>
-    <div class="section-title">&#x1F4CA; 系统资源</div>
+    <div class="section-title">系统资源</div>
     <div class="row row-4" id="systemResourceCards">
       <div class="card loading" style="grid-column:1/-1;">加载中...</div>
     </div>
   </div>
 
+  <div id="tab-settings" class="tab-content">
+    <div class="save-bar">
+      <div class="hint">修改写入 .env 并即时热应用；标有「需重启」的项涉及服务连接池，重启后完全生效。密钥留空表示保持现有值。</div>
+      <div class="settings-actions">
+        <button class="refresh-btn" onclick="loadSettings()">&#x21bb; 重新加载</button>
+        <button class="save-btn" id="saveSettingsBtn" onclick="saveSettings(this)">保存全部修改</button>
+      </div>
+    </div>
+    <div id="settingsContainer"><div class="loading" style="padding:60px;text-align:center;color:#667788;">加载设置中...</div></div>
+  </div>
+
   <div id="tab-pools" class="tab-content">
-    <div class="section-title">&#x1F4E1; 连接池详情</div>
+    <div class="section-title">连接池详情</div>
     <div id="poolDetails" class="pool-grid">
       <div class="loading" style="grid-column:1/-1;">加载连接池信息中...</div>
     </div>
@@ -1315,6 +2278,7 @@ function switchTab(name, btn) {
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   btn.classList.add('active');
   document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'settings') loadSettings();
 }
 function updateTime() {
   document.getElementById('updateTime').textContent = '更新于 ' + new Date().toLocaleString('zh-CN');
@@ -1372,7 +2336,7 @@ async function refreshAll() {
     const [stats, sysInfo, metrics] = await Promise.all([
       fetchJSON('/api/v1/admin/stats'),
       fetchJSON('/api/v1/admin/system/info'),
-      fetchJSON('/api/v1/system/metrics').catch(() => null)
+      fetchJSON('/api/v1/admin/metrics').catch(() => null)
     ]);
     lastMetrics = metrics;
     renderStats(stats);
@@ -1383,17 +2347,17 @@ async function refreshAll() {
   } catch(e) {
     document.querySelectorAll('.card.loading').forEach(c => {
       c.className = 'card error';
-      c.innerHTML = '<div>&#x26A0; 加载失败: ' + e.message + '</div>';
+      c.innerHTML = '<div>加载失败: ' + e.message + '</div>';
     });
   }
 }
 function renderStats(stats) {
   document.getElementById('statsCards').innerHTML = [
-    { label: '用户总数', value: stats.users, sub: '管理员 ' + stats.admins, cls: 'users', icon: '&#x1F464;' },
-    { label: '设备总数', value: stats.devices, sub: '已绑定 ' + stats.bound_devices, cls: 'devices', icon: '&#x1F4F1;' },
-    { label: '在线设备', value: stats.online_devices, sub: '在线率 ' + (stats.devices ? (stats.online_devices/stats.devices*100).toFixed(1) : 0) + '%', cls: 'online', icon: '&#x1F4E1;' },
-    { label: '未绑定设备', value: stats.devices - stats.bound_devices, sub: '待绑定设备数', cls: 'cpu', icon: '&#x1F50C;' },
-  ].map(c => '<div class="card ' + c.cls + '"><div class="label">' + c.icon + ' ' + c.label + '</div><div class="value">' + c.value + '</div><div class="sub">' + c.sub + '</div></div>').join('');
+    { label: '用户总数', value: stats.users, sub: '管理员 ' + stats.admins, cls: 'users',  },
+    { label: '设备总数', value: stats.devices, sub: '已绑定 ' + stats.bound_devices, cls: 'devices',  },
+    { label: '在线设备', value: stats.online_devices, sub: '在线率 ' + (stats.devices ? (stats.online_devices/stats.devices*100).toFixed(1) : 0) + '%', cls: 'online',  },
+    { label: '未绑定设备', value: stats.devices - stats.bound_devices, sub: '待绑定设备数', cls: 'cpu',  },
+  ].map(c => '<div class="card ' + c.cls + '"><div class="label">' + c.label + '</div><div class="value">' + c.value + '</div><div class="sub">' + c.sub + '</div></div>').join('');
 }
 function renderSysInfo(info) {
   const memGB = info.memory_bytes ? (info.memory_bytes / 1024 / 1024 / 1024).toFixed(2) : 'N/A';
@@ -1432,7 +2396,7 @@ function renderMetrics(metrics) {
     { label: '已完成任务', value: conc.completed_tasks ?? 'N/A', cls: 'done' },
   ];
   document.getElementById('systemResourceCards').innerHTML =
-    '<div style="grid-column:1/-1;"><div class="section-title">&#x2699; 并发控制</div><div class="concurrency-grid">' +
+    '<div style="grid-column:1/-1;"><div class="section-title">并发控制</div><div class="concurrency-grid">' +
     concItems.map(c => '<div class="concurrency-item"><div class="conc-label">' + c.label + '</div><div class="conc-value ' + c.cls + '">' + c.value + '</div></div>').join('') +
     '</div></div>';
 
@@ -1466,7 +2430,7 @@ async function loadDevices() {
     if (Array.isArray(devices)) {
       const online = devices.filter(d => d.online);
       document.getElementById('onlineDevices').innerHTML = online.length
-        ? online.map(d => '&#x1F7E2; ' + escapeHtml(d.name || d.device_id) + ' (' + escapeHtml(d.mac || '') + ')').join('<br>')
+        ? online.map(d => '● ' + escapeHtml(d.name || d.device_id) + ' (' + escapeHtml(d.mac || '') + ')').join('<br>')
         : '暂无在线设备';
     } else {
       document.getElementById('onlineDevices').textContent = '暂无设备数据';
@@ -1477,7 +2441,70 @@ async function loadDevices() {
 }
 function escapeHtml(s) {
   if (typeof s !== 'string') return s;
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+// ==================== 设置页签 ====================
+let settingsLoaded = false;
+async function loadSettings() {
+  const container = document.getElementById('settingsContainer');
+  try {
+    const data = await fetchJSON('/api/v1/admin/settings');
+    container.innerHTML = data.groups.map(g =>
+      '<div class="section-title">' + g.label + '</div>' +
+      '<div class="settings-grid">' + g.items.map(renderSettingField).join('') + '</div>'
+    ).join('');
+    settingsLoaded = true;
+  } catch(e) {
+    container.innerHTML = '<div class="error">加载设置失败: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+function renderSettingField(it) {
+  const badge = it.restart ? '<span class="restart-badge">需重启</span>' : '';
+  const desc = it.desc ? '<div class="setting-desc">' + escapeHtml(it.desc) + '</div>' : '';
+  let input;
+  if (it.type === 'bool') {
+    input = '<label class="switch-row"><input type="checkbox" data-key="' + it.key + '"' + (it.value ? ' checked' : '') + '><span>' + (it.value ? '已开启' : '已关闭') + '</span></label>';
+  } else if (it.type === 'select') {
+    input = '<select data-key="' + it.key + '">' + (it.options || []).map(o =>
+      '<option value="' + escapeHtml(o) + '"' + (o === it.value ? ' selected' : '') + '>' + escapeHtml(o) + '</option>'
+    ).join('') + '</select>';
+  } else if (it.type === 'text') {
+    input = '<textarea data-key="' + it.key + '" rows="3" placeholder="留空保持不变">' + escapeHtml(it.value == null ? '' : it.value) + '</textarea>';
+  } else if (it.type === 'secret') {
+    input = '<input type="password" data-key="' + it.key + '" data-secret="1" autocomplete="new-password" placeholder="' + (it.has_value ? '已设置（留空保持不变）' : '未设置') + '">';
+  } else if (it.type === 'int' || it.type === 'float') {
+    input = '<input type="number" ' + (it.type === 'float' ? 'step="0.1" ' : 'step="1" ') + 'data-key="' + it.key + '" value="' + escapeHtml(String(it.value == null ? '' : it.value)) + '" placeholder="留空保持不变">';
+  } else {
+    input = '<input type="text" data-key="' + it.key + '" value="' + escapeHtml(it.value == null ? '' : it.value) + '" placeholder="留空保持不变">';
+  }
+  return '<div class="setting-item"><div class="setting-label">' + escapeHtml(it.label) + ' ' + badge + '</div>' + desc + input + '</div>';
+}
+async function saveSettings(btn) {
+  const payload = {};
+  document.querySelectorAll('#settingsContainer [data-key]').forEach(el => {
+    const key = el.dataset.key;
+    if (el.type === 'checkbox') { payload[key] = el.checked; return; }
+    const v = el.value;
+    if (v === '' || (el.dataset.secret && v.trim() === '')) return; // 空值/密钥留空 = 不覆盖
+    payload[key] = v;
+  });
+  if (!Object.keys(payload).length) { alert('没有修改需要保存'); return; }
+  btn.disabled = true; btn.textContent = '保存中...';
+  try {
+    const res = await fetch('/api/v1/admin/settings', {
+      method: 'PUT', headers: Object.assign(getAuthHeaders(), { 'Content-Type': 'application/json' }),
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.code !== 0) throw new Error(data.message || '保存失败');
+    const rk = (data.data && data.data.restart_keys || []).length;
+    alert('已保存 ' + data.data.updated + ' 项设置' + (rk ? '，其中 ' + rk + ' 项涉及服务连接，需重启服务完全生效' : '，已即时生效'));
+    loadSettings();
+  } catch(e) {
+    alert('保存失败: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = '保存全部修改';
+  }
 }
 checkAuth();
 if (token) setInterval(refreshAll, 30000);

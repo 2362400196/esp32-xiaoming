@@ -31,6 +31,17 @@ extern "C" {
 esp_err_t ota_check_and_update(const char *server_base_url);
 
 /**
+ * 从指定 URL 直接升级固件（服务端 ota_update 指令入口）
+ *
+ * 与 ota_check_and_update 的区别：跳过版本比对，直接下载并写入
+ * 指定 URL 的固件（管理员强制升级）。完成后重启。
+ *
+ * @param firmware_url 固件下载地址
+ * @return ESP_OK：升级成功（随后重启）；ESP_ERR_INVALID_STATE：已有 OTA 进行中；其他：失败
+ */
+esp_err_t ota_update_from_url(const char *firmware_url);
+
+/**
  * OTA 是否正在进行中
  */
 bool ota_is_updating(void);

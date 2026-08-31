@@ -33,6 +33,8 @@
 #include "freertos/semphr.h"
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <unistd.h>
 
 static const char *TAG = "gif_downloader";
 
@@ -224,26 +226,61 @@ static void save_gif_to_cache(const char *filename, const uint8_t *data, size_t 
     char path[128];
     snprintf(path, sizeof(path), "%s/%s", EMO_CACHE_DIR, filename);
     mkdir(EMO_CACHE_DIR, 0755);  // 确保目录存在（已存在时返回 EEXIST，忽略）
+
+    // 空间预检：SPIFFS 空闲不足以容纳整个文件时直接跳过（留 8KB 索引/元数据余量），
+    // 避免写入半截文件后反复报"写入不完整"
+    size_t total = 0, used = 0;
+    if (esp_spiffs_info("storage", &total, &used) == ESP_OK) {
+        size_t free_bytes = total - used;
+        if (free_bytes < size + 8 * 1024) {
+            ESP_LOGW(TAG, "SPIFFS 空闲不足，跳过缓存: %s 需 %dKB，空闲 %dKB（表情仍可在本次运行中正常显示）",
+                     filename, (int)(size / 1024), (int)(free_bytes / 1024));
+            return;
+        }
+    }
+
     FILE *f = fopen(path, "wb");
     if (!f) {
-        ESP_LOGW(TAG, "缓存写入失败(打开): %s", path);
+        ESP_LOGW(TAG, "缓存写入失败(打开): %s (errno=%d %s)", path, errno, strerror(errno));
         return;
     }
-    size_t wr = fwrite(data, 1, size, f);
-    fclose(f);
-    if (wr != size) {
-        // 写 0 字节通常是分区已满（storage 分区与 Lua storage 共用）——打印用量便于诊断
-        size_t total = 0, used = 0;
-        if (esp_spiffs_info("storage", &total, &used) == ESP_OK) {
-            ESP_LOGW(TAG, "缓存写入不完整: %s (%d/%d)，删除无效缓存（SPIFFS 总=%luKB 已用=%luKB 空闲=%luKB）",
-                     filename, (int)wr, (int)size,
-                     (unsigned long)(total / 1024), (unsigned long)(used / 1024),
-                     (unsigned long)((total - used) / 1024));
-        } else {
-            ESP_LOGW(TAG, "缓存写入不完整: %s (%d/%d)，删除无效缓存（SPIFFS 信息读取失败）",
-                     filename, (int)wr, (int)size);
+
+    // 分块写入：SPIFFS 对超大单次 write 有失败风险（官方文档明确说明单次写入
+    // 超过块大小若干倍可能失败），newlib fwrite 对大块数据可能一次性直传全部
+    // 字节；分块写入规避该问题，且失败时能精确定位出错位置
+    size_t written = 0;
+    const size_t chunk_max = 4096;
+    while (written < size) {
+        size_t remain = size - written;
+        size_t n = fwrite(data + written, 1, remain < chunk_max ? remain : chunk_max, f);
+        if (n == 0) {
+            ESP_LOGW(TAG, "缓存写入失败@%u/%u: %s (errno=%d %s, ferror=%d)",
+                     (unsigned)written, (unsigned)size, filename,
+                     errno, strerror(errno), ferror(f) ? 1 : 0);
+            break;
         }
+        written += n;
+    }
+    // 显式落盘并校验：fclose 内部 flush 失败会被静默吞掉，必须先 fflush 检查
+    if (written == size && (fflush(f) != 0 || fsync(fileno(f)) != 0)) {
+        ESP_LOGW(TAG, "缓存写入失败(flush/fsync): %s (errno=%d %s)", filename, errno, strerror(errno));
+        written = 0;
+    }
+    fclose(f);
+
+    if (written != size) {
+        // 删除无效缓存，下次开机重新下载
         remove(path);
+        size_t used2 = 0;
+        if (esp_spiffs_info("storage", &total, &used2) == ESP_OK) {
+            ESP_LOGW(TAG, "缓存写入不完整: %s (%u/%u)，删除无效缓存（SPIFFS 总=%luKB 已用=%luKB 空闲=%luKB）",
+                     filename, (unsigned)written, (unsigned)size,
+                     (unsigned long)(total / 1024), (unsigned long)(used2 / 1024),
+                     (unsigned long)((total - used2) / 1024));
+        } else {
+            ESP_LOGW(TAG, "缓存写入不完整: %s (%u/%u)，删除无效缓存（SPIFFS 信息读取失败）",
+                     filename, (unsigned)written, (unsigned)size);
+        }
     } else {
         ESP_LOGI(TAG, "%s 已写入缓存 (%d bytes)", filename, (int)size);
     }
@@ -705,7 +742,7 @@ void download_gifs(void)
     );
 
     if (ret != pdPASS) {
-        ESP_LOGW(TAG, "创建下载任务失败，使用内置 GIF");
+        ESP_LOGW(TAG, "创建下载任务失败，表情将无法显示（固件已无内置表情）");
         free(params);
     }
 }

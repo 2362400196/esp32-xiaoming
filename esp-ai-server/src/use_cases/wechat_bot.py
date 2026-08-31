@@ -42,7 +42,8 @@ QR_TTL_SECONDS = 5 * 60  # 二维码 5 分钟有效期
 QR_MAX_REFRESH = 3
 POLL_TIMEOUT_SECONDS = 35
 RETRY_DELAY_SECONDS = 2
-MAX_SESSION_TIMEOUT_COUNT = 5  # 连续会话超时达到该次数即判定 token 失效，停止轮询
+MAX_SESSION_BACKOFF = 300  # 会话超时（-14）最大退避间隔（秒）
+AUTH_FAILURE_CODES = (401, 403)  # HTTP 认证失败码：判定 token 真失效
 MAX_MSG_LEN = 4000
 DEDUP_CACHE_SIZE = 64
 CONTEXT_CACHE_SIZE = 32
@@ -232,6 +233,7 @@ class WeChatBot:
             self.state.base_url = self.state.qr.base_url.rstrip(",")
         self.state.configured = True
         self.state.token_invalid = False
+        self.state.sync_buf = ""  # 新 token = 新会话，游标从空开始
         logger.info(f"[WeChat] 应用 QR token 并启动轮询: token_len={len(self.state.token)}, "
                      f"base_url={self.state.base_url}")
 
@@ -256,6 +258,7 @@ class WeChatBot:
                 "token": encrypt(self.state.token),
                 "base_url": self.state.base_url,
                 "account_id": self.state.account_id,
+                "sync_buf": self.state.sync_buf,
             }
             logger.info(f"[WeChat] token 已加密持久化到 {WECHAT_DATA_FILE}")
         else:
@@ -263,6 +266,7 @@ class WeChatBot:
                 "token": self.state.token,
                 "base_url": self.state.base_url,
                 "account_id": self.state.account_id,
+                "sync_buf": self.state.sync_buf,
             }
             logger.warning(
                 "[WeChat] FIELD_ENCRYPTION_KEY 未配置，token 以明文落盘；"
@@ -281,6 +285,7 @@ class WeChatBot:
         self.state.token = decrypt(tok.get("token", ""))
         self.state.base_url = tok.get("base_url", DEFAULT_BASE_URL)
         self.state.account_id = tok.get("account_id", "default")
+        self.state.sync_buf = tok.get("sync_buf", "")
         if self.state.token:
             self.state.configured = True
             return True
@@ -293,6 +298,23 @@ class WeChatBot:
             data["token"] = {}
             _save_wechat_data(data)
             logger.info("[WeChat] token 已失效，已清除持久化 token，需重新扫码登录")
+
+    def _persist_sync_buf(self) -> None:
+        """持久化 sync_buf 会话游标，重启后从上次位置续传，避免空游标触发会话冲突"""
+        data = _load_wechat_data()
+        tok = data.get("token", {})
+        if not tok.get("token"):
+            return
+        if tok.get("sync_buf") != self.state.sync_buf:
+            tok["sync_buf"] = self.state.sync_buf
+            _save_wechat_data(data)
+
+    def _invalidate_token(self) -> None:
+        """判定 token 真失效（HTTP 401/403 认证失败）：标记状态并清除持久化 token"""
+        self.state.token_invalid = True
+        self.state.configured = False
+        self.state.sync_buf = ""
+        self._clear_persisted_token()
 
     # ── HTTP 客户端 ───────────────────────────
 
@@ -581,6 +603,7 @@ class WeChatBot:
     async def _poll_loop(self) -> None:
         """消息轮询循环"""
         session_reset_count = 0
+        backoff_delay = RETRY_DELAY_SECONDS
         while not self.state.stop_requested:
             if not self.state.configured:
                 await asyncio.sleep(5)
@@ -588,28 +611,46 @@ class WeChatBot:
 
             try:
                 await self._poll_once()
-                session_reset_count = 0  # 成功后重置计数
+                session_reset_count = 0
+                backoff_delay = RETRY_DELAY_SECONDS
+                if self.state.token_invalid:
+                    # 会话恢复，清除失效标记
+                    self.state.token_invalid = False
+                    logger.info("[WeChat] 会话已恢复，清除 token 失效标记")
             except WeChatAPIError as e:
                 if e.code == -14 or "session timeout" in str(e).lower():
+                    # 会话过期（-14）：可恢复，不清除 token，指数退避重试。
+                    # 微信服务端在长时间无消息后会过期会话；此时 token 仍可能有效，
+                    # 直接清 token 会导致频繁重新扫码。只有 HTTP 401/403 才判定 token 真失效。
                     session_reset_count += 1
-                    if session_reset_count == 3:
-                        logger.warning(f"[WeChat] 连续 {session_reset_count} 次会话超时，token 可能无效，"
-                                      f"检查 base_url={self.state.base_url}, token_len={len(self.state.token)}")
-                    if session_reset_count >= MAX_SESSION_TIMEOUT_COUNT:
-                        logger.error(f"[WeChat] 连续 {session_reset_count} 次会话超时，判定 token 已失效，"
-                                     f"停止轮询，请重新扫码登录。base_url={self.state.base_url}, "
-                                     f"token_len={len(self.state.token)}")
+                    if session_reset_count >= 3:
                         self.state.token_invalid = True
-                        self.state.configured = False
-                        self.state.sync_buf = ""
-                        self._clear_persisted_token()
-                        break
-                    self.state.sync_buf = ""
-                    # 会话超时时不能无间隔重试，否则会雪崩
-                    await asyncio.sleep(RETRY_DELAY_SECONDS)
+                        logger.warning(
+                            f"[WeChat] 连续 {session_reset_count} 次会话超时，token 可能已过期，"
+                            f"请重新扫码登录（token 已保留，会话恢复后自动续传）。"
+                            f"base_url={self.state.base_url}, token_len={len(self.state.token)}"
+                        )
+                    backoff_delay = min(backoff_delay * 2, MAX_SESSION_BACKOFF)
+                    logger.warning(
+                        f"[WeChat] 会话超时（-14），{backoff_delay}s 后重试，"
+                        f"累计 {session_reset_count} 次"
+                    )
+                    await asyncio.sleep(backoff_delay)
                 else:
                     logger.warning(f"[WeChat] 轮询失败: {e}, 将在 {RETRY_DELAY_SECONDS}s 后重试")
                     await asyncio.sleep(RETRY_DELAY_SECONDS)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in AUTH_FAILURE_CODES:
+                    # 认证失败（401/403）：token 真失效，清除持久化 token
+                    logger.error(
+                        f"[WeChat] HTTP {e.response.status_code} 认证失败，判定 token 已失效，"
+                        f"停止轮询，请重新扫码登录。base_url={self.state.base_url}, "
+                        f"token_len={len(self.state.token)}"
+                    )
+                    self._invalidate_token()
+                    break
+                logger.warning(f"[WeChat] HTTP 错误: {e}, 将在 {RETRY_DELAY_SECONDS}s 后重试")
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
             except Exception as e:
                 logger.warning(f"[WeChat] 轮询失败: {e}, 将在 {RETRY_DELAY_SECONDS}s 后重试")
                 await asyncio.sleep(RETRY_DELAY_SECONDS)
@@ -634,10 +675,11 @@ class WeChatBot:
         if lp_timeout and isinstance(lp_timeout, (int, float)) and lp_timeout > 0:
             logger.debug(f"[WeChat] 更新 longpolling_timeout: {lp_timeout}ms")
 
-        # 更新 sync_buf
+        # 更新 sync_buf 并持久化，重启后从上次位置续传
         next_sync = data.get("get_updates_buf", "")
-        if next_sync:
+        if next_sync and next_sync != self.state.sync_buf:
             self.state.sync_buf = next_sync
+            self._persist_sync_buf()
 
         msgs = data.get("msgs", [])
         if msgs:
@@ -834,13 +876,15 @@ class WeChatBot:
                         break
             if not sent:
                 success = False
-                # ret=-2 持续失败说明 token 可能已失效，标记为无效
+                # ret=-2 持续失败说明 token 可能已失效，标记为无效并停止收发。
+                # 注意：不清除持久化 token——发送失败可能只是网络抖动，
+                # 保留凭据让重启/重试可自动恢复；若 token 真已失效，
+                # 恢复轮询后会以 -14×5 再次判定并清除（那边才允许清）。
                 logger.error(f"[WeChat] 发送消息彻底失败，token 可能已失效，请重新扫码登录。"
                             f"base_url={self.state.base_url}, token_len={len(self.state.token)}")
                 self.state.token_invalid = True
                 self.state.configured = False
                 self.state.sync_buf = ""
-                self._clear_persisted_token()
                 break
             offset += len(chunk)
         return success

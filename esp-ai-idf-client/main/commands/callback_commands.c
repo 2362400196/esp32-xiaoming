@@ -17,6 +17,7 @@
 
 #include "command_registry.h"
 #include "config.h"
+#include "tts_state.h"
 #include "eeui_port.h"
 #include "esp_log.h"
 #include "esp_timer.h"

@@ -126,7 +126,8 @@ static void button_wakeup_task(void *arg)
 
                 // 清除所有配置并重启
                 provisioning_clear_all();
-                return;  // provisioning_clear_all 会重启，这里不会执行到
+                vTaskDelete(NULL);  // 防御兜底：若 provisioning_clear_all 未重启，任务不能以 return 退出
+                return;
             }
 
             // 正常唤醒触发（单次按键），受冷却限制

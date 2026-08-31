@@ -59,7 +59,8 @@ logs/
 .env.*
 !.env.example
 
-# ---- 本地运行时数据（用 volume 挂载）----
+# ---- 本地运行时数据（用 volume 挂载，不打进镜像）----
+data/
 users.json
 example_usage.py
 

@@ -1,7 +1,4 @@
 #include "config.h"
-// websocket_force_reconnect 在 config.h 已声明，此处 extern 再声明一次作双保险
-// （避免增量构建/头文件副本不同步导致的 implicit declaration）
-extern void websocket_force_reconnect(void);
 #include "log_system.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -26,16 +23,7 @@ extern void register_lua_commands(void);
 extern void register_bind_commands(void);
 extern void register_config_commands(void);
 extern void register_official_commands(void);
-
-// 会话状态
-typedef enum {
-    SESSION_IDLE,
-    SESSION_LISTENING,
-    SESSION_THINKING,
-    SESSION_SPEAKING,
-} session_state_t;
-
-static session_state_t s_session_state = SESSION_IDLE;
+extern void register_ota_commands(void);
 
 // 会话看门狗：记录唤醒时间，防止 wakenet 永久暂停
 static TickType_t s_wakeup_trigger_tick = 0;
@@ -88,6 +76,10 @@ static void handle_wakeup(void)
 {
     ESP_LOGI(TAG, "唤醒触发，开始对话...");
 
+    // 通知板级扩展组件（extras）唤醒事件：组件收到后做自己的联动
+    // （如状态 LED 双闪提示）。组件回调应快速返回，不得阻塞。
+    board_extra_broadcast_event(BOARD_EVENT_WAKEUP, NULL);
+
     // vv=== Arduino wakeUp: mp3_player_stop() ===vv
     // 1. 记录是否正在播放（打断场景不播唤醒提示，响应更快，与 Arduino is_playing 判断一致）
     bool was_playing = audio_spk_is_playing();
@@ -112,21 +104,21 @@ static void handle_wakeup(void)
     websocket_reset_conversation_state();
 
     // vv=== Arduino wakeUp: 播放唤醒提示音（服务端缓存的叮声/问候语）===
-    // 打断场景（was_playing）不播提示音，响应更快；无缓存则跳过
+    // 打断场景（was_playing）不播提示音，响应更快；无缓存则跳过。
+    // get/release 成对调用：持有期间服务端不会释放/覆盖缓存缓冲（防 use-after-free）
     if (!was_playing) {
         const uint8_t *prompt = NULL;
         size_t prompt_len = 0;
         if (websocket_cache_get_greeting(&prompt, &prompt_len)) {
             play_wakeup_prompt(prompt, prompt_len);
+            websocket_cache_release(prompt);
         }
         if (websocket_cache_get_tone(&prompt, &prompt_len)) {
             play_wakeup_prompt(prompt, prompt_len);
+            websocket_cache_release(prompt);
         }
     }
 
-    s_session_state = SESSION_LISTENING;
-
-    // vv=== Arduino wakeUp: sendTXT(start) ===vv
     // 发送 start 消息到服务器，触发会话开始
     // 不在此处启动麦克风！与 Arduino 一致：
     // Arduino wakeUp 只 open_mic()（硬件切换），不设 esp_ai_start_send_audio
@@ -149,7 +141,6 @@ static void handle_wakeup(void)
         wakeup_clear_cooldown();
         // 静默断线（TCP 半开）时自动重连可能不及时，主动触发一次重连
         websocket_force_reconnect();
-        s_session_state = SESSION_IDLE;
         power_manager_set_active(false);  // 回待机省电
         display_show_status("等待唤醒...");
         display_show_emotion("休息中");
@@ -203,11 +194,9 @@ void app_main(void)
 #endif
 
     // 设置关键模块为调试日志级别
-    esp_log_level_set("cmd_lyric", ESP_LOG_DEBUG);
-    esp_log_level_set("websocket", ESP_LOG_DEBUG);
-    esp_log_level_set("network_audio", ESP_LOG_DEBUG);
-    esp_log_level_set("cmd_lua", ESP_LOG_DEBUG);
-    esp_log_level_set("lua_rt", ESP_LOG_DEBUG);
+    // 调试覆盖仅限 INFO 级别的启动诊断；websocket/network_audio 等会输出
+    // 服务端消息内容（含用户语音识别文本）的模块只在显式 DEBUG 构建中放开，
+    // 生产模式保持 esp_log_level_set("*", ESP_LOG_WARN) 的全局设置
     esp_log_level_set("wifi", ESP_LOG_INFO);     // WiFi 连接过程（重试、断开原因）
     // 初始化阶段的内存诊断（各阶段剩余堆），生产模式也保持 INFO 可见
     esp_log_level_set("main", ESP_LOG_INFO);
@@ -215,6 +204,13 @@ void app_main(void)
     esp_log_level_set("wakeup", ESP_LOG_INFO);
     esp_log_level_set("display", ESP_LOG_INFO);
     esp_log_level_set("eeui_port", ESP_LOG_INFO);  // show_card 渲染明细（排查卡片问题）
+#ifdef CONFIG_LOG_LEVEL_DEBUG
+    esp_log_level_set("cmd_lyric", ESP_LOG_DEBUG);
+    esp_log_level_set("websocket", ESP_LOG_DEBUG);
+    esp_log_level_set("network_audio", ESP_LOG_DEBUG);
+    esp_log_level_set("cmd_lua", ESP_LOG_DEBUG);
+    esp_log_level_set("lua_rt", ESP_LOG_DEBUG);
+#endif
 
     // 初始化NVS
     esp_err_t ret = nvs_flash_init();
@@ -288,6 +284,8 @@ void app_main(void)
     // 官方服务版专用指令（依赖 board_get_config，须在 board_init 之后注册；
     // 后注册头插覆盖同名 play_music，普通板内部跳过、行为不受影响）
     register_official_commands();
+    // OTA 升级指令（服务端 ota_update 强制升级下发，所有板型通用）
+    register_ota_commands();
     commands_list();  // 打印已注册指令列表，确认所有指令已加载
 
     // 初始化显示
@@ -484,13 +482,11 @@ void app_main(void)
         }
     }
 
-    // 启动后台表情下载任务（从服务端 API 获取设备专属表情包）
-    // 下载任务内部会等待 WiFi 就绪，并从 websocket 获取服务器 HTTP 地址
-    // 内置表情板型（emotion_builtin_only）不下载，直接使用编译进固件的表情
-    const board_config_t *bcfg = board_get_config();
-    if (bcfg && bcfg->emotion_builtin_only) {
-        ESP_LOGI(TAG, "本板型使用编译内置表情，跳过 GIF 下载");
-    } else if (display_has_graphic()) {
+    // 启动后台表情下载任务（从服务端 API 获取设备专属表情包）。
+    // 下载任务内部会等待 WiFi 就绪，并从 websocket 获取服务器 HTTP 地址。
+    // 表情不再编译进固件（emos/*.h 已移除），所有图形板型都必须下载：
+    // 首次联网后存入 SPIFFS 缓存，之后开机优先读本地缓存
+    if (display_has_graphic()) {
         download_gifs();
     } else {
         // headless（无图形显示，如 ESP32-C3 无屏板型）：跳过 GIF 下载，避免占用 RAM
@@ -563,7 +559,6 @@ void app_main(void)
                 // 唤醒超时：10秒内无任何服务端数据 → 半开连接/断线
                 ESP_LOGW(TAG, "唤醒超时: %dms 无服务端响应，强制重连恢复", (int)elapsed_ms);
                 wakeup_resume();
-                s_session_state = SESSION_IDLE;
                 s_wakeup_trigger_tick = 0;
                 audio_spk_stop();
                 audio_mic_stop();
@@ -577,7 +572,6 @@ void app_main(void)
                 // 会话超时：60秒无任何数据 → 服务端已无响应，兜底恢复
                 ESP_LOGW(TAG, "会话看门狗: %dms 无 session_end，自动恢复唤醒", (int)elapsed_ms);
                 wakeup_resume();
-                s_session_state = SESSION_IDLE;
                 s_wakeup_trigger_tick = 0;
                 audio_spk_stop();
                 audio_mic_stop();

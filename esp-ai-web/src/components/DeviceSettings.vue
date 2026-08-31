@@ -636,6 +636,7 @@ async function save() {
     memory_enabled: memoryOn.value,
     memory_max_messages: form.value.llm_memory_max || 20,
     tts_api_key: form.value.tts_api_key,
+    tts_type: 'volcengine',
     tts_resource_id: ttsModel.value,
     voice_type: form.value.voice_type,
     speed_ratio: form.value.tts_speed_ratio,

@@ -418,11 +418,9 @@ static void spk_task(void *arg)
                 i2s_rate = 0;
                 residual_len = 0;
                 no_data_count = 0;
-                // 通知服务端音频播放异常终止
-                char over_msg[128];
-                snprintf(over_msg, sizeof(over_msg),
-                    "{\"type\":\"client_out_audio_over\",\"session_status\":\"03\"}");
-                websocket_send_text_nb(over_msg);
+                // 通知服务端音频播放异常终止（websocket.c 组装完整格式，
+                // 含 session_id/tts_task_id，服务端才能正确配对会话）
+                websocket_notify_playback_failed();
                 continue;
             }
         }
@@ -474,6 +472,8 @@ static void spk_task(void *arg)
             s_spk_wait_drain = false;
             s_spk_ing = false;
             s_spk_drain_done = true;
+            // 通知板级扩展组件（extras）：音频自然播放结束
+            board_extra_broadcast_event(BOARD_EVENT_AUDIO_STOP, NULL);
             // 播放自然结束：释放 MP3 解码器（~45KB）还给堆，
             // 供 wakeup_resume() 重建 WakeNet 实例使用（C3 内存优化）
             if (s_mp3_dec) {
@@ -773,6 +773,8 @@ static void mic_task(void *arg)
     uint8_t *buffer = malloc(MIC_CHUNK_SIZE);
     if (buffer == NULL) {
         ESP_LOGE(TAG, "分配音频缓冲区失败");
+        s_mic_running = false;  // 必须清除，否则 audio_mic_start 误判"已在运行"导致 ASR 无声
+        s_mic_task_handle = NULL;
         vTaskDelete(NULL);
         return;
     }
@@ -785,6 +787,7 @@ static void mic_task(void *arg)
         if (wait_count > 100) {  // 最多等 1 秒
             ESP_LOGE(TAG, "麦克风: 等待 WakeNet 暂停超时，放弃本次采集");
             free(buffer);
+            s_mic_running = false;
             s_mic_task_handle = NULL;
             vTaskDelete(NULL);
             return;
@@ -827,6 +830,7 @@ static void mic_task(void *arg)
     }
 
     free(buffer);
+    s_mic_running = false;  // 任务退出前必须清除，否则下一轮 iat_start 误判"已在运行"导致 ASR 无声
     s_mic_task_handle = NULL;
     vTaskDelete(NULL);
 }
@@ -909,11 +913,16 @@ cleanup:
         mp3_decoder_free(s_mp3_dec);
         s_mp3_dec = NULL;
     }
+#if !defined(AUDIO_SCHEME_ES8311)
+    // I2S 直连方案：s_spk_handle 是本模块创建的（I2S_NUM_1），失败时删除
     if (s_spk_handle) {
         i2s_channel_disable(s_spk_handle);
         i2s_del_channel(s_spk_handle);
         s_spk_handle = NULL;
     }
+#endif
+    // ES8311 方案：s_spk_handle 复用 wakeup 模块的 TX 通道，生命周期归 wakeup
+    // 管理，此处不能 del（否则 wakeup 的 s_spk_tx_handle 悬空）
     if (s_audio_mutex) {
         vSemaphoreDelete(s_audio_mutex);
         s_audio_mutex = NULL;
@@ -927,10 +936,13 @@ cleanup:
 
 esp_err_t audio_mic_start(void)
 {
-    if (s_mic_running) {
+    // 双重校验：任务异常退出（发送失败/断线）时 mic_task 会自行清 s_mic_running，
+    // 这里再兜底一次——标志为 true 但任务句柄已空视为陈旧状态，重建采集任务
+    if (s_mic_running && s_mic_task_handle != NULL) {
         ESP_LOGW(TAG, "麦克风已在运行");
         return ESP_OK;
     }
+    s_mic_running = false;
 
     ESP_LOGI(TAG, "启动麦克风采集...");
     s_mic_running = true;
@@ -1107,6 +1119,9 @@ esp_err_t audio_spk_play(void)
 {
     ESP_LOGI(TAG, "开始音频播放...");
 
+    // 通知板级扩展组件（extras）：音频播放开始
+    board_extra_broadcast_event(BOARD_EVENT_AUDIO_START, NULL);
+
     // 功耗管理：确保 PA 功放 + DAC 已使能（空闲超时后可能已关闭）
     // 必须在播放开始前完成，否则首段音频会被静音
     power_manager_enable_output();
@@ -1160,6 +1175,9 @@ esp_err_t audio_spk_play(void)
 esp_err_t audio_spk_stop(void)
 {
     ESP_LOGI(TAG, "停止音频播放...");
+
+    // 通知板级扩展组件（extras）：音频播放结束
+    board_extra_broadcast_event(BOARD_EVENT_AUDIO_STOP, NULL);
 
     if (s_audio_mutex) xSemaphoreTake(s_audio_mutex, portMAX_DELAY);
     s_spk_ing = false;

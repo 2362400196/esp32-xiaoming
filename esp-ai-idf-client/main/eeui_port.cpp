@@ -46,34 +46,20 @@ static void card_clear_objects(void);
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
-#include "emos/wifi.h"
+// 表情 GIF 不再编译进固件（全部从服务器下载，见 gif_downloader.cpp），
+// 仅保留配网必需的静态资源：微信配网二维码 / AP 配网二维码
 #include "emos/wx_qrcode.h"
-#include "emos/error.h"
-#include "emos/listen.h"
-#include "emos/tts_ing.h"
-#include "emos/sleep.h"
-#include "emos/music.h"
-#include "emos/happy.h"
-#include "emos/sad.h"
-#include "emos/angry.h"
-#include "emos/accident.h"
-#include "emos/no.h"
 #include "emos/ap_qrcode.h"
-#include "emos/rechargeing.h"
 #pragma GCC diagnostic pop
 
 static const char *TAG = "eeui_port";
 
 struct EmotionEntry { const char *name; const lv_img_dsc_t *img; };
+// 仅保留配网二维码（无服务器时必须可显示）；对话/系统表情全部走服务器下载
+//（SPIFFS 缓存 → RAM，见 gif_downloader.cpp），未下载到时显示留空
 static const EmotionEntry s_emotions[] = {
-    {"联网中",   &wifi_img},    {"请配网",   &wx_qrcode_img},
-    {"AP配网",   &ap_qrcode_img},{"发生错误", &error_img},
-    {"聆听中",   &listen_img},  {"说话中",   &tts_ing_img},
-    {"休息中",   &sleep_img},   {"唱歌中",   &music_img},
-    {"无情绪",   &tts_ing_img}, {"快乐",     &happy_img},
-    {"伤心",     &sad_img},     {"愤怒",     &angry_img},
-    {"意外",     &accident_img},{"否定",     &no_img},
-    {"充电中",   &rechargeing_gif},
+    {"请配网",   &wx_qrcode_img},
+    {"AP配网",   &ap_qrcode_img},
 };
 static const int s_emotions_count = sizeof(s_emotions) / sizeof(s_emotions[0]);
 
@@ -454,14 +440,11 @@ void eeui_port_wait_init(void)
 // emotion_builtin_only 板型（如 1.54 寸 LCD 官方板）只用编译内置表情，不从服务器下载
 static const lv_img_dsc_t *find_emotion_img(const char *name)
 {
-    // 1. 非内置-only 板型：优先查找已下载的表情
-    const board_config_t *bcfg = board_get_config();
-    if (!(bcfg && bcfg->emotion_builtin_only)) {
-        const lv_img_dsc_t *downloaded = get_downloaded_gif(name);
-        if (downloaded) return downloaded;
-    }
+    // 1. 优先使用服务器下载的表情（SPIFFS 缓存/RAM）
+    const lv_img_dsc_t *downloaded = get_downloaded_gif(name);
+    if (downloaded) return downloaded;
 
-    // 2. 回退到编译内置的 GIF
+    // 2. 回退到编译内置的静态资源（仅配网二维码；对话/系统表情不再内置）
     for (int i = 0; i < s_emotions_count; i++) {
         if (strcmp(s_emotions[i].name, name) == 0) return s_emotions[i].img;
     }

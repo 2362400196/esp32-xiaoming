@@ -33,16 +33,6 @@ static volatile bool s_ota_failed = false;
 static volatile int s_ota_progress = 0;  // volatile: 跨任务/中断访问（WebSocket 上报、显示任务读取）
 static char s_device_id[18] = {0};  // 设备 MAC 地址（与 Arduino device_id 一致）
 
-// 外部函数声明
-extern esp_err_t websocket_send_text(const char *text);
-extern bool websocket_is_connected(void);
-
-// 获取设备ID（使用 device_id.h 中的 device_id_get）
-static void get_device_mac(char *mac_str, size_t len)
-{
-    device_id_get(mac_str, len);
-}
-
 // 发送 OTA 进度到服务端（与 Arduino updateProgressCallback 一致，包含 device_id）
 static void send_ota_progress(int percent)
 {
@@ -91,10 +81,30 @@ static int parse_ota_response(const char *json_str, char *bin_url, size_t url_si
     return result;
 }
 
+// 确认当前固件有效，解除 PENDING_VERIFY 状态。
+// 启用 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE 后，OTA 重启的新固件处于
+// ESP_OTA_IMG_PENDING_VERIFY，此时 esp_ota_begin 会返回
+// ESP_ERR_OTA_ROLLBACK_INVALID_STATE 拒绝再次升级。当前固件能运行到此处
+// 说明基本可用，先确认有效再开始新 OTA。
+static void ota_confirm_current_app(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (!running) return;
+    esp_ota_img_states_t state;
+    if (esp_ota_get_state_partition(running, &state) != ESP_OK) return;
+    if (state == ESP_OTA_IMG_PENDING_VERIFY) {
+        esp_ota_mark_app_valid_cancel_rollback();
+        ESP_LOGI(TAG, "已确认当前固件有效，解除 PENDING_VERIFY 状态");
+    }
+}
+
 // 执行 HTTP OTA 下载并写入备用分区
 static esp_err_t perform_ota_update(const char *firmware_url)
 {
     ESP_LOGI(TAG, "开始 OTA 升级: %s", firmware_url);
+
+    // 解除上次 OTA 遗留的待验证状态，否则 esp_ota_begin 直接失败
+    ota_confirm_current_app();
 
     // 获取备用 OTA 分区
     const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
@@ -265,7 +275,7 @@ esp_err_t ota_check_and_update(const char *server_base_url)
     s_ota_progress = 0;
 
     // 获取设备 MAC 地址，用于 OTA 进度上报（与 Arduino device_id 一致）
-    get_device_mac(s_device_id, sizeof(s_device_id));
+    device_id_get(s_device_id, sizeof(s_device_id));
 
     // 获取板级 bin_id，用于服务端判断是否需要升级
     const char *device_bin_id = board_get_config() ? board_get_config()->bin_id : "";
@@ -388,6 +398,9 @@ esp_err_t ota_check_and_update(const char *server_base_url)
     ESP_LOGI(TAG, "发现新固件，开始升级: %s", bin_url);
     s_ota_updating = true;
 
+    // 通知板级扩展组件（extras）：OTA 开始（组件可做熄灯/禁外设等准备）
+    board_extra_broadcast_event(BOARD_EVENT_OTA_START, NULL);
+
     // 停止当前会话和音频（与 Arduino otaManager.update 一致）
     display_show_ota_progress(0);
     display_show_text("系统升级中...");
@@ -397,6 +410,8 @@ esp_err_t ota_check_and_update(const char *server_base_url)
 
     if (err == ESP_OK) {
         s_ota_updating = false;
+        // 通知板级扩展组件（extras）：OTA 完成
+        board_extra_broadcast_event(BOARD_EVENT_OTA_DONE, NULL);
         ESP_LOGI(TAG, "OTA 升级成功，3 秒后重启...");
         display_show_ota_progress(100);
         display_show_text("重启中...");
@@ -406,6 +421,8 @@ esp_err_t ota_check_and_update(const char *server_base_url)
     } else {
         s_ota_updating = false;
         s_ota_failed = true;
+        // 通知板级扩展组件（extras）：OTA 结束（失败，回滚继续用当前版本）
+        board_extra_broadcast_event(BOARD_EVENT_OTA_DONE, NULL);
         ESP_LOGE(TAG, "OTA 升级失败: %s", esp_err_to_name(err));
         display_clear_ota_progress();
         display_show_status("升级失败");
@@ -420,6 +437,49 @@ esp_err_t ota_check_and_update(const char *server_base_url)
 
         return err;
     }
+}
+
+esp_err_t ota_update_from_url(const char *firmware_url)
+{
+    if (!firmware_url || firmware_url[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_ota_updating) {
+        ESP_LOGW(TAG, "已有 OTA 进行中，忽略本次请求");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "强制升级：从 URL 下载固件: %s", firmware_url);
+    s_ota_updating = true;
+    board_extra_broadcast_event(BOARD_EVENT_OTA_START, NULL);
+    display_show_ota_progress(0);
+    display_show_text("系统升级中...");
+
+    esp_err_t err = perform_ota_update(firmware_url);
+    if (err == ESP_OK) {
+        s_ota_updating = false;
+        board_extra_broadcast_event(BOARD_EVENT_OTA_DONE, NULL);
+        ESP_LOGI(TAG, "OTA 升级成功，3 秒后重启...");
+        display_show_ota_progress(100);
+        display_show_text("重启中...");
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        esp_restart();
+        return ESP_OK;  // 不会执行到这里
+    }
+
+    s_ota_updating = false;
+    s_ota_failed = true;
+    board_extra_broadcast_event(BOARD_EVENT_OTA_DONE, NULL);
+    ESP_LOGE(TAG, "OTA 升级失败: %s", esp_err_to_name(err));
+    display_clear_ota_progress();
+    display_show_status("升级失败");
+    display_show_text("升级失败，将继续使用当前版本");
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (running) {
+        esp_ota_set_boot_partition(running);
+    }
+    return err;
 }
 
 bool ota_is_updating(void)

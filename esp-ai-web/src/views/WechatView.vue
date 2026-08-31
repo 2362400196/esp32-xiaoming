@@ -37,6 +37,13 @@
 
     <!-- 已登录：绑定管理 -->
     <div v-else class="bind-section">
+      <!-- token 失效警示（轮询已被服务端判定停止，需重新扫码） -->
+      <div v-if="tokenInvalid" class="status-bar glass card-in" style="border:1px solid rgba(239,68,68,.45)">
+        <span class="status-dot offline"></span>
+        <span style="color:var(--danger);font-weight:600">微信登录已失效，消息收发已停止</span>
+        <span class="text-sub">可能原因：登录凭证到期、服务重启后未恢复、或另一实例在同时轮询</span>
+        <button class="btn-mint btn-sm" style="margin-left:auto" @click="rescan">重新扫码登录</button>
+      </div>
       <!-- 微信状态 -->
       <div class="status-bar glass card-in">
         <span class="status-dot online"></span>
@@ -78,6 +85,7 @@ import { api } from '../api'
 const emit = defineEmits(['toast'])
 
 const configured = ref(false)
+const tokenInvalid = ref(false)
 const qrLoading = ref(false)
 const qrImage = ref('')
 const qrStatusText = ref('')
@@ -85,6 +93,7 @@ const qrExpired = ref(false)
 const botToken = ref('')
 const bindings = ref([])
 let pollTimer = null
+let statusTimer = null
 
 function formatTime(ts) {
   if (!ts) return '—'
@@ -120,6 +129,7 @@ async function pollStatus() {
   try {
     const res = body(await api.wechatQrStatus())
     if (res && res.code === 0 && res.data) {
+      tokenInvalid.value = !!res.data.token_invalid
       if (res.data.configured) {
         configured.value = true
         botToken.value = ''
@@ -193,6 +203,12 @@ async function loadBindings() {
   } catch (e) { /* 静默 */ }
 }
 
+async function rescan() {
+  tokenInvalid.value = false
+  configured.value = false
+  await startQr()
+}
+
 async function doRefreshBindings() {
   await loadBindings()
   emit('toast', '绑定列表已刷新')
@@ -216,15 +232,26 @@ onMounted(async () => {
   // 先检查是否已登录
   try {
     const res = body(await api.wechatQrStatus())
-    if (res && res.code === 0 && res.data?.configured) {
-      configured.value = true
-      loadBindings()
+    if (res && res.code === 0 && res.data) {
+      tokenInvalid.value = !!res.data.token_invalid
+      if (res.data.configured) {
+        configured.value = true
+        loadBindings()
+        // 已登录后定期检查 token 状态：失效时及时显示警示条
+        statusTimer = setInterval(async () => {
+          try {
+            const r = body(await api.wechatQrStatus())
+            if (r && r.code === 0 && r.data) tokenInvalid.value = !!r.data.token_invalid
+          } catch { /* 静默 */ }
+        }, 30000)
+      }
     }
   } catch (e) { /* 静默 */ }
 })
 
 onBeforeUnmount(() => {
   stopPolling()
+  if (statusTimer) { clearInterval(statusTimer); statusTimer = null }
 })
 </script>
 

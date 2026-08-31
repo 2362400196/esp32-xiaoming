@@ -47,7 +47,7 @@ cp .env.example .env
 ## 5. 启动服务
 
 ```bash
-uv run python main.py
+uv run python src/main.py
 ```
 
 服务将在 `http://0.0.0.0:8088` 启动。
@@ -72,17 +72,49 @@ uv run python main.py
 
 ## Docker 部署
 
-项目提供了 `Dockerfile` 和 `docker-compose.yml`：
+项目自带多阶段 `Dockerfile` 和 `docker-compose.yml`，开箱即用。
+
+### 1. 准备配置
 
 ```bash
-# 使用 docker-compose
-docker compose up -d
-
-# 或手动构建
-docker build -t esp-ai-server .
-docker run -d \
-  --name esp-ai-server \
-  -p 8088:8088 \
-  --env-file .env \
-  esp-ai-server
+cp .env.example .env
+# 编辑 .env，填入 ASR / LLM / TTS 密钥、JWT_SECRET 等
 ```
+
+### 2. 构建并启动
+
+```bash
+docker compose up -d --build
+```
+
+首次会自动构建镜像（多阶段构建，内含 Python 虚拟环境）。容器入口为 `uvicorn src.main:app --host 0.0.0.0 --port 8088`，暴露 `8088` 端口，并内置健康检查（`/health/live`）。
+
+### 3. 数据持久化
+
+`docker-compose.yml` 已挂载命名卷，容器重建 / 升级不丢数据：
+
+| 卷 | 容器路径 | 用途 |
+|---|---|---|
+| `esp-ai-data` | `/app/data` | **主数据**：SQLite 数据库（`data/espai.db`）、插件、备份、微信数据 |
+| `esp-ai-device-data` | `/app/src/data` | 设备级数据：技能、记忆 |
+| `esp-ai-firmware` | `/app/src/firmware` | OTA 固件文件 |
+| `esp-ai-emos` | `/app/src/emos` | 表情包静态资源 |
+| `esp-ai-logs` | `/app/logs` | 运行日志 |
+
+如需直接访问数据目录，可把命名卷改成 bind mount，例如 `./data:/app/data`。
+
+### 4. 查看状态与日志
+
+```bash
+docker compose ps
+docker compose logs -f esp-ai-server
+```
+
+### 5. 停止 / 卸载
+
+```bash
+docker compose down        # 停止并删除容器（数据卷保留）
+docker compose down -v     # 连数据卷一起删除（数据将丢失！）
+```
+
+> 资源限制默认 2G 内存 / 2 CPU，可在 `docker-compose.yml` 的 `deploy.resources` 中调整。

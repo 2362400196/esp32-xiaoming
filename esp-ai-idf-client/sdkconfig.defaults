@@ -95,9 +95,8 @@ CONFIG_LV_DRAW_SW_SUPPORT_RGB565A8=y
 CONFIG_LV_DRAW_SW_SUPPORT_A8=y
 # CONFIG_LV_DRAW_SW_SUPPORT_ARGB8888 is not set
 CONFIG_LV_FONT_FMT_TXT_LARGE=y
-# 注意：font_puhui_16_4.c 是用 --no-compress 生成的未压缩字体
-# 如果要启用压缩，需要重新用 lv_font_conv 不带 --no-compress 参数生成字体
-# CONFIG_LV_USE_FONT_COMPRESSED=y
+# 字体使用 lv_font_conv 默认 RLE 压缩生成（约省 1MB+），必须开启本选项才能解码
+CONFIG_LV_USE_FONT_COMPRESSED=y
 CONFIG_LV_USE_FONT_PLACEHOLDER=y
 CONFIG_LV_USE_ANIMIMG=y
 # C++ 异常和 RTTI 关闭（减小固件体积）

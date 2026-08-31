@@ -1,0 +1,9 @@
+# ESP-IDF 构建产物
+build/
+
+# 临时/调试文件
+b.txt
+
+# sdkconfig 自动备份（idf.py 生成）
+sdkconfig.old
+main/fonts/font_puhui_16_4_uncompressed.c.bak

@@ -164,6 +164,18 @@ esp-ai-idf-client/
 - 字节 4-5：状态码
 - 字节 6+：音频数据（MP3/PCM）
 
+## 安全须知
+
+当前固件为兼容 ESP-AI 官方客户端协议，存在以下明文传输行为，**不适合在不可信网络中使用**：
+
+1. **设备注册与服务器查询走 HTTP**：`register_device` 会把 WiFi 明文密码和 api_key 通过 `http://api.espai.fun/devices/add` 发送；官方服务器节点查询同样走 HTTP。
+2. **官方节点使用 ws:// 无 TLS**：对话内容与音频全程明文。
+3. **证书 CN 校验被跳过**：`websocket_init` 中 `skip_cert_common_name_check = true`（开发阶段遗留）。
+
+如需对外分发或生产部署，建议：
+- 自建 esp-ai-server 并使用 `wss://`（配网时 ext4 填 `https`）+ 完整证书校验（把 `skip_cert_common_name_check` 改为 `false`）；
+- 评估是否必须向官方平台上报 WiFi 凭据。
+
 ## 许可证
 
 MIT License

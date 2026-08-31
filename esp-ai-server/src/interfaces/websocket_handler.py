@@ -127,6 +127,7 @@ async def handle_websocket(websocket: WebSocket):
     device_key = websocket.query_params.get("key", "") or websocket.query_params.get("api_key", "")
     device_mac = websocket.query_params.get("mac", "") or websocket.query_params.get("device_id", "")
     device_firmware_version = websocket.query_params.get("version", "") or websocket.query_params.get("v", "")
+    device_bin_id = websocket.query_params.get("bin_id", "")
     client_audio_buffer_size = int(websocket.query_params.get("AUDIO_BUFFER_SIZE", "10240"))
     # 设备喇叭采样率（如 spk_sample_rate=16000），用于让 TTS 按设备能力输出，避免 ES8311 等
     # 16kHz 喇叭链路播放 24kHz 音频导致无声/变调；解析失败或缺失时保持 0（服务端用默认值）
@@ -147,7 +148,7 @@ async def handle_websocket(websocket: WebSocket):
     except Exception:
         pass
 
-    logger.info(f"[WS] New connection: path={ws_path}, device_id={device_mac or 'N/A'}, version={device_firmware_version or 'N/A'}, trace_id={trace_id}")
+    logger.info(f"[WS] New connection: path={ws_path}, device_id={device_mac or 'N/A'}, version={device_firmware_version or 'N/A'}, bin_id={device_bin_id or 'N/A'}, trace_id={trace_id}")
 
     # 当前连接对应的设备记录（带 key / 不带 key 两条路径都必须赋值，供后续封禁检查使用）
     device = None
@@ -403,6 +404,7 @@ async def handle_websocket(websocket: WebSocket):
 
     handler = WebSocketSessionHandler(
         websocket, device_key, device_mac, device_firmware_version, trace_id,
+        device_bin_id,
     )
     handler.client_audio_buffer_size = client_audio_buffer_size
     handler.spk_sample_rate = spk_sample_rate

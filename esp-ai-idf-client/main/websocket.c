@@ -17,34 +17,25 @@
 #include <sys/time.h>  /* settimeofday（stc_time 同步系统时间，屏保时钟用） */
 
 /* 字幕 TTS 同步状态（定义在 callback_commands.c） */
-extern bool s_tts_is_playing;
-extern uint64_t s_tts_start_time_ms;
-extern int s_tts_duration_ms;
-/* TTS 状态互斥锁（定义在 callback_commands.c，保护上述三个变量） */
-extern SemaphoreHandle_t s_tts_state_mutex;
+#include "tts_state.h"
 
 /* 会话生命周期计时（毫秒，用于 ASR/LLM 日志） */
 static int64_t s_asr_start_ms = 0;
 static int64_t s_llm_start_ms = 0;
 static int64_t s_session_start_ms = 0;
 
-/* 会话看门狗（定义在 main.c） */
-extern void session_watchdog_refresh(void);  // 收到服务端数据时重置会话超时计时
-extern void session_watchdog_start(void);    // 启动看门狗计时（iat_start 暂停 WakeNet 后使用）
-
-/* WiFi 断线自愈接口（定义在 wifi.c） */
-extern bool wifi_is_connected(void);
-extern void wifi_force_reconnect(void);
-
 static const char *TAG = "websocket";
 
-/* 断线自愈：连续断开计数。esp_websocket_client 自动重连失败会反复触发
- * EVENT_DISCONNECTED（约 18s 一次：reconnect 3s + connect 15s 超时），
- * 达到阈值后逐级升级：检查 WiFi -> 强制重建 WiFi -> 整机重启。 */
+/* 断线自愈：连续断开仅用于日志统计。
+ * 升级动作（重建 WiFi / 整机重启）一律基于"距上次成功连接的时长"判断：
+ * 服务端重启窗口内（几十秒）设备只交给库的自动重连（3s 间隔），绝不折腾
+ * WiFi 或重启设备——历史版本按断开次数升级，导致服务端每次重启设备都被
+ * 强拉 WiFi 甚至重启，且手动 start/stop 与库的重连状态机竞态后客户端
+ * 彻底停摆（"Client was not started"），无人复活，表现为"服务端重启后
+ * 设备再也连不上"。 */
 static int s_disconnect_count = 0;
-#define WS_SELF_HEAL_CHECK_WIFI_THRESHOLD  3   /* ~54s：检查 WiFi，掉线则重连 */
-#define WS_SELF_HEAL_FORCE_WIFI_THRESHOLD  6   /* ~108s：无条件强制重建 WiFi */
-#define WS_SELF_HEAL_RESTART_THRESHOLD     15  /* ~4.5min：整机重启兜底恢复 */
+static int64_t s_last_success_ms = 0;   /* 上次成功连接的时刻（esp_timer 时基） */
+#define WS_RESTART_AFTER_MS  (5 * 60 * 1000)   /* 断联 5 分钟仍连不上才整机重启兜底 */
 
 static esp_websocket_client_handle_t s_client = NULL;
 static bool s_is_connected = false;
@@ -63,7 +54,10 @@ static void reconnect_task(void *arg)
     if (s_client) {
         esp_websocket_client_stop(s_client);
         vTaskDelay(pdMS_TO_TICKS(100));  // 等状态稳定
-        esp_websocket_client_start(s_client);
+        esp_err_t err = esp_websocket_client_start(s_client);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "重连启动失败: %s", esp_err_to_name(err));
+        }
     }
     if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
     s_reconnect_pending = false;
@@ -210,62 +204,118 @@ static uint8_t *s_cache_tone = NULL;
 static size_t s_cache_tone_len = 0, s_cache_tone_cap = 0;
 static uint8_t *s_cache_greeting = NULL;
 static size_t s_cache_greeting_len = 0, s_cache_greeting_cap = 0;
+// 缓存持有者计数（websocket_cache_get_* 返回裸指针后，主任务可能仍在播放中）。
+// 引用计数归零前 websocket_cache_clear 延迟释放、append 拒绝 realloc，
+// 否则 clear/realloc 会使播放方手中的指针悬空（use-after-free）。
+static int s_cache_refcnt = 0;
+static bool s_cache_clear_pending = false;
 
-static void cache_audio_append(uint8_t **buf, size_t *len, size_t *cap,
-                               const uint8_t *data, size_t data_len)
-{
-    if (data_len == 0) return;
-    if (*len + data_len > CACHE_AUDIO_MAX) return;  // 超限丢弃
-    if (*len + data_len > *cap) {
-        size_t new_cap = *cap ? *cap * 2 : 4096;
-        while (new_cap < *len + data_len) new_cap *= 2;
-        if (new_cap > CACHE_AUDIO_MAX) new_cap = CACHE_AUDIO_MAX;
-        uint8_t *nb = realloc(*buf, new_cap);
-        if (!nb) return;
-        *buf = nb;
-        *cap = new_cap;
-    }
-    memcpy(*buf + *len, data, data_len);
-    *len += data_len;
-}
-
-// 清空唤醒提示音缓存（重连/断开时调用）
-void websocket_cache_clear(void)
+// 须持有 s_ws_mutex 调用
+static void cache_clear_locked(void)
 {
     if (s_cache_tone) { free(s_cache_tone); s_cache_tone = NULL; }
     s_cache_tone_len = 0; s_cache_tone_cap = 0;
     if (s_cache_greeting) { free(s_cache_greeting); s_cache_greeting = NULL; }
     s_cache_greeting_len = 0; s_cache_greeting_cap = 0;
+    s_cache_clear_pending = false;
 }
 
-// 获取唤醒"叮"声缓存（未缓存返回 false）
+// 追加缓存数据（内部加锁；播放持有期间跳过，避免 realloc 使指针失效）
+static void cache_audio_append(uint8_t **buf, size_t *len, size_t *cap,
+                               const uint8_t *data, size_t data_len)
+{
+    if (data_len == 0) return;
+    if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
+    if (s_cache_refcnt > 0) {
+        if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
+        ESP_LOGW(TAG, "缓存正在播放中，跳过追加 %d bytes", (int)data_len);
+        return;
+    }
+    bool ok = true;
+    if (*len + data_len <= CACHE_AUDIO_MAX) {
+        if (*len + data_len > *cap) {
+            size_t new_cap = *cap ? *cap * 2 : 4096;
+            while (new_cap < *len + data_len) new_cap *= 2;
+            if (new_cap > CACHE_AUDIO_MAX) new_cap = CACHE_AUDIO_MAX;
+            uint8_t *nb = realloc(*buf, new_cap);
+            if (!nb) {
+                ok = false;
+            } else {
+                *buf = nb;
+                *cap = new_cap;
+            }
+        }
+        if (ok) {
+            memcpy(*buf + *len, data, data_len);
+            *len += data_len;
+        }
+    }
+    if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
+    if (!ok) ESP_LOGW(TAG, "缓存 realloc 失败，丢弃 %d bytes", (int)data_len);
+}
+
+// 清空唤醒提示音缓存（重连/断开时调用；播放持有期间延迟到 release 后执行）
+void websocket_cache_clear(void)
+{
+    if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
+    if (s_cache_refcnt > 0) {
+        s_cache_clear_pending = true;
+    } else {
+        cache_clear_locked();
+    }
+    if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
+}
+
+// 获取唤醒"叮"声缓存（未缓存返回 false）。返回的指针在
+// websocket_cache_release() 之前有效，期间服务端不会释放/改动该缓冲。
 bool websocket_cache_get_tone(const uint8_t **data, size_t *len)
 {
-    if (s_cache_tone_len == 0) return false;
-    *data = s_cache_tone;
-    *len = s_cache_tone_len;
-    return true;
+    bool ok = false;
+    if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
+    if (s_cache_tone_len > 0) {
+        *data = s_cache_tone;
+        *len = s_cache_tone_len;
+        s_cache_refcnt++;
+        ok = true;
+    }
+    if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
+    return ok;
 }
 
-// 获取唤醒问候语缓存（未缓存返回 false）
+// 获取唤醒问候语缓存（未缓存返回 false）。生命周期同 websocket_cache_get_tone。
 bool websocket_cache_get_greeting(const uint8_t **data, size_t *len)
 {
-    if (s_cache_greeting_len == 0) return false;
-    *data = s_cache_greeting;
-    *len = s_cache_greeting_len;
-    return true;
+    bool ok = false;
+    if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
+    if (s_cache_greeting_len > 0) {
+        *data = s_cache_greeting;
+        *len = s_cache_greeting_len;
+        s_cache_refcnt++;
+        ok = true;
+    }
+    if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
+    return ok;
 }
 
-// 获取设备ID（使用 device_id.h 中的 device_id_get）
+// 释放 websocket_cache_get_* 获取的引用（播放完成后必须调用）
+void websocket_cache_release(const uint8_t *data)
+{
+    (void)data;
+    if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
+    if (s_cache_refcnt > 0) s_cache_refcnt--;
+    if (s_cache_refcnt == 0 && s_cache_clear_pending) {
+        cache_clear_locked();
+    }
+    if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
+}
+
 static uint8_t *s_bin_msg_buf = NULL;
 static size_t s_bin_msg_buf_cap = 0;
 static size_t s_bin_msg_expected_len = 0;
 static size_t s_bin_msg_received_len = 0;
-
-static void get_device_mac(char *mac_str, size_t len)
-{
-    device_id_get(mac_str, len);
-}
+// 当前分片消息的首片 op（esp_websocket_client 续片上报 op_code=0x00，
+// 须按首片 op 路由到文本/二进制处理，见 WEBSOCKET_EVENT_DATA）
+static uint8_t s_rx_msg_op = 0;
 
 // 发送音频播放完成确认（纯发送，不包含显示清理）
 // session_status: "02" = 继续对话, "03" = 会话结束
@@ -284,6 +334,13 @@ static void send_audio_over_internal(const char *session_status)
     if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
     ESP_LOGI(TAG, "发送音频播放完成: %s", msg);
     websocket_send_text(msg);
+}
+
+// 播放异常终止（spk_task 看门狗超时等）由 audio.c 调用：
+// 与正常 over 相同的完整格式（含 session_id/tts_task_id），服务端才能正确配对会话
+void websocket_notify_playback_failed(void)
+{
+    send_audio_over_internal("03");
 }
 
 // 发送音频播放完成确认 + 清理显示
@@ -521,6 +578,13 @@ static void ota_check_task(void *arg)
     // 等待 WebSocket 连接稳定，让初始握手和配置同步完成
     vTaskDelay(pdMS_TO_TICKS(2000));
 
+    // 会话进行中（麦克风采集/音频播放）不做 OTA：写 flash 会卡顿音频、打断会话
+    if (audio_mic_is_running() || audio_spk_is_playing()) {
+        ESP_LOGW(TAG, "会话进行中，跳过本次 OTA 检查");
+        vTaskDelete(NULL);
+        return;
+    }
+
     if (s_server_http_base[0] == '\0') {
         ESP_LOGW(TAG, "服务器 HTTP 地址为空，跳过 OTA 检查");
         vTaskDelete(NULL);
@@ -548,8 +612,9 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
         ESP_LOGI(TAG, "EVENT_CONNECTED");
         // 重连后服务端会重新下发缓存帧，清掉旧的唤醒提示音缓存
         websocket_cache_clear();
-        // 连接成功，重置断线自愈计数
+        // 连接成功，重置断线自愈计数与时间基线
         s_disconnect_count = 0;
+        s_last_success_ms = esp_timer_get_time() / 1000;
         if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
         s_is_connected = true;
         s_last_keepalive_ms = 0;
@@ -593,10 +658,12 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
 
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGI(TAG, "EVENT_DISCONNECTED");
+        // 清缓存必须在持锁前调用：websocket_cache_clear 内部会取 s_ws_mutex，
+        // 持锁调用会死锁（非递归互斥锁），事件循环任务卡死后断开检测/重连全部失效
+        websocket_cache_clear();
         if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
         s_is_connected = false;
         s_music_streaming = false;
-        websocket_cache_clear();
         // 与 Arduino 一致：断开时清除会话状态、停止麦克风和扬声器
         s_current_session_id[0] = '\0';
         s_current_tts_task_id[0] = '\0';
@@ -606,23 +673,19 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
         if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
 
         // ===== 断线自愈 =====
-        // 连续断开升级处理：检查 WiFi -> 强制重建 WiFi -> 整机重启
+        // 服务端重启窗口内：库的自动重连（reconnect_timeout_ms=3000）自行恢复，
+        // 这里只在 WiFi 真实掉线时拉 WiFi、断联超 5 分钟时整机重启兜底
         s_disconnect_count++;
+        int64_t now_ms = esp_timer_get_time() / 1000;
         ESP_LOGW(TAG, "EVENT_DISCONNECTED (连续第 %d 次)", s_disconnect_count);
-        if (s_disconnect_count >= WS_SELF_HEAL_RESTART_THRESHOLD) {
-            ESP_LOGE(TAG, "持续断线 %d 次仍无法恢复，整机重启", s_disconnect_count);
+        if (!wifi_is_connected()) {
+            // WiFi 真实掉线（查 AP 记录而非事件位），自动重连救不了 WiFi，需主动重连
+            ESP_LOGW(TAG, "检测到 WiFi 已掉线，触发 WiFi 重连");
+            wifi_force_reconnect();
+        } else if (s_last_success_ms != 0 && now_ms - s_last_success_ms > WS_RESTART_AFTER_MS) {
+            ESP_LOGE(TAG, "断联超过 %d 分钟仍无法恢复，整机重启兜底", (int)(WS_RESTART_AFTER_MS / 60000));
             vTaskDelay(pdMS_TO_TICKS(200));
             esp_restart();
-        } else if (s_disconnect_count >= WS_SELF_HEAL_FORCE_WIFI_THRESHOLD) {
-            // WiFi 状态位可能陈旧（静默掉线时无 STA_DISCONNECTED 事件），无条件强制重建
-            ESP_LOGW(TAG, "持续断线，强制重建 WiFi");
-            wifi_force_reconnect();
-        } else if (s_disconnect_count >= WS_SELF_HEAL_CHECK_WIFI_THRESHOLD) {
-            // 检查 WiFi 真实连接状态，掉线则主动重连（esp_websocket_client 自动重连救不了 WiFi）
-            if (!wifi_is_connected()) {
-                ESP_LOGW(TAG, "检测到 WiFi 已掉线，触发 WiFi 重连");
-                wifi_force_reconnect();
-            }
         }
         // =====================
 
@@ -642,17 +705,32 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
 
     case WEBSOCKET_EVENT_CLOSED:
         ESP_LOGI(TAG, "EVENT_CLOSED, disconnected=%d", s_is_connected);
+        // 同 DISCONNECTED：清缓存须在持锁前调用，避免 s_ws_mutex 死锁
+        websocket_cache_clear();
         if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
         s_is_connected = false;
-        bool need_reconnect = !s_reconnect_pending;
-        s_reconnect_pending = true;
+        s_music_streaming = false;
+        // 与 DISCONNECTED 一致：关闭时清除会话状态、停止麦克风和扬声器
+        s_current_session_id[0] = '\0';
+        s_current_tts_task_id[0] = '\0';
+        s_audio_playing = false;
+        s_audio_over_sent = false;
+        s_drain_action = DRAIN_ACTION_NONE;
         if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
-        display_show_status("服务已关闭");
-        // 服务端主动关闭时不会触发自动重连，需手动 start
-        // 添加标志位防止重复创建重连任务
-        if (s_client && need_reconnect) {
-            xTaskCreate(reconnect_task, "ws_recon", 2048, NULL, 3, NULL);
+        // 库已启用 close_reconnect：服务端关闭后由库自动重连（3s 间隔），
+        // 不再手动 stop+start（与库重连状态机竞态会导致客户端停摆 "Client was not started"）
+        if (s_drain_check_timer) {
+            esp_timer_stop(s_drain_check_timer);
         }
+        if (s_flow_ctrl_timer) {
+            esp_timer_stop(s_flow_ctrl_timer);
+        }
+        audio_mic_stop();
+        audio_spk_stop();
+        // 恢复语音唤醒，断线期间仍可检测唤醒词
+        wakeup_resume();
+        power_manager_set_active(false);  // 回待机省电（WiFi modem sleep）
+        display_show_status("服务已关闭，自动重连中...");
         break;
 
     case WEBSOCKET_EVENT_ERROR:
@@ -673,9 +751,18 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                  (int)data->data_len,
                  data->data_len > 0 ? (unsigned char)data->data_ptr[0] : 0);
 
+        // 分片路由：esp_websocket_client 对超过 buffer_size 的帧分片上报事件，
+        // 续片不重新解析帧头，op_code 上报为 0x00（NONE）。必须按首片 op 路由，
+        // 否则大二进制音频帧首片之后的全部数据会被静默丢弃。
+        if (data->op_code == 0x01 || data->op_code == 0x02) {
+            s_rx_msg_op = data->op_code;  // 首片：记录本条消息类型
+        }
+        uint8_t msg_op = data->op_code ? data->op_code : s_rx_msg_op;
+
         // keepalive 心跳不视为会话活动：不清除唤醒超时、不刷新会话看门狗。
         // 否则服务端只发心跳不回复唤醒消息时，唤醒检测永久卡死。
-        bool is_keepalive = (data->op_code == 0x01 &&
+        bool is_keepalive = (msg_op == 0x01 &&
+                             data->payload_offset == 0 &&
                              data->data_len == 36 &&
                              memcmp(data->data_ptr, "{\"type\":\"keepalive\"", 19) == 0);
 
@@ -686,13 +773,10 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
             s_wakeup_pending = false;
         }
 
-        if (data->op_code == 0x01) {  // 文本消息
-            // keepalive 消息用 LOGV 避免刷屏，其他文本消息用 LOGD
-            if (is_keepalive) {
-                ESP_LOGV(TAG, "收到文本消息: %.*s", data->data_len, data->data_ptr);
-            } else {
-                ESP_LOGD(TAG, "收到文本消息: %.*s", data->data_len, data->data_ptr);
-            }
+        if (msg_op == 0x01) {  // 文本消息
+            // 文本消息用 LOGV——内容可能包含用户语音识别结果/LLM 回复，
+            // 不能在默认日志级别打进串口
+            ESP_LOGV(TAG, "收到文本消息: %.*s", data->data_len, data->data_ptr);
 
             // 处理纯文本 "session_end" 消息
             if (data->data_len == 11 && memcmp(data->data_ptr, "session_end", 11) == 0) {
@@ -872,11 +956,13 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                                 if (cur_drain == DRAIN_ACTION_SESSION_END) {
                                     if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
                                     ESP_LOGI(TAG, "二进制 03 已处理，跳过 JSON session_end");
+                                    cJSON_Delete(json);
                                     return;
                                 }
                                 if (cur_drain == DRAIN_ACTION_CONTINUE) {
                                     if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
                                     ESP_LOGI(TAG, "连续对话中，忽略 session_end");
+                                    cJSON_Delete(json);
                                     return;
                                 }
                                 // 与 Arduino 一致：清除 session_id、tts_task_id、停止麦克风
@@ -912,14 +998,44 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                         if (command_id && cJSON_IsString(command_id)) {
                             ESP_LOGI(TAG, "收到指令: %s", command_id->valuestring);
 
-                            // 分发到指令注册系统（commands/ 目录中的处理函数）
+                            char ack_buf[384];
+                            // 1. 先走注册指令表（commands/ 目录）
                             esp_err_t cmd_ret = commands_dispatch("instruct", command_id->valuestring, json);
                             if (cmd_ret == ESP_ERR_NOT_FOUND) {
-                                ESP_LOGW(TAG, "未注册的指令: %s（在 commands/ 目录中添加即可）", command_id->valuestring);
+                                // 2. 兜底转发给板型扩展组件（extras）：各板子的专属
+                                //    功能（LED/传感器/灯带等）通过 handle_command 响应
+                                char *args = cJSON_PrintUnformatted(json);
+                                char extra_resp[256] = {0};
+                                esp_err_t ex_ret = board_extra_dispatch(
+                                    command_id->valuestring,
+                                    args ? args : "{}",
+                                    extra_resp, sizeof(extra_resp));
+                                if (args) cJSON_free(args);
+                                if (ex_ret == ESP_OK) {
+                                    ESP_LOGI(TAG, "指令由扩展组件处理: %s → %s",
+                                             command_id->valuestring, extra_resp);
+                                    // 组件响应须为 JSON；非 JSON 文本按字符串嵌入，
+                                    // 避免 ack 报文格式损坏
+                                    bool resp_is_json =
+                                        (extra_resp[0] == '{' || extra_resp[0] == '[');
+                                    snprintf(ack_buf, sizeof(ack_buf),
+                                             resp_is_json
+                                                 ? "{\"type\":\"instruct_ack\",\"command_id\":\"%s\",\"data\":%s}"
+                                                 : "{\"type\":\"instruct_ack\",\"command_id\":\"%s\",\"data\":\"%s\"}",
+                                             command_id->valuestring, extra_resp);
+                                    websocket_send_text(ack_buf);
+                                    cJSON_Delete(json);
+                                    return;
+                                }
+                                ESP_LOGW(TAG, "未注册的指令: %s（在 commands/ 目录添加或实现板级 extras 组件）",
+                                         command_id->valuestring);
                             }
+                            // 发送应答
+                            websocket_send_text("{\"type\":\"instruct_ack\"}");
+                        } else {
+                            // 发送应答
+                            websocket_send_text("{\"type\":\"instruct_ack\"}");
                         }
-                        // 发送应答
-                        websocket_send_text("{\"type\":\"instruct_ack\"}");
                     }
                     // 处理硬件 IO 控制（移植自 Arduino hardware-fns）
                     else if (strcmp(type->valuestring, "hardware-fns") == 0) {
@@ -1042,7 +1158,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                 }
                 cJSON_Delete(json);
             }
-        } else if (data->op_code == 0x02) {  // 二进制消息 - 音频数据
+        } else if (msg_op == 0x02) {  // 二进制消息 - 音频数据
             ESP_LOGV(TAG, "收到二进制帧: op_code=0x%02x, payload_len=%d, offset=%d, data_len=%d",
                      data->op_code, (int)data->payload_len, (int)data->payload_offset, (int)data->data_len);
             // 参考原版: 直接处理完整的二进制帧
@@ -1145,8 +1261,8 @@ static esp_err_t query_official_server(const char *api_key, char *server_url, si
     }
 
     cJSON *ip = cJSON_GetObjectItem(data, "ip");
-    cJSON *port = cJSON_GetObjectItem(data, "port");
-    cJSON *protocol = cJSON_GetObjectItem(data, "protocol");
+    // port/protocol 由官方服务端返回，但客户端统一强制 ws://ip:80（见下），不使用
+    (void)data;
 
     const char *ip_str = (ip && cJSON_IsString(ip)) ? ip->valuestring : "node.espai.fun";
 
@@ -1282,6 +1398,29 @@ static const char *default_server_url(void)
     return SERVER_URL_DEFAULT;
 }
 
+// query 参数百分号编码：api_key/扩展字段可能含 &,=,%,空格 等特殊字符，
+// 不编码会破坏 URL 或注入额外参数
+static void url_query_encode(const char *in, char *out, size_t out_size)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    size_t o = 0;
+    if (out_size == 0) return;
+    for (const char *p = in ? in : ""; *p && o + 4 < out_size; p++) {
+        unsigned char c = (unsigned char)*p;
+        bool safe = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '9') || c == '-' || c == '.' ||
+                    c == '_' || c == '~';
+        if (safe) {
+            out[o++] = (char)c;
+        } else {
+            out[o++] = '%';
+            out[o++] = hex[c >> 4];
+            out[o++] = hex[c & 0x0F];
+        }
+    }
+    out[o] = '\0';
+}
+
 esp_err_t websocket_init(void)
 {
     ESP_LOGI(TAG, "初始化WebSocket...");
@@ -1289,7 +1428,7 @@ esp_err_t websocket_init(void)
     // 获取设备MAC地址（DEVICE_ID 可能是 32 字符的 UUID，缓冲区需足够大）
     char device_mac[64];
     char ws_key_diy[128] = {0};  // 从 diyServerParams 提取的 key
-    get_device_mac(device_mac, sizeof(device_mac));
+    device_id_get(device_mac, sizeof(device_mac));
 
     // 从 NVS 读取服务器配置（配网时保存）
     char server_url[128] = {0};
@@ -1378,7 +1517,7 @@ esp_err_t websocket_init(void)
     // 判断是否为官方服务器（含有 node.espai 域名）
     bool is_official = (strstr(server_url, "node.espai") != NULL);
     s_is_official = is_official;
-    char url[768];
+    char url[1024];
     if (is_official) {
         // 连接官方服务器前注册设备（Arduino 的 on_bind_device 流程）
         ESP_LOGI(TAG, "官方模式，尝试注册设备...");
@@ -1399,10 +1538,16 @@ esp_err_t websocket_init(void)
         // 注意：不要添加 spk_sample_rate/spk_channels/spk_format 等参数，
         // Arduino 官方客户端（esp-ai-client）不传这些参数，官方服务端按默认
         // MP3 下发；加 spk_* 参数可能导致官方服务端音频路径不一致（设备无声）
+        // key_enc 256：api_key 实际为短字符串（≤64 字符），百分号编码后最多 3 倍；
+        // 与 url[1024] 配合可保证 snprintf 不发生截断（-Wformat-truncation 要求可证）
+        char key_enc[256] = {0};
+        char ext2_enc[48] = {0};
+        url_query_encode(ws_key, key_enc, sizeof(key_enc));
+        url_query_encode(ext2_val, ext2_enc, sizeof(ext2_enc));
         snprintf(url, sizeof(url),
                  "%s/?v=%s&device_id=%s&api_key=%s&ext1=%s&ext2=%s"
                  "&AUDIO_BUFFER_SIZE=%d&bitrate=%d",
-                 server_url, FIRMWARE_VERSION, device_mac, ws_key, ws_key, ext2_val,
+                 server_url, FIRMWARE_VERSION, device_mac, key_enc, key_enc, ext2_enc,
                  SPK_STREAM_BUF_SIZE, 64);
     } else {
         // 自定义服务器：去掉 api_key，只传 mac 作为设备标识
@@ -1412,15 +1557,16 @@ esp_err_t websocket_init(void)
         snprintf(url, sizeof(url),
                  "%s%s?mac=%s&v=%s&AUDIO_BUFFER_SIZE=%d"
                  "&spk_sample_rate=%d&spk_channels=%d&spk_format=mp3&spk_bitrate=%d"
-                 "&has_display=%d",
+                 "&has_display=%d&bin_id=%s",
                  server_url, SERVER_PATH,
                  device_mac, FIRMWARE_VERSION,
                  SPK_STREAM_BUF_SIZE, SPK_SAMPLE_RATE, AUDIO_CHANNELS, 64,
-                 display_has_graphic() ? 1 : 0);
+                 display_has_graphic() ? 1 : 0,
+                 board_get_config()->bin_id);
     }
 
     // 遮蔽 API Key
-    char url_safe[768];
+    char url_safe[1024];
     strlcpy(url_safe, url, sizeof(url_safe));
     char *key_start = strstr(url_safe, "api_key=");
     if (key_start) {
@@ -1443,6 +1589,7 @@ esp_err_t websocket_init(void)
         .task_stack = 8192,        // 8192：WebSocket 握手 + HTTP 解析需要足够栈
 #endif
         .disable_auto_reconnect = false,   // 使用库自带的自动重连
+        .enable_close_reconnect = true,    // 服务端关闭连接后由库自动重连（否则库任务退出后需手动重启，易卡死）
         .reconnect_timeout_ms = 3000,      // 断线后 3 秒重连
         .network_timeout_ms = 15000,       // 15秒网络超时（WiFi 网络延迟可能较大）
         .skip_cert_common_name_check = true,  // 跳过证书 CN 验证（开发阶段启用，生产环境建议改为 false）
@@ -1591,7 +1738,28 @@ void websocket_check_keepalive(void)
         }
     }
 
-    if (!s_is_connected) return;
+    if (!s_is_connected) {
+        // 复活保障：手动 start/stop 与库的自动重连竞态可能让客户端彻底停摆
+        // （状态机停在 STOPPED，自动重连不再工作），断联 30s 后强制重建一次
+        if (s_client && s_last_success_ms != 0 &&
+            now_ms - s_last_success_ms > 30000) {
+            if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
+            bool need_revive = !s_reconnect_pending;
+            if (need_revive) s_reconnect_pending = true;
+            if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
+            if (need_revive) {
+                ESP_LOGW(TAG, "断联超 30s 且客户端未恢复，强制重建连接");
+                xTaskCreate(reconnect_task, "ws_recon", 2048, NULL, 3, NULL);
+            }
+        }
+        // 整机重启兜底：库自动重连 + 复活保障都失效时，断联超 5 分钟整机重启
+        if (s_last_success_ms != 0 && now_ms - s_last_success_ms > WS_RESTART_AFTER_MS) {
+            ESP_LOGE(TAG, "断联超过 %d 分钟仍无法恢复，整机重启兜底", (int)(WS_RESTART_AFTER_MS / 60000));
+            vTaskDelay(pdMS_TO_TICKS(200));
+            esp_restart();
+        }
+        return;
+    }
 
     // 用锁保护 s_last_keepalive_ms 的读取（int64_t 跨任务无锁访问不安全）
     if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
@@ -1609,11 +1777,9 @@ void websocket_check_keepalive(void)
         s_audio_playing = false;
         if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
         display_show_status("心跳超时，重连中...");
-        // 注意：不能用 esp_websocket_client_stop()，因为它不会触发 EVENT_DISCONNECTED
-        // 直接 start 会先 stop 再 connect，触发完整重连流程
-        if (s_client) {
-            esp_websocket_client_start(s_client);
-        }
+        // 走统一的 force_reconnect（内部有 reconnect_pending 防重入，
+        // 直接 start() 会与库的重连状态机竞态导致客户端停摆）
+        websocket_force_reconnect();
     }
 }
 

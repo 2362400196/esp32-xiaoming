@@ -53,6 +53,8 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         taskENTER_CRITICAL(&s_wifi_lock);
         prov_mode = s_provisioning_mode;
         taskEXIT_CRITICAL(&s_wifi_lock);
+        // 通知板级扩展组件（extras）：网络断开（esp_event 任务上下文，回调必须快速返回）
+        board_extra_broadcast_event(BOARD_EVENT_NETWORK_DOWN, NULL);
         if (prov_mode) {
             return;
         }
@@ -82,6 +84,8 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "获取到IP地址: " IPSTR, IP2STR(&event->ip_info.ip));
+        // 通知板级扩展组件（extras）：网络就绪
+        board_extra_broadcast_event(BOARD_EVENT_NETWORK_UP, NULL);
         taskENTER_CRITICAL(&s_wifi_lock);
         s_retry_num = 0;
         s_provisioning_mode = false;

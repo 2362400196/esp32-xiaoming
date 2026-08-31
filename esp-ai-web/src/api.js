@@ -189,6 +189,10 @@ getActiveEmoPack: (deviceId) => request('/api/v1/emos/active/' + encodeURICompon
     adminDeleteDevice: (deviceId) => request('/api/v1/admin/devices/' + encodeURIComponent(deviceId), 'DELETE'),
     adminReloadPlugins: () => request('/api/v1/plugins/reload', 'POST'),
     adminBatchWakeup: () => request('/api/v1/admin/devices/batch/wakeup', 'POST'),
+    adminDeviceWakeup: (deviceId) => request('/api/v1/admin/devices/' + encodeURIComponent(deviceId) + '/wakeup', 'POST'),
+    adminDeviceDetail: (deviceId) => request('/api/v1/admin/devices/' + encodeURIComponent(deviceId) + '/detail'),
+    adminDeviceOtaCheck: (deviceId) => request('/api/v1/admin/devices/' + encodeURIComponent(deviceId) + '/ota-check'),
+    adminDeviceOtaForce: (deviceId) => request('/api/v1/admin/devices/' + encodeURIComponent(deviceId) + '/ota-force', 'POST'),
     adminBatchStop: () => request('/api/v1/admin/devices/batch/stop', 'POST'),
     adminBatchSpeak: (text) => request('/api/v1/admin/devices/batch/speak', 'POST', { text }),
     adminUserDevices: (userId) => request('/api/v1/admin/users/' + encodeURIComponent(userId) + '/devices'),
@@ -202,7 +206,22 @@ getActiveEmoPack: (deviceId) => request('/api/v1/emos/active/' + encodeURICompon
     adminUpdateMarketplacePlugin: (slug, data) => request('/api/v1/admin/marketplace/plugins/' + encodeURIComponent(slug), 'PUT', data),
     adminMarketplaceReviews: () => request('/api/v1/admin/marketplace/reviews'),
     adminDeleteMarketplaceReview: (reviewId) => request('/api/v1/admin/marketplace/reviews/' + encodeURIComponent(reviewId), 'DELETE'),
-    adminMetrics: () => request('/api/v1/system/metrics'),
+    adminFirmwares: () => request('/api/v1/admin/firmwares'),
+    adminFirmwareUpload: (file, binId, version) => {
+      const token = getToken()
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('bin_id', binId || '')
+      formData.append('version', version || '')
+      return fetch('/api/v1/admin/firmwares/upload', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token },
+        body: formData
+      }).then(async r => ({ status: r.status, data: await r.json().catch(() => null) }))
+    },
+    adminFirmwareSetActive: (filename) => request('/api/v1/admin/firmwares/' + encodeURIComponent(filename) + '/set-active', 'POST'),
+    adminFirmwareDelete: (filename) => request('/api/v1/admin/firmwares/' + encodeURIComponent(filename), 'DELETE'),
+    adminMetrics: () => request('/api/v1/admin/metrics'),
     adminBanDevice: (deviceId, reason) => request('/api/v1/admin/devices/' + encodeURIComponent(deviceId) + '/ban', 'POST', { reason }),
     adminUnbanDevice: (deviceId) => request('/api/v1/admin/devices/' + encodeURIComponent(deviceId) + '/unban', 'POST'),
     adminLlmConfigs: (params = {}) => {
@@ -216,7 +235,7 @@ getActiveEmoPack: (deviceId) => request('/api/v1/emos/active/' + encodeURICompon
     },
     adminWsStatus: () => request('/api/v1/admin/ws-status'),
     adminHealth: () => request('/api/v1/admin/health'),
-    adminOpLogs: () => request('/api/v1/admin/operation-logs'),
+    adminOpLogs: (params = {}) => { const qs = new URLSearchParams(params).toString(); return request('/api/v1/admin/operation-logs' + (qs ? '?' + qs : '')) },
     adminEmojis: () => request('/api/v1/admin/emojis'),
     adminDeleteEmoji: (name) => request('/api/v1/admin/emojis/' + encodeURIComponent(name), 'DELETE'),
     adminScheduledTasks: () => request('/api/v1/admin/scheduled-tasks'),

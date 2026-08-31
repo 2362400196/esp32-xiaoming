@@ -185,7 +185,7 @@ typedef struct {
 
     // ==================== 服务与表情策略 ====================
     bool official_service;          // true: 默认请求 ESP-AI 官方服务（node.espai.fun）
-    bool emotion_builtin_only;      // true: 表情只用编译内置资源（emos/*.h）
+    bool emotion_builtin_only;      // 已废弃（保留字段兼容既有板型定义）：表情统一从服务器下载
 
     // ==================== 扩展组件（1000+ 板型架构）====================
     /**

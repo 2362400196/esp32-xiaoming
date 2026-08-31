@@ -119,7 +119,7 @@ class PluginManager:
     # 安装
     # ──────────────────────────────────────────────────────────
 
-    async def install_from_zip(self, zip_path: Path) -> dict:
+    async def install_from_zip(self, zip_path: Path, installed_by: str | None = None) -> dict:
         """从 zip 包安装插件。
 
         流程：验证 manifest → 检查兼容性 → 校验 plugin.py → 卸载旧版 →
@@ -127,6 +127,7 @@ class PluginManager:
 
         Args:
             zip_path: zip 文件路径
+            installed_by: 安装者标识（管理员邮箱等），写入安装元数据供后台展示
 
         Returns:
             {"success": bool, "plugin_id": str, "name": str, "version": str,
@@ -243,6 +244,9 @@ class PluginManager:
         from src.infrastructure.plugin_loader import _loaded_tools
         tools = _loaded_tools.get(plugin_id, [])
 
+        # 9. 写入安装元数据（安装者/时间，后台插件管理展示用）
+        self._write_install_meta(dest_dir, installed_by)
+
         logger.info(
             f"[插件管理] 插件 {plugin_id} v{manifest.version} 安装成功，"
             f"工具: {tools}"
@@ -259,8 +263,34 @@ class PluginManager:
             "missing_deps": missing_deps,
         }
 
+    def _write_install_meta(self, dest_dir: Path, installed_by: str | None) -> None:
+        """记录插件安装者与安装时间（非关键数据，失败仅告警）"""
+        try:
+            import json
+            import time
+            meta = {
+                "installed_by": installed_by or "",
+                "installed_at": time.time(),
+            }
+            (dest_dir / ".install_meta.json").write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError as e:
+            logger.warning(f"[插件管理] 写入安装元数据失败: {e}")
+
+    def _read_install_meta(self, entry: Path) -> dict:
+        """读取插件目录的安装元数据，缺失返回空 dict"""
+        try:
+            import json
+            meta_file = entry / ".install_meta.json"
+            if meta_file.is_file():
+                return json.loads(meta_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            logger.debug(f"[插件管理] 读取安装元数据失败: {entry.name}: {e}")
+        return {}
+
     async def install_from_marketplace(
-        self, plugin_slug: str, version: str = "latest"
+        self, plugin_slug: str, version: str = "latest", installed_by: str | None = None
     ) -> dict:
         """从云市场下载并安装插件。
 
@@ -351,7 +381,7 @@ class PluginManager:
             return {"success": False, "message": msg, "tools": []}
 
         # 3. 安装下载的 zip（install_from_zip 内含签名校验）
-        result = await self.install_from_zip(cache_zip)
+        result = await self.install_from_zip(cache_zip, installed_by=installed_by)
 
         # 安装完成后清理缓存 zip
         try:
@@ -680,6 +710,7 @@ class PluginManager:
             # 优先从 manifest.json 读取
             manifest = load_manifest_from_dir(entry)
             if manifest is not None:
+                meta = self._read_install_meta(entry)
                 out.append({
                     "name": name,
                     "display_name": manifest.name,
@@ -692,9 +723,12 @@ class PluginManager:
                     "tools": _loaded_tools.get(name, []),
                     "loaded": name in _loaded_tools,
                     "system": is_system_plugin(name),
+                    "installed_by": meta.get("installed_by", ""),
+                    "installed_at": meta.get("installed_at"),
                 })
             else:
                 # 无 manifest，从加载状态获取版本
+                meta = self._read_install_meta(entry)
                 out.append({
                     "name": name,
                     "display_name": name,
@@ -707,6 +741,8 @@ class PluginManager:
                     "tools": _loaded_tools.get(name, []),
                     "loaded": name in _loaded_tools,
                     "system": is_system_plugin(name),
+                    "installed_by": meta.get("installed_by", ""),
+                    "installed_at": meta.get("installed_at"),
                 })
 
         return out

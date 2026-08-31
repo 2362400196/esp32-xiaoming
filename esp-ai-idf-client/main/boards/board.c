@@ -117,9 +117,7 @@ esp_err_t board_init(void)
     if (cfg->official_service) {
         ESP_LOGI(TAG, "  服务: ESP-AI 官方服务 (node.espai.fun)");
     }
-    if (cfg->emotion_builtin_only) {
-        ESP_LOGI(TAG, "  表情: 编译内置资源，不从服务器下载");
-    }
+    // emotion_builtin_only 已废弃：表情统一从服务器下载（固件不再内置对话表情）
 
     // 4. 初始化扩展组件（如有）
     if (cfg->extras) {
@@ -189,10 +187,36 @@ const char *board_get_info_json(void)
             }
         }
 
-        snprintf(s_board_info_json, sizeof(s_board_info_json),
-            "{\"name\":\"%s\",\"bin_id\":\"%s\",\"display\":\"%s\",\"display_w\":%d,\"display_h\":%d,\"audio_codec\":\"%s\"}",
+        // 扩展组件类型列表（服务端可据此对板级专属指令做能力适配）
+        // 每项类型名限 16 字符（%.16s），单次拼接 ≤20 字节且循环保证剩余 ≥32，
+        // 截断边界可证（-Wformat-truncation）
+        char extras_buf[128] = {0};
+        size_t pos = 0;
+        if (cfg->extras) {
+            extras_buf[pos++] = '[';
+            for (int i = 0; cfg->extras[i] != NULL && pos + 32 < sizeof(extras_buf); i++) {
+                pos += snprintf(extras_buf + pos, sizeof(extras_buf) - pos,
+                                "%s\"%.16s\"", i > 0 ? "," : "",
+                                cfg->extras[i]->type ? cfg->extras[i]->type : "unknown");
+                if (pos > sizeof(extras_buf) - 2) pos = sizeof(extras_buf) - 2;
+            }
+            pos += snprintf(extras_buf + pos, sizeof(extras_buf) - pos, "]");
+        } else {
+            snprintf(extras_buf, sizeof(extras_buf), "[]");
+        }
+
+        int n = snprintf(s_board_info_json, sizeof(s_board_info_json),
+            "{\"name\":\"%s\",\"bin_id\":\"%s\",\"display\":\"%s\",\"display_w\":%d,\"display_h\":%d,"
+            "\"audio_codec\":\"%s\",\"extras\":%s}",
             cfg->name, cfg->bin_id, disp_str,
-            cfg->display_width, cfg->display_height, codec_str);
+            cfg->display_width, cfg->display_height, codec_str, extras_buf);
+        if (n < 0 || (size_t)n >= sizeof(s_board_info_json)) {
+            // 极端情况下（超长板名等）JSON 被截断：退化为不含 extras 的最小信息
+            ESP_LOGW(TAG, "板型信息 JSON 截断 (%d)，退化为最小信息", n);
+            snprintf(s_board_info_json, sizeof(s_board_info_json),
+                "{\"name\":\"board\",\"bin_id\":\"%s\",\"audio_codec\":\"%s\",\"extras\":[]}",
+                cfg->bin_id, codec_str);
+        }
     }
     return s_board_info_json;
 }

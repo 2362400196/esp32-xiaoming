@@ -64,8 +64,8 @@ static esp_err_t cmd_show_wx_qrcode(cJSON *json)
     display_show_status("微信扫码中...");
 
     // 如果设备有二维码图片显示能力，可以下载并显示
-    // 这里使用内置的 wx_qrcode 表情（如果有）
-    display_show_emotion("wx_qrcode");
+    // 内置表中的键名为"请配网"（对应 wx_qrcode_img），修复此前键名不匹配永不命中的调用
+    display_show_emotion("请配网");
 
     return ESP_OK;
 }

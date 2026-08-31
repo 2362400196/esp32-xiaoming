@@ -5,7 +5,14 @@
 #   - WORKDIR /app
 #   - 源码在 /app/src
 #   - 虚拟环境在 /app/.venv
-#   - 入口: uvicorn src.main:app
+#   - 入口: uvicorn src.main:app --port 8088
+#
+# 数据目录（务必持久化，否则容器重建即丢）：
+#   - /app/data        主数据：SQLite 数据库 (data/espai.db)、插件、备份、微信数据
+#   - /app/src/data    设备级数据：技能、记忆等
+#   - /app/src/firmware  OTA 固件文件
+#   - /app/src/emos    表情包静态资源
+#   - /app/logs        运行日志
 # ============================================================
 
 services:
@@ -20,20 +27,19 @@ services:
     ports:
       - "8088:8088"
 
+    # 从 .env 读取全部配置（ASR/LLM/TTS 密钥、JWT_SECRET、数据库路径等）
     env_file:
       - .env
 
-    environment:
-      - HOST=0.0.0.0
-      - PORT=8088
-
-    # 持久化卷：配置、数据、日志、固件
-    # 注意：users.json 代码会读写（保存设备配置），不能 :ro
+    # 数据持久化：全部使用命名卷（跨平台、权限友好、升级不丢数据）
+    # 如需直接访问数据目录，可把命名卷改为 bind mount，例如：
+    #   - ./data:/app/data
     volumes:
-      - ./users.json:/app/users.json
-      - esp-ai-data:/app/src/data
-      - esp-ai-logs:/app/logs
+      - esp-ai-data:/app/data
+      - esp-ai-device-data:/app/src/data
       - esp-ai-firmware:/app/src/firmware
+      - esp-ai-emos:/app/src/emos
+      - esp-ai-logs:/app/logs
 
     # 资源限制
     deploy:
@@ -44,7 +50,7 @@ services:
         reservations:
           memory: 512M
 
-    # 日志驱动配置
+    # 日志驱动配置（容器日志，与 /app/logs 应用日志互补）
     logging:
       driver: json-file
       options:
@@ -61,5 +67,7 @@ services:
 
 volumes:
   esp-ai-data:
-  esp-ai-logs:
+  esp-ai-device-data:
   esp-ai-firmware:
+  esp-ai-emos:
+  esp-ai-logs:

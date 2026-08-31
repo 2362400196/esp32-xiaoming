@@ -119,6 +119,12 @@ const char *board_get_info_json(void);
 // WiFi
 esp_err_t wifi_init(void);
 void wifi_set_power_save(bool enable);   // 待机省电开关（power_manager 调用）
+bool wifi_is_connected(void);            // 真实连接状态（查 AP 记录，不依赖事件位）
+void wifi_force_reconnect(void);         // 强制重建连接（websocket 断线自愈调用）
+
+// 会话看门狗（main.c 实现，websocket.c 在收到服务端数据 / iat_start 时调用）
+void session_watchdog_refresh(void);
+void session_watchdog_start(void);
 
 esp_err_t websocket_init(void);
 esp_err_t websocket_send_text(const char *text);
@@ -130,11 +136,17 @@ bool websocket_is_music_streaming(void);
 void websocket_cache_clear(void);
 bool websocket_cache_get_tone(const uint8_t **data, size_t *len);
 bool websocket_cache_get_greeting(const uint8_t **data, size_t *len);
+// 释放 websocket_cache_get_* 获取的引用（get 之后、播放完成后必须调用，
+// 持有期间服务端不会释放/覆盖缓存缓冲）
+void websocket_cache_release(const uint8_t *data);
 const char *websocket_get_http_base(void);
 void websocket_reset_conversation_state(void);
 void websocket_force_reconnect(void);
 void websocket_mark_wakeup_sent(void);
 void websocket_clear_wakeup_pending(void);
+// 播放异常终止上报（audio.c 看门狗调用；websocket.c 组装完整格式，含
+// session_id/tts_task_id，服务端才能正确配对会话）
+void websocket_notify_playback_failed(void);
 
 esp_err_t audio_init(void);
 esp_err_t audio_mic_start(void);

@@ -25,6 +25,8 @@ idf_component_register(
          "power_manager.c"
          # 板级包核心（board_select.h 自动选择板型，无需手动添加板型源文件）
          "boards/board.c"
+         # 板级扩展组件（extras，各板型按需挂载到 BOARD_CONFIG.extras）
+         "boards/extras/extras_led.c"
          # 显示模块（驱动架构）
          "displays/display.c"
          "displays/display_lcd.cpp"
@@ -59,7 +61,7 @@ idf_component_register(
          "helix_mp3/mp3tabs.c" "helix_mp3/polyphase.c" "helix_mp3/scalfact.c"
          "helix_mp3/stproc.c" "helix_mp3/subband.c" "helix_mp3/trigtabs.c"
          "helix_mp3/mp3_decoder_wrapper.c"
-    INCLUDE_DIRS "." "helix_mp3" "boards" "emos" "fonts" "commands" "displays"
+    INCLUDE_DIRS "." "helix_mp3" "boards" "boards/extras" "emos" "fonts" "commands" "displays"
                  "audio_codec"
                  "lua" "lua/include" "lua/runtime" "lua/modules"
     REQUIRES esp_wifi esp_event nvs_flash esp_netif esp_http_client

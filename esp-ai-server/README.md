@@ -136,9 +136,7 @@ curl http://localhost:8088/health/ready
 
 ```bash
 cp .env.example .env
-# 编辑 .env 填入 ASR/LLM/TTS 密钥
-cp users.example.json users.json
-# 按需编辑多设备配置
+# 编辑 .env 填入 ASR/LLM/TTS 密钥、JWT_SECRET 等
 ```
 
 ### 2. 构建并启动
@@ -151,14 +149,17 @@ docker compose up -d --build
 
 ### 3. 持久化卷
 
-`docker-compose.yml` 已挂载以下卷，确保数据不随容器销毁：
+`docker-compose.yml` 已挂载以下命名卷，确保数据不随容器销毁：
 
 | 卷 | 容器路径 | 用途 |
 |---|---|---|
-| `./users.json` | `/app/users.json` | 设备配置（运行时可写，不能 `:ro`） |
-| `esp-ai-data` | `/app/src/data` | 日记、记忆、用户画像 |
+| `esp-ai-data` | `/app/data` | **主数据**：SQLite 数据库（`data/espai.db`）、插件、备份、微信数据 |
+| `esp-ai-device-data` | `/app/src/data` | 设备级数据：技能、记忆 |
 | `esp-ai-firmware` | `/app/src/firmware` | OTA 固件文件 |
+| `esp-ai-emos` | `/app/src/emos` | 表情包静态资源 |
 | `esp-ai-logs` | `/app/logs` | 运行日志 |
+
+> 升级 / 重建容器后数据仍在。如需直接访问数据目录，可把命名卷改为 bind mount，例如 `./data:/app/data`。
 
 ### 4. 查看日志与状态
 

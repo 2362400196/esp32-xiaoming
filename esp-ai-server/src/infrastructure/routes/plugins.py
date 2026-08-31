@@ -6,6 +6,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
+from sqlalchemy import select
+
+from src.infrastructure.db.models.device import DeviceModel
+from src.infrastructure.db.models.user import UserModel
+from src.infrastructure.db.session import get_session_ctx
 
 from src.infrastructure.logging import get_logger
 from src.infrastructure.security_jwt import get_current_user, get_current_user_optional, require_admin
@@ -375,7 +380,28 @@ async def list_installed_plugins(_admin=Depends(require_admin)):
     """
     from src.infrastructure.plugin_manager import get_plugin_manager
     manager = get_plugin_manager()
-    installed = manager.list_installed()
+    installed = await asyncio.to_thread(manager.list_installed)
+
+    # 反查使用情况：哪些设备启用了该插件（enabled_plugins 含 slug/名称），
+    # 连同归属用户一起返回，供管理后台展示"谁在用/谁装的"
+    async with get_session_ctx() as session:
+        rows = (await session.execute(
+            select(DeviceModel, UserModel)
+            .outerjoin(UserModel, DeviceModel.user_id == UserModel.id)
+            .where(DeviceModel.enabled_plugins.isnot(None))
+        )).all()
+    usage: dict[str, list] = {}
+    for device, user in rows:
+        for slug in (device.enabled_plugins or []):
+            usage.setdefault(slug, []).append({
+                "device_id": device.device_id,
+                "device_name": device.name,
+                "owner_email": user.email if user else "",
+                "owner_nickname": user.nickname if user else "",
+            })
+    for p in installed:
+        p["used_by"] = usage.get(p.get("slug") or p.get("name"), []) + usage.get(p.get("name"), [])
+
     return {"code": 0, "message": "ok", "data": installed}
 
 
@@ -436,7 +462,7 @@ async def install_plugin(
 
     # 2. 安装
     manager = get_plugin_manager()
-    result = await manager.install_from_zip(cache_path)
+    result = await manager.install_from_zip(cache_path, installed_by=_admin.email)
 
     # 3. 清理缓存 zip
     try:

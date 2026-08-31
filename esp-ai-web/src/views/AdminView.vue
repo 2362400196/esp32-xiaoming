@@ -28,13 +28,13 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
           <span>市场管理</span>
         </button>
+        <button class="nav-item" :class="{ active: section === 'firmware' }" @click="section = 'firmware'">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          <span>固件管理</span>
+        </button>
         <button class="nav-item" :class="{ active: section === 'system' }" @click="section = 'system'">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
           <span>系统运维</span>
-        </button>
-        <button class="nav-item" :class="{ active: section === 'llm_configs' }" @click="section = 'llm_configs'">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 0 1 10 10c0 2.5-1 4.7-2.5 6.3l1.5 3.7-4-1.5A10 10 0 1 1 12 2z"/><path d="M12 6v6l4 2"/></svg>
-          <span>LLM 配置</span>
         </button>
         <button class="nav-item" :class="{ active: section === 'conversations' }" @click="section = 'conversations'">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -149,11 +149,11 @@
                   <p class="stat-label">线程数</p>
                 </div>
               </div>
-              <div class="stat-card card-in">
+              <div class="stat-card card-in" style="cursor:pointer" title="点击查看任务明细" @click="openTaskDetail">
                 <span class="stat-icon" style="color:#81c784;"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>
                 <div class="stat-info">
                   <p class="stat-value" style="color:#81c784;">{{ metrics.concurrency?.active_tasks ?? '—' }}</p>
-                  <p class="stat-label">活跃任务</p>
+                  <p class="stat-label">活跃任务 ›</p>
                 </div>
               </div>
             </div>
@@ -257,6 +257,11 @@
           <div class="action-bar">
             <div class="action-info">
               <p class="action-title">批量操作</p>
+              <p class="action-sub">注册表在线：{{ registrySnapshot.length }} 台
+                <template v-if="registrySnapshot.length">
+                  （<span v-for="(r, i) in registrySnapshot" :key="r.key">{{ i > 0 ? '；' : '' }}key={{ r.key.slice(0, 18) }}… mac={{ r.mac || '—' }} {{ r.connected ? '已连接' : '未连接' }}</span>）
+                </template>
+              </p>
               <p class="action-sub">向所有在线设备执行唤醒 / 停止 / 语音广播</p>
             </div>
             <div class="row-actions">
@@ -271,13 +276,22 @@
             <div class="table-head">
               <div>
                 <h3 class="table-title">设备列表</h3>
-                <p class="table-sub">查看全部设备与归属，支持重命名和解绑</p>
+                <p class="table-sub">按用户筛选设备，支持重命名、解绑、封禁</p>
               </div>
-              <button class="btn btn-ghost" :disabled="loadingDevices" @click="loadDevices">刷新</button>
+              <div class="row-actions">
+                <select class="input input-sm select-sm" v-model="deviceOwnerFilter" @change="devicePage = 1">
+                  <option value="">全部用户（{{ devices.filter(d => d.owner_email).length }} 台已绑定）</option>
+                  <option value="__unbound__">未绑定设备</option>
+                  <option v-for="o in deviceOwners" :key="o.user_id" :value="o.user_id">
+                    {{ o.nickname || o.email }}（{{ o.count }} 台）
+                  </option>
+                </select>
+                <button class="btn btn-ghost" :disabled="loadingDevices" @click="loadDevices">刷新</button>
+              </div>
             </div>
 
             <div v-if="loadingDevices" class="table-empty">加载中…</div>
-            <div v-else-if="!devices.length" class="table-empty">暂无设备</div>
+            <div v-else-if="!filteredDevices.length" class="table-empty">该筛选条件下暂无设备</div>
             <div v-else class="table-wrap">
               <table>
                 <thead>
@@ -291,19 +305,24 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="d in devices" :key="d.device_id">
+                  <tr v-for="d in filteredDevices" :key="d.device_id">
                     <td data-label="设备">
                       <div class="cell-device">
                         <span class="device-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg></span>
                         <div class="cell-main">
-                          <input v-if="editingDevice === d.device_id" v-model="editDeviceForm.name" class="input input-sm" placeholder="设备名称" />
-                          <p v-else class="cell-title">{{ d.name || '未命名设备' }}</p>
+                          <p class="cell-title">{{ d.name || '未命名设备' }}</p>
                           <p class="cell-sub">{{ d.device_id }}</p>
                         </div>
                       </div>
                     </td>
                     <td data-label="MAC/标识" class="cell-muted">{{ d.mac || d.device_key || '—' }}</td>
-                    <td data-label="归属用户">{{ d.owner_email || '未绑定' }}</td>
+                    <td data-label="归属用户">
+                      <template v-if="d.owner_email || d.owner_nickname">
+                        <p class="cell-title">{{ d.owner_nickname || d.owner_email }}</p>
+                        <p class="cell-sub">{{ d.owner_nickname ? d.owner_email : '' }}</p>
+                      </template>
+                      <span v-else class="badge badge-sub">未绑定</span>
+                    </td>
                     <td data-label="状态">
                       <span class="badge" :class="d.online ? 'badge-mint' : 'badge-sub'">
                         <span class="dot" :class="{ on: d.online }"></span>{{ d.online ? '在线' : '离线' }}
@@ -312,11 +331,9 @@
                     <td data-label="绑定时间" class="cell-muted">{{ formatDate(d.bound_at) }}</td>
                     <td data-label="操作">
                       <div class="row-actions">
-                        <button v-if="editingDevice !== d.device_id" class="btn btn-ghost btn-xs" @click="startEditDevice(d)">重命名</button>
-                        <template v-else>
-                          <button class="btn btn-mint btn-xs" :disabled="savingDevice" @click="saveDevice(d)">保存</button>
-                          <button class="btn btn-ghost btn-xs" :disabled="savingDevice" @click="cancelEditDevice">取消</button>
-                        </template>
+                        <button class="btn btn-ghost btn-xs" :disabled="!d.online" @click="wakeupDevice(d)">唤醒</button>
+                        <button class="btn btn-ghost btn-xs" @click="openDeviceDetail(d)">详情</button>
+                        <button class="btn btn-ghost btn-xs" @click="openRenameDevice(d)">重命名</button>
                         <button v-if="!d.is_banned" class="btn btn-ghost btn-xs" style="color:var(--danger)" @click="banDevice(d)">封禁</button>
                         <button v-if="d.is_banned" class="btn btn-ghost btn-xs" style="color:#16a34a" @click="unbanDevice(d)">解封</button>
                         <button class="btn btn-danger btn-xs" :disabled="savingDevice" @click="unbindDevice(d)">解绑</button>
@@ -364,6 +381,8 @@
                     <th>版本</th>
                     <th>来源</th>
                     <th>状态</th>
+                    <th>作者/安装者</th>
+                    <th>使用设备</th>
                     <th>工具</th>
                     <th>操作</th>
                   </tr>
@@ -379,6 +398,22 @@
                     <td data-label="版本">{{ p.version }}</td>
                     <td data-label="来源">{{ p.source === 'installed' ? '已安装' : (p.source || '内置') }}</td>
                     <td data-label="状态"><span class="badge" :class="p.loaded ? 'badge-mint' : 'badge-sub'">{{ p.loaded ? '已加载' : '未加载' }}</span></td>
+                    <td data-label="作者/安装者">
+                      <template v-if="p.installed_by">
+                        <p class="cell-title">{{ p.installed_by }}</p>
+                        <p class="cell-sub">{{ formatDate(p.installed_at) }} 安装</p>
+                      </template>
+                      <span v-else-if="p.author" class="cell-muted">{{ p.author }}</span>
+                      <span v-else class="cell-muted">—</span>
+                    </td>
+                    <td data-label="使用设备">
+                      <template v-if="(p.used_by || []).length">
+                        <p v-for="u in p.used_by" :key="u.device_id" class="cell-sub" style="margin:0">
+                          {{ u.device_name || u.device_id.slice(0, 12) }}{{ u.owner_nickname || u.owner_email ? `（${u.owner_nickname || u.owner_email}）` : '' }}
+                        </p>
+                      </template>
+                      <span v-else class="cell-muted">—</span>
+                    </td>
                     <td data-label="工具" class="cell-muted">{{ (p.tools || []).join(', ') || '—' }}</td>
                     <td data-label="操作">
                       <div class="row-actions">
@@ -488,6 +523,78 @@
           </div>
         </section>
 
+        <!-- 固件管理 -->
+        <section v-else-if="section === 'firmware'" class="admin-section">
+          <div class="action-bar">
+            <div class="action-info">
+              <p class="action-title">固件上传</p>
+              <p class="action-sub">上传固件并登记 bin_id，上传后自动设为「启用中」，作为设备 OTA 自检的比对目标</p>
+            </div>
+          </div>
+          <div class="table-card" style="margin-bottom:14px">
+            <div class="modal-body" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:16px 20px">
+              <label class="btn btn-ghost btn-sm" style="cursor:pointer">
+                选择固件文件（.bin）
+                <input type="file" accept=".bin,.elf,.hex" hidden @change="onFirmwareFileChange" />
+              </label>
+              <span class="cell-sub" style="min-width:140px">{{ fwFile ? fwFile.name : '未选择文件' }}</span>
+              <input class="input input-sm" v-model="fwBinId" placeholder="固件 bin_id（必填）" style="width:220px" />
+              <input class="input input-sm" v-model="fwVersion" placeholder="版本号（可选）" style="width:140px" />
+              <button class="btn btn-mint btn-sm" :disabled="!fwFile || uploadingFw" @click="uploadFirmware">
+                {{ uploadingFw ? '上传中…' : '上传固件' }}
+              </button>
+            </div>
+          </div>
+
+          <div class="table-card">
+            <div class="table-head">
+              <div>
+                <h3 class="table-title">固件列表</h3>
+                <p class="table-sub">「启用中」的固件作为设备 OTA 自检的比对目标；设备检测到 bin_id 或版本不同即自动升级</p>
+              </div>
+              <button class="btn btn-ghost" :disabled="loadingFirmwares" @click="loadFirmwares">刷新</button>
+            </div>
+            <div v-if="loadingFirmwares" class="table-empty">加载中…</div>
+            <div v-else-if="!firmwares.length" class="table-empty">暂无固件，请先上传</div>
+            <div v-else class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>固件</th>
+                    <th>bin_id</th>
+                    <th>版本</th>
+                    <th>大小</th>
+                    <th>上传者</th>
+                    <th>上传时间</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="f in firmwares" :key="f.filename">
+                    <td data-label="固件"><strong>{{ f.filename }}</strong></td>
+                    <td data-label="bin_id"><span class="cell-sub">{{ f.bin_id || '—' }}</span></td>
+                    <td data-label="版本">{{ f.version || '—' }}</td>
+                    <td data-label="大小">{{ formatSize(f.size) }}</td>
+                    <td data-label="上传者">{{ f.uploaded_by || '—' }}</td>
+                    <td data-label="上传时间" class="cell-muted">{{ formatDate(f.uploaded_at || f.created_time) }}</td>
+                    <td data-label="状态">
+                      <span class="badge" :class="f.active ? 'badge-mint' : 'badge-sub'">{{ f.active ? '启用中' : '备用' }}</span>
+                    </td>
+                    <td data-label="操作">
+                      <div class="row-actions">
+                        <button v-if="!f.active" class="btn btn-ghost btn-xs" @click="setFirmwareActive(f)">设为启用</button>
+                        <a class="btn btn-ghost btn-xs" :href="f.download_url" target="_blank">下载</a>
+                        <button class="btn btn-danger btn-xs" @click="deleteFirmware(f)">删除</button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
         <!-- 系统运维 -->
         <section v-else-if="section === 'system'" class="admin-section">
           <div class="stat-grid">
@@ -540,12 +647,14 @@
           </div>
 
           <div class="table-card">
-            <div class="table-head">
+            <div class="table-head" style="cursor:pointer;user-select:none" @click="toggleBackups">
               <div>
-                <h3 class="table-title">备份列表</h3>
-                <p class="table-sub">最近数据库备份文件</p>
+                <h3 class="table-title">备份列表{{ showBackups ? '' : `（${backups.length} 个）` }}</h3>
+                <p class="table-sub">最近数据库备份文件，点击{{ showBackups ? '收起' : '展开' }}</p>
               </div>
+              <button class="btn btn-ghost btn-sm" @click.stop="toggleBackups">{{ showBackups ? '收起 ▴' : '展开 ▾' }}</button>
             </div>
+            <div v-if="showBackups">
             <div v-if="!backups.length" class="table-empty">暂无备份</div>
             <div v-else class="table-wrap">
               <table>
@@ -563,84 +672,19 @@
                 </tbody>
               </table>
             </div>
+            </div>
           </div>
 
-          <div class="table-card">
-            <div class="table-head">
+          <!-- 服务日志并入数据备份卡片，内嵌独立子卡片展示 -->
+          <div class="log-block">
+            <div class="table-head" style="border-bottom:1px solid var(--glass-border-soft)">
               <div>
-                <h3 class="table-title">服务日志</h3>
+                <h3 class="table-title" style="font-size:14px">服务日志</h3>
                 <p class="table-sub">最近 {{ logLines.length }} 行</p>
               </div>
-              <button class="btn btn-ghost" :disabled="loadingLogs" @click="loadLogs">刷新日志</button>
+              <button class="btn btn-ghost btn-sm" :disabled="loadingLogs" @click="loadLogs">刷新日志</button>
             </div>
             <pre class="log-view">{{ logLines.join('\n') || '暂无日志' }}</pre>
-          </div>
-        </section>
-
-        <!-- LLM 配置 -->
-        <section v-else-if="section === 'llm_configs'" class="admin-section">
-          <div class="action-bar">
-            <div class="action-info">
-              <p class="action-title">设备 LLM 配置</p>
-              <p class="action-sub">查看和编辑各设备的 LLM/ASR/TTS 参数，不配置则使用环境变量默认值</p>
-            </div>
-            <div class="row-actions">
-              <button class="btn btn-ghost" :disabled="loadingLlmConfigs" @click="loadLlmConfigs()">刷新</button>
-            </div>
-          </div>
-          <div class="table-card">
-            <div class="table-wrap">
-              <table>
-                <thead><tr><th>设备</th><th>LLM 类型</th><th>模型</th><th>ASR</th><th>TTS</th><th>记忆</th><th>操作</th></tr></thead>
-                <tbody>
-                  <tr v-for="c in llmConfigs" :key="c.device_id">
-                    <td data-label="设备"><strong>{{ c.name || c.device_id.slice(0,16) }}</strong></td>
-                    <td data-label="LLM 类型">{{ c.llm_type || '—' }}</td>
-                    <td data-label="模型">{{ c.llm_model || '—' }}</td>
-                    <td data-label="ASR">{{ c.asr_provider || '—' }}</td>
-                    <td data-label="TTS">{{ c.tts_type || '—' }}</td>
-                    <td data-label="记忆">{{ c.llm_memory_enabled ? '开' : '关' }}</td>
-                    <td data-label="操作"><button class="btn btn-ghost btn-xs" @click="editLlmConfig(c)">编辑</button></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div v-if="!llmConfigs.length" class="table-empty" style="padding:40px;text-align:center">
-              <p style="font-size:14px;font-weight:600;margin-bottom:8px">暂无设备 LLM 配置</p>
-              <p style="font-size:12px;color:var(--text-dim)">设备连接后，可在此查看和编辑各设备的 LLM/ASR/TTS 参数<br>不配置的设备会使用环境变量中的默认值</p>
-            </div>
-          </div>
-          <!-- 编辑弹窗 -->
-          <div v-if="llmEditVisible" class="modal-mask" @click.self="llmEditVisible = false">
-            <div class="modal-card">
-              <h3 class="modal-title">编辑 LLM 配置 - {{ llmEditTarget?.name || llmEditTarget?.device_id?.slice(0,16) }}</h3>
-              <div class="modal-body">
-                <label class="form-label">LLM 类型</label>
-                <input class="form-input" v-model="llmEditForm.llm_type" placeholder="如 openai / deepseek" />
-                <span class="form-hint">选择大模型提供商，如 openai、deepseek、qwen 等</span>
-                <label class="form-label">API Key</label>
-                <input class="form-input" v-model="llmEditForm.llm_api_key" placeholder="留空则不修改" />
-                <span class="form-hint">大模型 API 的密钥，留空保持原有值</span>
-                <label class="form-label">Base URL</label>
-                <input class="form-input" v-model="llmEditForm.llm_base_url" placeholder="如 https://api.openai.com/v1" />
-                <span class="form-hint">API 地址，兼容 OpenAI 格式的接口地址</span>
-                <label class="form-label">模型</label>
-                <input class="form-input" v-model="llmEditForm.llm_model" placeholder="如 gpt-4o / deepseek-chat" />
-                <span class="form-hint">使用的模型名称，需与 LLM 提供商匹配</span>
-                <label class="form-label">ASR 提供商</label>
-                <input class="form-input" v-model="llmEditForm.asr_provider" placeholder="如 volc / tencent" />
-                <span class="form-hint">语音识别服务商，如火山引擎(volc)、腾讯云(tencent)</span>
-                <label class="form-label">TTS 类型</label>
-                <input class="form-input" v-model="llmEditForm.tts_type" placeholder="如 volc_tts" />
-                <span class="form-hint">语音合成类型，如火山引擎TTS(volc_tts)</span>
-                <label class="form-checkbox"><input type="checkbox" v-model="llmEditForm.llm_memory_enabled" /> 开启记忆</label>
-                <span class="form-hint" style="margin-left:24px;margin-top:0">开启后设备会记住之前的对话内容</span>
-              </div>
-              <div class="modal-actions">
-                <button class="btn btn-mint" :disabled="savingLlmConfig" @click="saveLlmConfig()">{{ savingLlmConfig ? '保存中…' : '保存' }}</button>
-                <button class="btn btn-ghost" @click="llmEditVisible = false">取消</button>
-              </div>
-            </div>
           </div>
         </section>
 
@@ -659,17 +703,23 @@
               <button class="btn btn-ghost" :disabled="loadingConvs" @click="loadConversations()">刷新</button>
             </div>
           </div>
-          <div v-for="conv in conversations" :key="conv.device_id" class="table-card" style="margin-bottom:14px">
+          <div v-for="conv in conversations" :key="conv.device_key || conv.device_id" class="table-card" style="margin-bottom:14px">
             <div class="table-head">
-              <h3 class="table-title">{{ conv.device_name || conv.device_id.slice(0,16) }}</h3>
+              <h3 class="table-title">{{ conv.device_name || conv.device_id.slice(0,16) }}<span v-if="conv.owner_email" class="table-sub" style="margin-left:10px">归属：{{ conv.owner_email }}</span></h3>
               <span class="table-sub">{{ conv.messages?.length || 0 }} 条消息</span>
             </div>
             <div v-if="!conv.messages?.length" class="table-empty">暂无对话</div>
-            <div v-else class="conv-list">
-              <div v-for="(m, i) in conv.messages" :key="i" class="conv-item" :class="m.role">
-                <span class="conv-role">{{ m.role === 'user' ? '👤' : '🤖' }}</span>
-                <span class="conv-text">{{ m.content }}</span>
-                <span class="conv-time">{{ formatDate(m.timestamp) }}</span>
+            <div v-else class="chat-list">
+              <div v-for="(m, i) in conv.messages" :key="i" class="chat-row" :class="{ mine: m.role === 'user' }">
+                <div class="chat-avatar" :class="m.role">
+                  <!-- 设备/助手：机器人线性图标；用户：人形线性图标（与侧边栏图标风格一致） -->
+                  <svg v-if="m.role !== 'user'" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4m-2 0h4"/><circle cx="9" cy="13" r="0.5" fill="currentColor"/><circle cx="15" cy="13" r="0.5" fill="currentColor"/><path d="M9 17h6"/></svg>
+                  <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                </div>
+                <div class="chat-bubble-wrap">
+                  <div class="chat-bubble">{{ m.content }}</div>
+                  <div class="chat-time">{{ formatChatTime(m.timestamp) }}</div>
+                </div>
               </div>
             </div>
           </div>
@@ -738,7 +788,7 @@
                 <tbody>
                   <tr v-for="(check, name) in healthResult.checks" :key="name">
                     <td data-label="检查项"><strong>{{ name }}</strong></td>
-                    <td data-label="状态"><span class="status-badge" :class="check.status === 'ok' ? 'online' : 'offline'">{{ check.status === 'ok' ? '正常' : '异常' }}</span></td>
+                    <td data-label="状态"><span class="status-badge" :class="check.status === 'ok' ? 'online' : check.status === 'skipped' ? 'skipped' : 'offline'">{{ check.status === 'ok' ? '正常' : check.status === 'skipped' ? '跳过' : '异常' }}</span></td>
                     <td data-label="详情" class="cell-muted">{{ formatHealthDetail(check) }}</td>
                   </tr>
                 </tbody>
@@ -770,6 +820,13 @@
             <div v-if="!opLogs.length" class="table-empty" style="padding:40px;text-align:center">
             <p style="font-size:14px;font-weight:600;margin-bottom:8px">暂无操作日志</p>
             <p style="font-size:12px;color:var(--text-dim)">执行封禁/解封设备、更新系统设置等管理操作后，日志会自动记录在这里</p>
+          </div>
+          <div v-if="opTotalPages > 1" class="table-head" style="border-top:1px solid var(--glass-border-soft);border-bottom:none">
+            <span class="table-sub">共 {{ opTotal }} 条 · 第 {{ opPage }} / {{ opTotalPages }} 页</span>
+            <div class="row-actions">
+              <button class="btn btn-ghost btn-xs" :disabled="opPage <= 1" @click="opPage--; loadOpLogs()">上一页</button>
+              <button class="btn btn-ghost btn-xs" :disabled="opPage >= opTotalPages" @click="opPage++; loadOpLogs()">下一页</button>
+            </div>
           </div>
           </div>
         </section>
@@ -882,6 +939,144 @@
       </div>
     </main>
 
+    <!-- 设备详情弹窗 -->
+    <div v-if="detailModalVisible" class="modal-mask" @click.self="detailModalVisible = false">
+      <div class="modal-card" style="max-width:640px">
+        <div class="modal-head">
+          <span class="modal-title">设备详情</span>
+          <button class="modal-close" @click="detailModalVisible = false; stopDetailPoll()">×</button>
+        </div>
+        <div class="modal-body">
+          <div v-if="loadingDetail" class="modal-empty">加载中…</div>
+          <template v-else-if="deviceDetail">
+            <!-- 设备头部：图标 + 名称 + 状态 -->
+            <div class="device-hero">
+              <span class="device-avatar-lg">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+              </span>
+              <div class="cell-main">
+                <p class="cell-title">{{ deviceDetail.name || '未命名设备' }}</p>
+                <p class="cell-sub">{{ deviceDetail.device_id }}</p>
+              </div>
+              <div class="device-hero-right">
+                <span class="badge" :class="deviceDetail.online ? 'badge-mint' : 'badge-sub'">
+                  <span class="dot" :class="{ on: deviceDetail.online }"></span>{{ deviceDetail.online ? '在线' : '离线' }}
+                </span>
+                <span v-if="deviceDetail.is_banned" class="badge badge-danger">已封禁</span>
+                <p class="cell-sub">归属：{{ deviceDetail.owner_nickname || deviceDetail.owner_email || '未绑定' }}</p>
+              </div>
+            </div>
+
+            <!-- 运行时指标（与仪表盘同款卡片风格） -->
+            <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);gap:10px">
+              <div class="stat-card" style="padding:10px 12px">
+                <p class="stat-value" style="font-size:20px;color:var(--mint-deep)">{{ deviceDetail.online ? formatDuration(deviceDetail.online_seconds) : '—' }}</p>
+                <p class="stat-label">本次在线时长</p>
+              </div>
+              <div class="stat-card" style="padding:10px 12px">
+                <p class="stat-value" style="font-size:20px">{{ stateText }}</p>
+                <p class="stat-label">设备状态</p>
+              </div>
+              <div class="stat-card" style="padding:10px 12px">
+                <p class="stat-value" style="font-size:20px">{{ deviceDetail.ota_updating ? (deviceDetail.ota_progress || 0) + '%' : '空闲' }}</p>
+                <p class="stat-label">OTA 升级{{ deviceDetail.ota_updating ? '中' : '未进行' }}</p>
+                <div v-if="deviceDetail.ota_updating" class="ota-progress">
+                  <div class="ota-bar">
+                    <div class="ota-bar-fill" :style="{ width: (deviceDetail.ota_progress || 0) + '%' }"></div>
+                  </div>
+                  <p class="ota-status">{{ otaStatusText }}</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="row-actions" style="margin:10px 0 0;justify-content:flex-start">
+              <button class="btn btn-ghost btn-sm" :disabled="otaChecking" @click="checkOtaUpdate">
+                {{ otaChecking ? '检测中…' : '检测升级' }}
+              </button>
+              <button class="btn btn-mint btn-sm" :disabled="!deviceDetail.online || otaForcing" @click="forceOtaUpdate">
+                {{ otaForcing ? '下发中…' : '强制 OTA 升级' }}
+              </button>
+            </div>
+
+            <!-- 基本信息行 -->
+            <div class="detail-rows">
+              <div class="detail-row"><span class="detail-k">MAC / 标识</span><span class="cell-sub">{{ deviceDetail.mac || deviceDetail.device_key || '—' }}</span></div>
+              <div class="detail-row"><span class="detail-k">固件版本</span>{{ deviceDetail.firmware_version || '—' }}</div>
+              <div class="detail-row"><span class="detail-k">归属用户</span>
+                <template v-if="deviceDetail.owner_email || deviceDetail.owner_nickname">
+                  {{ deviceDetail.owner_nickname || deviceDetail.owner_email }}
+                  <span class="cell-sub" v-if="deviceDetail.owner_nickname">（{{ deviceDetail.owner_email }}）</span>
+                </template>
+                <span v-else class="cell-muted">未绑定</span>
+              </div>
+              <div class="detail-row"><span class="detail-k">绑定时间</span>{{ deviceDetail.bound_at ? formatDate(deviceDetail.bound_at) : '未知（早期绑定）' }}</div>
+              <div class="detail-row"><span class="detail-k">首次注册</span>{{ formatDate(deviceDetail.created_at) }}</div>
+              <div class="detail-row"><span class="detail-k">最后活跃</span>{{ formatDate(deviceDetail.last_seen) }}</div>
+              <div class="detail-row"><span class="detail-k">最后唤醒</span>{{ deviceDetail.last_wakeup_time ? formatDate(deviceDetail.last_wakeup_time) : '—' }}</div>
+              <div class="detail-row"><span class="detail-k">会话 ID</span><span class="cell-sub">{{ deviceDetail.session_id || '—' }}</span></div>
+              <div v-if="(deviceDetail.enabled_plugins || []).length" class="detail-row detail-row-full"
+                   :class="{ clickable: true }" :title="devicePluginsExpanded ? '点击收起' : '点击展开'"
+                   @click="devicePluginsExpanded = !devicePluginsExpanded">
+                <span class="detail-k">已启用插件</span>
+                <span v-if="!devicePluginsExpanded" class="plugin-chip">▸ {{ deviceDetail.enabled_plugins.length }} 个插件 · 点击展开</span>
+                <span v-else class="plugin-list">{{ deviceDetail.enabled_plugins.join('、') }} <span class="plugin-collapse">▴ 收起</span></span>
+              </div>
+              <div v-else class="detail-row"><span class="detail-k">已启用插件</span><span class="cell-muted">无</span></div>
+            </div>
+
+            <div class="row-actions" style="margin-top:18px;justify-content:flex-end">
+              <button class="btn btn-mint btn-sm" :disabled="!deviceDetail.online" @click="wakeupDevice(deviceDetail); refreshDetail()">远程唤醒</button>
+              <button class="btn btn-ghost btn-sm" @click="refreshDetail">刷新</button>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- 后台任务明细弹窗 -->
+    <div v-if="taskDetailVisible" class="modal-mask" @click.self="taskDetailVisible = false">
+      <div class="modal-card">
+        <div class="modal-head">
+          <span class="modal-title">后台任务明细（{{ taskDetailList.length }} 个实例）</span>
+          <button class="modal-close" @click="taskDetailVisible = false">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-tip">服务器当前正在运行的后台异步任务（记忆落盘、音频预热等），打开弹窗时实时获取</p>
+          <div v-if="loadingTaskDetail" class="modal-empty">获取中…</div>
+          <template v-else>
+            <div class="section-subtitle" style="font-size:13px">正在运行（{{ taskDetailList.reduce((n, g) => n + g.count, 0) }} 个）</div>
+            <div v-if="!taskDetailList.length" class="modal-empty" style="margin-bottom:16px">当前没有正在运行的后台任务</div>
+            <table v-else class="task-table" style="margin-bottom:16px">
+              <thead><tr><th>任务名称</th><th>实例数</th><th>最长运行</th></tr></thead>
+              <tbody>
+                <tr v-for="g in taskDetailList" :key="g.name">
+                  <td>{{ g.name }}</td>
+                  <td>× {{ g.count }}</td>
+                  <td class="cell-muted">{{ g.maxElapsed }}s</td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="section-subtitle" style="font-size:13px">最近完成（最新 {{ recentTaskList.length }} 条）</div>
+            <div v-if="!recentTaskList.length" class="modal-empty">暂无完成记录（服务启动后还没有后台任务跑完）</div>
+            <table v-else class="task-table">
+              <thead><tr><th>任务名称</th><th>耗时</th><th>结果</th><th>完成时间</th></tr></thead>
+              <tbody>
+                <tr v-for="(t, i) in recentTaskList" :key="i">
+                  <td>{{ t.name }}</td>
+                  <td class="cell-muted">{{ t.elapsed }}s</td>
+                  <td><span class="badge" :class="t.success ? 'badge-mint' : 'badge-danger'">{{ t.success ? '完成' : '失败' }}</span></td>
+                  <td class="cell-muted">{{ formatChatTime(t.ended_at) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </template>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-ghost" @click="taskDetailVisible = false">关闭</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 用户设备弹窗 -->
     <div v-if="deviceModalVisible" class="modal-mask" @click.self="deviceModalVisible = false">
       <div class="modal-card">
@@ -901,6 +1096,25 @@
         </div>
         <div class="modal-foot">
           <button class="btn btn-ghost" @click="deviceModalVisible = false">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 重命名设备弹窗 -->
+    <div v-if="renameModalVisible" class="modal-mask" @click.self="renameModalVisible = false">
+      <div class="modal-card" style="max-width:420px">
+        <div class="modal-head">
+          <span class="modal-title">重命名设备</span>
+          <button class="modal-close" @click="renameModalVisible = false">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-tip">为「{{ renameTarget?.device_id }}」设置新名称</p>
+          <input v-model="renameInput" class="input" placeholder="设备名称（留空则清除为未命名）"
+                 @keyup.enter="submitRenameDevice" style="width:100%" />
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-ghost" @click="renameModalVisible = false">取消</button>
+          <button class="btn btn-mint" :disabled="savingDevice" @click="submitRenameDevice">{{ savingDevice ? '保存中…' : '保存' }}</button>
         </div>
       </div>
     </div>
@@ -941,7 +1155,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { api, getUser, getToken } from '../api'
 
 const emit = defineEmits(['toast', 'back'])
@@ -959,18 +1173,42 @@ const savingUser = ref(false)
 
 const devices = ref([])
 const loadingDevices = ref(false)
-const editingDevice = ref('')
-const editDeviceForm = ref({})
 const savingDevice = ref(false)
+const renameModalVisible = ref(false)
+const renameTarget = ref(null)
+const renameInput = ref('')
+const deviceOwnerFilter = ref('')
+const registrySnapshot = ref([])
+
+// 按用户筛选设备：user_id → {nickname, email, count}
+const deviceOwners = computed(() => {
+  const map = new Map()
+  for (const d of devices.value) {
+    if (!d.user_id) continue
+    const cur = map.get(d.user_id) || { user_id: d.user_id, nickname: d.owner_nickname || '', email: d.owner_email || '', count: 0 }
+    cur.count++
+    if (!cur.nickname && d.owner_nickname) cur.nickname = d.owner_nickname
+    if (!cur.email && d.owner_email) cur.email = d.owner_email
+    map.set(d.user_id, cur)
+  }
+  return [...map.values()].sort((a, b) => b.count - a.count)
+})
+
+const filteredDevices = computed(() => {
+  if (!deviceOwnerFilter.value) return devices.value
+  if (deviceOwnerFilter.value === '__unbound__') return devices.value.filter(d => !d.user_id)
+  return devices.value.filter(d => d.user_id === deviceOwnerFilter.value)
+})
 
 const currentUserId = computed(() => getUser()?.user_id || '')
-const sectionTitle = computed(() => ({ stats: '仪表盘', users: '用户管理', devices: '设备管理', plugins: '插件管理', market: '市场管理', system: '系统运维', llm_configs: '全局配置', conversations: '对话记录', ws_monitor: '连接监控', health: '健康检查', oplogs: '操作日志', emojis: '表情包', tasks: '定时任务', export: '数据导出' }[section.value] || ''))
+const sectionTitle = computed(() => ({ stats: '仪表盘', users: '用户管理', devices: '设备管理', plugins: '插件管理', market: '市场管理', firmware: '固件管理', system: '系统运维', conversations: '对话记录', ws_monitor: '连接监控', health: '健康检查', oplogs: '操作日志', emojis: '表情包', tasks: '定时任务', export: '数据导出' }[section.value] || ''))
 	const sectionSub = computed(() => ({
 	  stats: '系统总览与服务性能',
 	  users: '管理角色、设备上限与账号状态',
 	  devices: '查看全部设备与归属，支持重命名、解绑、封禁',
 	  plugins: '上传 zip 安装插件、更新、卸载、热加载',
 	  market: '管理插件上下架与推荐状态',
+	  firmware: '上传固件、登记 bin_id、管理 OTA 比对目标',
 	  system: '数据库备份与服务日志',
 	  llm_configs: '查看和编辑各设备的 LLM/ASR/TTS 配置',
 	  conversations: '浏览所有设备的对话历史记录',
@@ -981,6 +1219,152 @@ const sectionTitle = computed(() => ({ stats: '仪表盘', users: '用户管理'
 	  tasks: '管理服务端定时任务',
 	  export: '导出用户/设备数据为 CSV',
 	}[section.value] || ''))
+
+const detailModalVisible = ref(false)
+const deviceDetail = ref(null)
+const loadingDetail = ref(false)
+const detailDeviceId = ref('')
+const devicePluginsExpanded = ref(false)
+
+const otaChecking = ref(false)
+const otaForcing = ref(false)
+
+// 检测升级：服务端比对该设备固件版本与 OTA 目标配置
+async function checkOtaUpdate() {
+  otaChecking.value = true
+  try {
+    const res = await api.adminDeviceOtaCheck(detailDeviceId.value)
+    if (res.status === 200 && res.data?.code === 0) {
+      const d = res.data.data
+      if (d.has_update) emit('toast', `发现新版本 ${d.target_version}（当前 ${d.current_version}），可执行强制升级`)
+      else emit('toast', d.reason || '已是最新版本')
+    } else emit('toast', res.data?.message || '检测失败')
+  } catch { emit('toast', '检测失败') }
+  otaChecking.value = false
+}
+
+// 强制升级：直接下发固件 URL，设备收到即下载刷写（跳过版本比对）
+async function forceOtaUpdate() {
+  const ok = await showConfirm({
+    title: '强制 OTA 升级',
+    message: '设备将立即从服务端配置的地址下载固件并刷写，升级期间设备会重启。确定继续吗？',
+    confirmText: '确认升级', danger: false,
+  })
+  if (!ok) return
+  otaForcing.value = true
+  try {
+    const res = await api.adminDeviceOtaForce(detailDeviceId.value)
+    if (res.status === 200 && res.data?.code === 0) {
+      emit('toast', res.data.message || '升级指令已下发')
+      startDetailPoll()  // 指令经 keepalive 下发，设备开始升级后持续轮询进度
+    } else emit('toast', res.data?.message || res.data?.detail || '下发失败')
+  } catch { emit('toast', '下发失败') }
+  otaForcing.value = false
+}
+
+// 设备状态中文映射（后端上报 FSM 枚举；离线时无状态可报）
+const stateText = computed(() => {
+  const d = deviceDetail.value
+  if (!d) return '—'
+  if (!d.online) return '离线'
+  const map = { idle: '空闲', asr: '聆听中', llm: '思考中', tts: '说话中' }
+  return map[d.device_state] || d.device_state || '未知'
+})
+
+// OTA 进度阶段文案（按百分比区分下载/刷写/重启）
+const otaStatusText = computed(() => {
+  const p = deviceDetail.value?.ota_progress || 0
+  if (p >= 100) return '刷写完成，设备重启中…'
+  if (p > 0) return '固件下载中…'
+  return '等待设备开始下载…'
+})
+
+function formatDuration(seconds) {
+  if (seconds == null) return '—'
+  const s = Math.floor(seconds)
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60)
+  if (d > 0) return `${d} 天 ${h} 小时 ${m} 分`
+  if (h > 0) return `${h} 小时 ${m} 分 ${s % 60} 秒`
+  return `${m} 分 ${s % 60} 秒`
+}
+
+let detailPollTimer = null
+let detailPollTicks = 0
+
+function stopDetailPoll() {
+  if (detailPollTimer) { clearInterval(detailPollTimer); detailPollTimer = null }
+}
+
+function startDetailPoll() {
+  stopDetailPoll()
+  detailPollTicks = 0
+  detailPollTimer = setInterval(async () => {
+    detailPollTicks++
+    if (!detailModalVisible.value) { stopDetailPoll(); return }
+    await refreshDetail(true)
+    // 升级未开始（指令还在下发路上）最多等 60 轮（90s）；开始升级后持续轮询到结束
+    if (!deviceDetail.value?.ota_updating && detailPollTicks > 60) stopDetailPoll()
+  }, 1500)
+}
+
+async function openDeviceDetail(d) {
+  detailDeviceId.value = d.device_id
+  deviceDetail.value = d  // 先用列表数据占位
+  devicePluginsExpanded.value = false
+  detailModalVisible.value = true
+  await refreshDetail()
+  // 打开时设备已在升级 → 持续轮询进度
+  if (deviceDetail.value?.ota_updating) startDetailPoll()
+}
+
+async function refreshDetail(silent = false) {
+  if (!detailDeviceId.value) return
+  if (!silent) loadingDetail.value = true
+  try {
+    const res = await api.adminDeviceDetail(detailDeviceId.value)
+    if (res.status === 200 && res.data?.code === 0) deviceDetail.value = res.data.data
+    else if (!silent) emit('toast', '加载设备详情失败')
+  } catch { if (!silent) emit('toast', '加载设备详情失败') }
+  if (!silent) loadingDetail.value = false
+}
+
+async function wakeupDevice(d) {
+  try {
+    const res = await api.adminDeviceWakeup(d.device_id)
+    if (res.status === 200 && res.data?.code === 0) emit('toast', `已发送唤醒指令到「${d.name || d.device_id}」`)
+    else emit('toast', res.data?.message || res.data?.detail || '唤醒失败')
+  } catch { emit('toast', '唤醒失败') }
+}
+
+const taskDetailVisible = ref(false)
+const taskDetailList = ref([])
+const recentTaskList = ref([])
+const loadingTaskDetail = ref(false)
+
+// 点击时实时请求最新指标（卡片数字来自上次刷新的快照，直接用会与明细对不上）
+async function openTaskDetail() {
+  taskDetailVisible.value = true
+  loadingTaskDetail.value = true
+  try {
+    const res = await api.adminMetrics()
+    if (res.status === 200 && res.data?.code === 0) {
+      const conc = res.data.data?.concurrency || {}
+      metrics.value = res.data.data  // 同步刷新卡片数字，保持一致
+      recentTaskList.value = conc.recent_task_list || []
+      const list = conc.active_task_list || []
+      // 按任务名称聚合：同名任务（如多个会话的 memory_save）计一条，显示实例数和最长运行时长
+      const map = new Map()
+      for (const t of list) {
+        const cur = map.get(t.name) || { name: t.name, count: 0, maxElapsed: 0 }
+        cur.count++
+        if ((t.elapsed || 0) > cur.maxElapsed) cur.maxElapsed = t.elapsed
+        map.set(t.name, cur)
+      }
+      taskDetailList.value = [...map.values()].sort((a, b) => b.count - a.count)
+    }
+  } catch { /* 弹窗内显示空态即可 */ }
+  loadingTaskDetail.value = false
+}
 
 const deviceModalVisible = ref(false)
 const deviceModalTitle = ref('')
@@ -1001,6 +1385,59 @@ function showConfirm(options) {
 function confirmOk() { const r = confirmData.value.resolve; confirmData.value = { show: false, title: '', message: '', confirmText: '确定', cancelText: '取消', danger: false, resolve: null }; r?.(true) }
 function confirmCancel() { const r = confirmData.value.resolve; confirmData.value = { show: false, title: '', message: '', confirmText: '确定', cancelText: '取消', danger: false, resolve: null }; r?.(false) }
 
+// 固件管理
+const firmwares = ref([])
+const loadingFirmwares = ref(false)
+const uploadingFw = ref(false)
+const fwFile = ref(null)
+const fwBinId = ref('')
+const fwVersion = ref('')
+
+async function loadFirmwares() {
+  loadingFirmwares.value = true
+  try {
+    const res = await api.adminFirmwares()
+    if (res.status === 200 && res.data?.code === 0) firmwares.value = res.data.data?.firmwares || []
+    else emit('toast', res.data?.message || '加载固件列表失败')
+  } catch { emit('toast', '加载固件列表失败') }
+  loadingFirmwares.value = false
+}
+
+function onFirmwareFileChange(e) { fwFile.value = e.target.files?.[0] || null }
+
+async function uploadFirmware() {
+  if (!fwFile.value) { emit('toast', '请先选择固件文件'); return }
+  if (!fwBinId.value.trim()) { emit('toast', '请填写固件 bin_id'); return }
+  uploadingFw.value = true
+  try {
+    const res = await api.adminFirmwareUpload(fwFile.value, fwBinId.value.trim(), fwVersion.value.trim())
+    if (res.status === 200 && res.data?.code === 0) {
+      emit('toast', res.data.message || '固件已上传并设为启用中')
+      fwFile.value = null; fwBinId.value = ''; fwVersion.value = ''
+      loadFirmwares()
+    } else emit('toast', res.data?.message || res.data?.detail || '上传失败')
+  } catch { emit('toast', '上传失败') }
+  uploadingFw.value = false
+}
+
+async function setFirmwareActive(f) {
+  try {
+    const res = await api.adminFirmwareSetActive(f.filename)
+    if (res.status === 200 && res.data?.code === 0) { emit('toast', '已启用固件 ' + f.filename); loadFirmwares() }
+    else emit('toast', res.data?.message || '操作失败')
+  } catch { emit('toast', '操作失败') }
+}
+
+async function deleteFirmware(f) {
+  const ok = await showConfirm({ title: '删除固件', message: `确定删除固件「${f.filename}」吗？此操作不可恢复。`, confirmText: '确认删除', danger: true })
+  if (!ok) return
+  try {
+    const res = await api.adminFirmwareDelete(f.filename)
+    if (res.status === 200 && res.data?.code === 0) { emit('toast', '固件已删除'); loadFirmwares() }
+    else emit('toast', res.data?.message || '删除失败')
+  } catch { emit('toast', '删除失败') }
+}
+
 const installedPlugins = ref([])
 const loadingPlugins = ref(false)
 const updatingPlugin = ref('')
@@ -1017,15 +1454,15 @@ const loadingLogs = ref(false)
 const backups = ref([])
 const loadingBackups = ref(false)
 const backingUp = ref(false)
+const showBackups = ref(false)
+
+function toggleBackups() {
+  showBackups.value = !showBackups.value
+  if (showBackups.value && !backups.value.length) loadBackups()
+}
 const broadcastText = ref('')
 
 // 新增板块状态
-const llmConfigs = ref([])
-const loadingLlmConfigs = ref(false)
-const llmEditVisible = ref(false)
-const llmEditTarget = ref(null)
-const llmEditForm = ref({})
-const savingLlmConfig = ref(false)
 const conversations = ref([])
 const loadingConvs = ref(false)
 const convDeviceFilter = ref('')
@@ -1036,6 +1473,9 @@ const healthResult = ref(null)
 const checkingHealth = ref(false)
 const opLogs = ref([])
 const loadingOplogs = ref(false)
+const opPage = ref(1)
+const opTotal = ref(0)
+const opTotalPages = ref(1)
 const emojiPacks = ref([])
 const loadingEmojis = ref(false)
 const scheduledTasks = ref([])
@@ -1082,7 +1522,10 @@ async function loadDevices() {
   loadingDevices.value = true
   try {
     const res = await api.adminDevices()
-    if (res.status === 200 && res.data?.code === 0) devices.value = res.data.data?.devices || []
+    if (res.status === 200 && res.data?.code === 0) {
+      devices.value = res.data.data?.devices || []
+      registrySnapshot.value = res.data.data?.registry_devices || []
+    }
     else emit('toast', res.data?.message || res.data?.detail || '加载设备失败')
   } catch { emit('toast', '加载设备失败') }
   loadingDevices.value = false
@@ -1149,15 +1592,25 @@ async function toggleDeveloper(u) {
   } catch { emit('toast', '操作失败') }
 }
 
-function startEditDevice(d) { editingDevice.value = d.device_id; editDeviceForm.value = { name: d.name || '' } }
-function cancelEditDevice() { editingDevice.value = ''; editDeviceForm.value = {} }
+function openRenameDevice(d) {
+  renameTarget.value = d
+  renameInput.value = d.name || ''
+  renameModalVisible.value = true
+}
 
-async function saveDevice(d) {
+async function submitRenameDevice() {
+  const d = renameTarget.value
+  if (!d) return
   savingDevice.value = true
   try {
-    const res = await api.adminUpdateDevice(d.device_id, editDeviceForm.value)
-    if (res.status === 200 && res.data?.code === 0) { emit('toast', '设备已更新'); cancelEditDevice(); loadDevices() }
-    else emit('toast', res.data?.message || res.data?.detail || '保存失败')
+    const res = await api.adminUpdateDevice(d.device_id, { name: renameInput.value })
+    if (res.status === 200 && res.data?.code === 0) {
+      emit('toast', '设备已重命名')
+      renameModalVisible.value = false
+      renameTarget.value = null
+      loadDevices()
+      if (detailModalVisible.value) refreshDetail()
+    } else emit('toast', res.data?.message || res.data?.detail || '保存失败')
   } catch { emit('toast', '保存失败') }
   savingDevice.value = false
 }
@@ -1278,8 +1731,13 @@ async function loadLogs() {
   loadingLogs.value = true
   try {
     const res = await api.adminLogs(300)
-    if (res.status === 200 && res.data?.code === 0) logLines.value = res.data.data?.lines || []
-    else emit('toast', res.data?.message || res.data?.detail || '加载日志失败')
+    if (res.status === 200 && res.data?.code === 0) {
+      logLines.value = res.data.data?.lines || []
+      // 最新日志在尾部：渲染后滚到底部
+      await nextTick()
+      const el = document.querySelector('.log-view')
+      if (el) el.scrollTop = el.scrollHeight
+    } else emit('toast', res.data?.message || res.data?.detail || '加载日志失败')
   } catch { emit('toast', '加载日志失败') }
   loadingLogs.value = false
 }
@@ -1375,47 +1833,22 @@ async function unbanDevice(d) {
   } catch { emit('toast', '解封失败') }
 }
 
-// LLM 配置
-async function loadLlmConfigs() {
-  loadingLlmConfigs.value = true
-  try {
-    const res = await api.adminLlmConfigs()
-    if (res.status === 200 && res.data?.code === 0) llmConfigs.value = res.data.data?.configs || []
-    else emit('toast', '加载设备 LLM 配置失败')
-  } catch { emit('toast', '加载设备 LLM 配置失败') }
-  loadingLlmConfigs.value = false
-}
-
-function editLlmConfig(c) {
-  llmEditTarget.value = c
-  llmEditForm.value = { 
-    llm_type: c.llm_type || '', llm_api_key: '', llm_base_url: c.llm_base_url || '', 
-    llm_model: c.llm_model || '', asr_provider: c.asr_provider || '', tts_type: c.tts_type || '',
-    llm_memory_enabled: c.llm_memory_enabled !== false
-  }
-  llmEditVisible.value = true
-}
-
-async function saveLlmConfig() {
-  savingLlmConfig.value = true
-  try {
-    const data = { ...llmEditForm.value }
-    if (!data.llm_api_key) delete data.llm_api_key
-    const res = await api.adminUpdateLlmConfig(llmEditTarget.value.device_id, data)
-    if (res.status === 200 && res.data?.code === 0) { emit('toast', 'LLM 配置已更新'); llmEditVisible.value = false; loadLlmConfigs() }
-    else emit('toast', res.data?.message || res.data?.detail || '保存失败')
-  } catch { emit('toast', '保存失败') }
-  savingLlmConfig.value = false
-}
-
 // 对话记录
 async function loadConversations() {
   loadingConvs.value = true
   try {
     const params = convDeviceFilter.value ? { device_id: convDeviceFilter.value } : {}
     const res = await api.adminConversations(params)
-    if (res.status === 200 && res.data?.code === 0) conversations.value = res.data.data?.conversations || []
-    else emit('toast', '加载对话记录失败')
+    if (res.status === 200 && res.data?.code === 0) {
+      conversations.value = (res.data.data?.conversations || []).map(c => ({
+        ...c,
+        // 显式按时间升序：最新消息固定在最下面（微信习惯）
+        messages: [...(c.messages || [])].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)),
+      }))
+      // 渲染后滚动到底部，直接看到最新消息
+      await nextTick()
+      document.querySelectorAll('.chat-list').forEach(el => { el.scrollTop = el.scrollHeight })
+    } else emit('toast', '加载对话记录失败')
   } catch { emit('toast', '加载对话记录失败') }
   loadingConvs.value = false
 }
@@ -1442,14 +1875,25 @@ async function runHealthCheck() {
   checkingHealth.value = false
 }
 
+function fmtSvc(s) {
+  if (!s) return '—'
+  if (s.status === 'ok') return `正常(${s.latency_ms}ms)`
+  if (s.status === 'skipped') return '未配置'
+  return '异常'
+}
+
 function formatHealthDetail(check) {
+  if (check.llm !== undefined) return `LLM ${fmtSvc(check.llm)} / TTS ${fmtSvc(check.tts)} / ASR ${fmtSvc(check.asr)}`
   if (check.status === 'ok') {
     if (check.latency_ms !== undefined) return `延迟 ${check.latency_ms}ms`
     if (check.free_gb !== undefined) return `总量 ${check.total_gb}GB, 剩余 ${check.free_gb}GB, 使用 ${check.usage_pct}%`
     if (check.device_count !== undefined) return `${check.device_count} 个设备`
     if (check.asr_configured !== undefined) return `ASR ${check.asr_configured} / LLM ${check.llm_configured} / TTS ${check.tts_configured}`
+    if (check.process_memory_mb !== undefined) return `进程内存 ${check.process_memory_mb}MB / CPU ${check.process_cpu_pct}% / 系统内存 ${check.system_memory_used_pct}%`
+    if (check.online_devices !== undefined) return `在线 ${check.online_devices} 台 / ASR池 ${check.asr_pools} / TTS池 ${check.tts_pools} / 30分钟错误 ${check.errors_last_30m}`
     return '正常'
   }
+  if (check.status === 'skipped') return check.reason || '跳过'
   return check.message || '异常'
 }
 
@@ -1457,9 +1901,15 @@ function formatHealthDetail(check) {
 async function loadOpLogs() {
   loadingOplogs.value = true
   try {
-    const res = await api.adminOpLogs()
-    if (res.status === 200 && res.data?.code === 0) opLogs.value = res.data.data?.logs || []
-    else emit('toast', '加载操作日志失败')
+    const res = await api.adminOpLogs({ page: opPage.value, page_size: 20 })
+    if (res.status === 200 && res.data?.code === 0) {
+      const d = res.data.data || {}
+      opLogs.value = d.logs || []
+      opTotal.value = d.total || 0
+      opTotalPages.value = d.total_pages || 1
+      // 当前页被删空时回退一页
+      if (!opLogs.value.length && opPage.value > 1) { opPage.value--; loadOpLogs(); return }
+    } else emit('toast', '加载操作日志失败')
   } catch { emit('toast', '加载操作日志失败') }
   loadingOplogs.value = false
 }
@@ -1555,6 +2005,20 @@ async function loadAllDevices() {
   } catch {}
 }
 
+// 聊天时间：今天只显示 时:分，昨天显示"昨天 时:分"，更早显示 日期 时:分
+function formatChatTime(ts) {
+  if (!ts) return ''
+  const d = new Date(ts * 1000)
+  const now = new Date()
+  const p = n => String(n).padStart(2, '0')
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`
+  const sameDay = d.toDateString() === now.toDateString()
+  if (sameDay) return hm
+  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1)
+  if (d.toDateString() === yesterday.toDateString()) return `昨天 ${hm}`
+  return `${d.getMonth() + 1}-${p(d.getDate())} ${hm}`
+}
+
 function formatDate(ts) {
   if (!ts) return '—'
   const d = new Date(ts * 1000)
@@ -1566,8 +2030,8 @@ onMounted(loadAll)
 watch(section, (val) => {
   if (val === 'plugins') loadInstalledPlugins()
   else if (val === 'market') { loadMarketplacePlugins(); loadMarketplaceReviews() }
+  else if (val === 'firmware') loadFirmwares()
   else if (val === 'system') { loadSystemInfo(); loadBackups(); loadLogs() }
-  else if (val === 'llm_configs') loadLlmConfigs()
   else if (val === 'conversations') { loadAllDevices(); loadConversations() }
   else if (val === 'ws_monitor') loadWsStatus()
   else if (val === 'oplogs') loadOpLogs()
@@ -1778,7 +2242,9 @@ watch(section, (val) => {
 }
 .stat-icon { font-size: 28px; filter: drop-shadow(0 4px 8px rgba(16,185,129,.18)); display: inline-flex; align-items: center; justify-content: center; color: var(--mint-deep); }
 .stat-info { display: flex; flex-direction: column; gap: 2px; position: relative; }
-.stat-value { font-size: 28px; font-weight: 800; line-height: 1.1; letter-spacing: -0.5px; }
+.stat-value { font-size: 28px; font-weight: 800; line-height: 1.1; letter-spacing: -0.5px; overflow-wrap: anywhere; word-break: break-word; }
+.stat-info { min-width: 0; }
+.stat-card { min-width: 0; }
 .stat-label { font-size: 12px; color: var(--text-sub); }
 
 .section-subtitle {
@@ -1922,17 +2388,23 @@ tbody tr:hover { background: var(--mint-softer); }
 .upload-btn { cursor: pointer; }
 .broadcast-input { width: 220px; }
 
+/* 服务日志：备份卡片内的内嵌子卡片（浅色玻璃拟态，与主体一致） */
+.log-block {
+  margin: 0;
+  border-top: 1px solid var(--glass-border-soft);
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  overflow: hidden;
+  background: #0d1117;
+}
 .log-view {
-  max-height: 360px; overflow: auto;
-  padding: 16px 20px; margin: 0;
-  background: rgba(15, 23, 42, 0.92);
-  color: #d1fae5;
+  max-height: 320px; overflow: auto;
+  padding: 14px 18px; margin: 0;
+  background: transparent;
+  color: #c9d1d9;
   font-family: 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
   font-size: 12px; line-height: 1.6;
   white-space: pre-wrap; word-break: break-all;
   max-width: 100%; box-sizing: border-box;
-  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
-  border-top: 1px solid var(--glass-border-soft);
 }
 
 /* ===== 弹窗 ===== */
@@ -1972,6 +2444,36 @@ tbody tr:hover { background: var(--mint-softer); }
 }
 .modal-body { padding: 20px; max-height: 60vh; overflow-y: auto; }
 .modal-empty, .modal-tip { font-size: 13px; color: var(--text-sub); }
+.device-hero { display: flex; align-items: center; gap: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--glass-border-soft); margin-bottom: 14px; }
+.device-avatar-lg { width: 46px; height: 46px; border-radius: 12px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; background: var(--mint-soft); color: var(--mint-deep); }
+.device-hero-right { margin-left: auto; text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.detail-rows { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 20px; margin-top: 10px; padding: 10px 14px; background: var(--glass-bg-soft); border-radius: var(--radius-md); }
+.detail-rows .detail-row { min-width: 0; font-size: 12px; }
+.detail-rows .cell-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; max-width: 100%; vertical-align: bottom; }
+.detail-row-full { grid-column: 1 / -1; }
+.ota-progress { margin-top: 8px; }
+.ota-bar { height: 10px; border-radius: 5px; overflow: hidden; background: rgba(18, 33, 46, 0.1); position: relative; }
+.ota-bar-fill { height: 100%; background: var(--grad-mint); border-radius: 5px; transition: width .4s var(--ease); position: relative; overflow: hidden; }
+.ota-bar-fill::after { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.35), transparent); animation: ota-shimmer 1.2s infinite; }
+@keyframes ota-shimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+.ota-status { margin-top: 4px; font-size: 11px; color: var(--mint-deep); font-weight: 600; }
+.detail-row-full.clickable { cursor: pointer; border-radius: 8px; transition: background .15s var(--ease); }
+.detail-row-full.clickable:hover { background: var(--mint-softer); }
+.plugin-chip {
+  display: inline-flex; align-items: center;
+  padding: 3px 10px; border-radius: 20px;
+  background: var(--mint-soft); color: var(--mint-deep);
+  font-size: 12px; font-weight: 600;
+}
+.plugin-list { color: var(--text-main); }
+.plugin-collapse { color: var(--text-dim); font-size: 11px; margin-left: 8px; }
+.device-hero { padding-bottom: 10px; margin-bottom: 10px; }
+.device-avatar-lg { width: 38px; height: 38px; border-radius: 10px; }
+.detail-row { display: flex; align-items: baseline; gap: 14px; font-size: 13px; color: var(--text-main); }
+.detail-k { flex-shrink: 0; width: 88px; color: var(--text-dim); font-size: 12px; }
+.task-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.task-table th, .task-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--glass-border-soft); }
+.task-table th { color: var(--text-dim); font-weight: 600; font-size: 12px; }
 .modal-tip { margin-bottom: 12px; }
 .modal-foot {
   display: flex; justify-content: flex-end; gap: 8px;
@@ -2095,7 +2597,7 @@ tbody tr:hover { background: var(--mint-softer); }
   .broadcast-input { width: 100%; }
   .row-actions { flex-wrap: wrap; }
   .section-subtitle { font-size: 13px; }
-  .log-view { max-height: 240px; font-size: 11px; padding: 12px 14px; }
+  .log-view { max-height: 150px; font-size: 11px; padding: 12px 14px; }
 }
 
 @media (max-width: 480px) {
@@ -2126,17 +2628,34 @@ tbody tr:hover { background: var(--mint-softer); }
   th, td { padding: 16px 22px; font-size: 14px; }
 }
 /* ===== 新增板块样式 ===== */
-.conv-list { padding: 0; margin: 0; }
-.conv-item { display: flex; align-items: flex-start; gap: 10px; padding: 10px 20px; border-bottom: 1px solid var(--glass-border-soft); font-size: 13px; }
-.conv-item:last-child { border-bottom: none; }
-.conv-item.user { background: rgba(16,185,129,0.03); }
-.conv-item.assistant { background: transparent; }
-.conv-role { font-size: 16px; flex-shrink: 0; width: 28px; text-align: center; }
-.conv-text { flex: 1; min-width: 0; word-break: break-all; line-height: 1.5; }
-.conv-time { font-size: 11px; color: var(--text-dim); flex-shrink: 0; white-space: nowrap; }
+/* ===== 对话记录：微信式聊天气泡 ===== */
+.chat-list { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; max-height: 560px; overflow-y: auto; }
+.chat-row { display: flex; align-items: flex-start; gap: 10px; }
+.chat-row.mine { flex-direction: row-reverse; }
+.chat-avatar { width: 34px; height: 34px; border-radius: 8px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; color: var(--text-dim); background: var(--glass-soft, rgba(0,0,0,0.04)); border: 1px solid var(--glass-border-soft); }
+.chat-avatar.assistant { color: var(--mint-deep, #0d9488); }
+.chat-avatar.user { color: var(--brand, #6366f1); }
+.chat-bubble-wrap { display: flex; flex-direction: column; max-width: 72%; }
+.chat-row.mine .chat-bubble-wrap { align-items: flex-end; }
+.chat-bubble {
+  padding: 9px 13px; border-radius: 12px; font-size: 13px; line-height: 1.6;
+  word-break: break-word; white-space: pre-wrap; width: fit-content;
+}
+.chat-row:not(.mine) .chat-bubble {
+  background: var(--glass-soft, rgba(0,0,0,0.04));
+  border: 1px solid var(--glass-border-soft);
+  border-top-left-radius: 4px;
+}
+.chat-row.mine .chat-bubble {
+  background: var(--grad-mint, linear-gradient(135deg, #34d399, #0d9488));
+  color: #fff;
+  border-top-right-radius: 4px;
+}
+.chat-time { font-size: 11px; color: var(--text-dim); margin-top: 4px; padding: 0 4px; }
 .status-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
 .status-badge.online { background: rgba(34,197,94,0.12); color: #16a34a; }
 .status-badge.offline { background: rgba(239,68,68,0.1); color: #dc2626; }
+.status-badge.skipped { background: rgba(148,163,184,0.12); color: #64748b; }
 .form-label { font-size: 12px; font-weight: 600; color: var(--text-sub); margin-top: 8px; }
 .form-label:first-child { margin-top: 0; }
 .form-input { width: 100%; padding: 8px 12px; border: 1px solid var(--glass-border); border-radius: 8px; font-size: 13px; background: rgba(255,255,255,0.6); color: var(--text-main); outline: none; transition: border .2s; box-sizing: border-box; }

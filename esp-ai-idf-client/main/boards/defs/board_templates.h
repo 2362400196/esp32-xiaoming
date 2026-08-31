@@ -32,6 +32,7 @@
 #pragma once
 
 #include "boards/board_interface.h"
+#include "boards/extras/extras_led.h"  // BOARD_EXTRAS_LED 组件接口
 
 // ==================== ES8311 默认配置 ====================
 
@@ -195,6 +196,27 @@ static const es8311_config_t ES8311_CFG = {
 /** 无扩展组件（触摸屏/LED/传感器等） */
 #define BOARD_EXTRAS_NONE() \
     .extras = NULL
+
+/**
+ * 状态 LED 扩展组件（extras_led，首个真实组件示例）
+ * 服务端指令: led_set / led_get；事件: 唤醒时双闪两次
+ *
+ * @param gpio       LED 引脚
+ * @param active_low true: 低电平点亮
+ *
+ * 多组件挂载示例（数组逗号分隔，NULL 结尾）：
+ *   .extras = (const board_extra_t *const[]){ &xxx_component, NULL }
+ */
+#define BOARD_EXTRAS_LED(gpio_, active_low_) \
+    .extras = (const board_extra_t *const[]){ \
+        &(const board_extra_t){ \
+            .type = "led", \
+            .config = &(const led_extra_config_t){ .gpio = (gpio_), .active_low = (active_low_) }, \
+            .init = extras_led_init, \
+            .deinit = extras_led_deinit, \
+            .handle_command = extras_led_command, \
+            .on_event = extras_led_on_event }, \
+        NULL }
 
 // ==================== 基模板 ====================
 // 注意：C++ 指定初始化器要求按结构体声明顺序赋值，且禁止重复赋值。
