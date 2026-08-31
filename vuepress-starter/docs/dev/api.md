@@ -328,6 +328,28 @@ curl -X POST http://localhost:8088/api/v1/devices/5d47bb925ea440b3b/ota \
   -d '{"url": "http://192.168.1.100:8088/firmware/1.0.bin", "version": "1.0.0", "bin_id": "abc123"}'
 ```
 
+#### 管理端固件上传（`/api/v1/admin/firmwares/upload`）
+
+上传固件并登记 bin_id（multipart/form-data，需管理员 JWT），上传后自动设为「启用中」，作为设备 OTA 自检的比对目标：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `file` | file | 是 | 固件文件（.bin/.elf/.hex，≤32MB）|
+| `bin_id_mode` | string | 否 | `auto`（自动识别，默认）/ `custom`（自定义输入）|
+| `bin_id` | string | 否 | 自定义 bin_id（`bin_id_mode=custom` 时必填）|
+| `version` | string | 否 | 版本号 |
+
+- **自动识别（auto）**：从固件二进制中提取板卡编译的 bin_id（32 位十六进制，即 `board_config_t.bin_id`，与设备 OTA 上报的 ID 一致）；提取不到时回退为文件名主干（冲突追加时间戳）。
+- **自定义输入（custom）**：使用 `bin_id` 字段传入的值。
+
+```bash
+curl -X POST http://localhost:8088/api/v1/admin/firmwares/upload \
+  -H "Authorization: Bearer <token>" \
+  -F "file=@esp32s3-xiaoming-a1b2c3d.bin" \
+  -F "bin_id_mode=auto" \
+  -F "version=1.0.0"
+```
+
 ### 远程 WiFi
 
 **POST** `/api/v1/devices/{mac}/wifi`

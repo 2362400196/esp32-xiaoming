@@ -207,11 +207,12 @@ getActiveEmoPack: (deviceId) => request('/api/v1/emos/active/' + encodeURICompon
     adminMarketplaceReviews: () => request('/api/v1/admin/marketplace/reviews'),
     adminDeleteMarketplaceReview: (reviewId) => request('/api/v1/admin/marketplace/reviews/' + encodeURIComponent(reviewId), 'DELETE'),
     adminFirmwares: () => request('/api/v1/admin/firmwares'),
-    adminFirmwareUpload: (file, binId, version) => {
+    adminFirmwareUpload: (file, binId, version, binIdMode = 'auto') => {
       const token = getToken()
       const formData = new FormData()
       formData.append('file', file)
       formData.append('bin_id', binId || '')
+      formData.append('bin_id_mode', binIdMode || 'auto')
       formData.append('version', version || '')
       return fetch('/api/v1/admin/firmwares/upload', {
         method: 'POST',

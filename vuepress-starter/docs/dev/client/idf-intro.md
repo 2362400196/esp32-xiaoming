@@ -202,8 +202,8 @@ main/
 │   │   ├── tools/gen_boards.py # 板型自动生成脚本
 │   │   └── defs/               # ★ 板型定义（一个文件一个板型）
 │   │       ├── board_templates.h
-│   │       ├── breadboard.h
-│   │       └── breadboard_1.54_lcd.h
+│   │       ├── esp32s3_breadboard.h
+│   │       └── esp32s3_breadboard_1.54_lcd.h
 │
 ├── 工具模块
 │   ├── ota_update.c            # OTA 空中升级

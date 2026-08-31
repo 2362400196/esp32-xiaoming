@@ -131,7 +131,7 @@ esp-ai-idf-client/
 │       ├── lyric_commands.c    # 歌词显示指令
 │       └── volume_commands.c   # 音量控制指令
 └── components/                 # 板级支持包
-    └── breadboard_1_54_lcd/   # 1.54寸 LCD 板级定义
+    └── esp32s3_breadboard_1_54_lcd/   # 1.54寸 LCD 板级定义
 ```
 
 ## 常用指令（服务器下发）

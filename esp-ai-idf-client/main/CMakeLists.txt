@@ -94,3 +94,34 @@ add_custom_target(gen_boards DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/boards/board_select.h"
 )
 add_dependencies(${COMPONENT_LIB} gen_boards)
+
+# ==================== bin_id 自动生成 ====================
+# bin_id = md5(板卡名 + git commit 短哈希)，编译期注入 BOARD_BIN_ID 宏：
+# - 不同板卡 / 不同 commit → 不同 bin_id（OTA 能识别新版本）
+# - 同一板卡同一 commit 重复编译 → bin_id 稳定（避免 OTA 无限升级）
+execute_process(
+    COMMAND git rev-parse --short=12 HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_COMMIT_SHORT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE GIT_COMMIT_RESULT
+)
+if(NOT GIT_COMMIT_RESULT EQUAL 0 OR GIT_COMMIT_SHORT STREQUAL "")
+    set(GIT_COMMIT_SHORT "unknown")
+endif()
+
+# 检测当前选中的板卡（CONFIG_BOARD_<NAME>=y）
+set(ACTIVE_BOARD_NAME "unknown")
+foreach(_def ${BOARD_DEF_FILES})
+    get_filename_component(_base ${_def} NAME_WE)
+    string(TOUPPER "${_base}" _base_upper)
+    string(REPLACE "." "_" _cfg "${_base_upper}")
+    if(CONFIG_BOARD_${_cfg})
+        set(ACTIVE_BOARD_NAME "${_base}")
+    endif()
+endforeach()
+
+string(MD5 BOARD_BIN_ID "${ACTIVE_BOARD_NAME}_${GIT_COMMIT_SHORT}")
+message(STATUS "固件 bin_id (自动生成): ${BOARD_BIN_ID} (板卡=${ACTIVE_BOARD_NAME}, commit=${GIT_COMMIT_SHORT})")
+add_definitions(-DBOARD_BIN_ID="${BOARD_BIN_ID}")

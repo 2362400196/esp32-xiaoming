@@ -6,7 +6,7 @@
  * - GIF 动画表情
  * - 中文字幕显示
  *
- * 适用于带屏幕的板型（如 breadboard_1.54_lcd）
+ * 适用于带屏幕的板型（如 esp32s3_breadboard_1.54_lcd）
  */
 #pragma once
 

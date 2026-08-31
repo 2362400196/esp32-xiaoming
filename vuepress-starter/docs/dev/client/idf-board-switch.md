@@ -8,14 +8,14 @@
 
 | 选项 | 说明 | 适用场景 |
 |------|------|---------|
-| `面包板无屏幕 (breadboard)` | ESP32-S3 面包板(无屏幕) | 低成本方案,无显示需求 |
-| `面包板 1.54寸 LCD (breadboard_1.54_lcd)` | ESP32-S3 面包板 + 1.54 寸 TFT 屏幕 | **连自定义服务(自建 esp-ai-server)推荐**,`sdkconfig.defaults` 默认选择 |
-| `面包板 1.54寸 LCD 官方服务版 (breadboard_1.54_lcd_official)` | 同上硬件,官方服务适配 | **连官方服务(espai.fun)推荐** |
+| `面包板无屏幕 (esp32s3_breadboard)` | ESP32-S3 面包板(无屏幕) | 低成本方案,无显示需求 |
+| `面包板 1.54寸 LCD (esp32s3_breadboard_1.54_lcd)` | ESP32-S3 面包板 + 1.54 寸 TFT 屏幕 | **连自定义服务(自建 esp-ai-server)推荐**,`sdkconfig.defaults` 默认选择 |
+| `面包板 1.54寸 LCD 官方服务版 (esp32s3_breadboard_1.54_lcd_official)` | 同上硬件,官方服务适配 | **连官方服务(espai.fun)推荐** |
 | `ESP32-C3 SuperMini (esp32c3_supermini)` | **不同芯片**(ESP32-C3),单核无 PSRAM,无屏,ES8311 全双工 | 低成本 C3 板,需先 `idf.py set-target esp32c3` |
 
 ## 板型差异
 
-| 差异点 | 普通板 `breadboard_1.54_lcd` | 官方服务版 `breadboard_1.54_lcd_official` |
+| 差异点 | 普通板 `esp32s3_breadboard_1.54_lcd` | 官方服务版 `esp32s3_breadboard_1.54_lcd_official` |
 |--------|-----------------------------|-------------------------------------------|
 | 默认服务器 | 无配置时连本地默认地址 | 无配置时连官方 `node.espai.fun` |
 | 表情 | 可下载服务端表情包(下载失败回退内置) | 只用编译内置表情,忽略 `refresh_emo` |
@@ -23,7 +23,7 @@
 | 流控上报 | 剩余空间语义 | 已缓冲字节语义 |
 | OTA bin_id | 普通板 ID | 官方板独立 ID |
 
-> **选择建议**:用**自定义服务(自建 esp-ai-server)就编译普通板 `breadboard_1.54_lcd`**——自定义服务是完整适配重点,表情可下载、行为与 Arduino 官方客户端一致;用官方云服务(espai.fun)才需要官方服务版。两块板型连自定义服务时都能正常对话,差异仅在表情下载与 OTA 标识。
+> **选择建议**:用**自定义服务(自建 esp-ai-server)就编译普通板 `esp32s3_breadboard_1.54_lcd`**——自定义服务是完整适配重点,表情可下载、行为与 Arduino 官方客户端一致;用官方云服务(espai.fun)才需要官方服务版。两块板型连自定义服务时都能正常对话,差异仅在表情下载与 OTA 标识。
 
 ## ESP32-C3 板型说明（跨芯片切换）
 
@@ -65,8 +65,8 @@ idf.py menuconfig
 编辑 `sdkconfig`(或 `sdkconfig.board`),把板型配置换成目标板。例如从官方服务版切回普通板:
 
 ```
-# CONFIG_BOARD_BREADBOARD_1_54_LCD_OFFICIAL is not set
-CONFIG_BOARD_BREADBOARD_1_54_LCD=y
+# CONFIG_BOARD_ESP32S3_BREADBOARD_1_54_LCD_OFFICIAL is not set
+CONFIG_BOARD_ESP32S3_BREADBOARD_1_54_LCD=y
 ```
 
 ### 方式三:删除 `sdkconfig` 重新生成

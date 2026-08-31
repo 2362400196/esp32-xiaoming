@@ -5,7 +5,7 @@
 
 choice BOARD_TYPE
     prompt "选择开发板型号"
-    default BOARD_BREADBOARD
+    default BOARD_ESP32C3_SUPERMINI
 
     # --- ESP32C3 ---
     config BOARD_ESP32C3_SUPERMINI
@@ -13,16 +13,16 @@ choice BOARD_TYPE
         depends on IDF_TARGET_ESP32C3
 
     # --- ESP32S3 ---
-    config BOARD_BREADBOARD
-        bool "[ESP32S3] breadboard - ESP32-S3 面包板 (无屏幕)"
+    config BOARD_ESP32S3_BREADBOARD
+        bool "[ESP32S3] esp32s3_breadboard - ESP32-S3 面包板 (无屏幕)"
         depends on IDF_TARGET_ESP32S3
 
-    config BOARD_BREADBOARD_1_54_LCD
-        bool "[ESP32S3] breadboard_1.54_lcd - ESP32-S3 面包板 (1.54寸 LCD)"
+    config BOARD_ESP32S3_BREADBOARD_1_54_LCD
+        bool "[ESP32S3] esp32s3_breadboard_1.54_lcd - ESP32-S3 面包板 (1.54寸 LCD)"
         depends on IDF_TARGET_ESP32S3
 
-    config BOARD_BREADBOARD_1_54_LCD_OFFICIAL
-        bool "[ESP32S3] breadboard_1.54_lcd_official - ESP32-S3 面包板 (1.54寸 LCD, 官方服务版)"
+    config BOARD_ESP32S3_BREADBOARD_1_54_LCD_OFFICIAL
+        bool "[ESP32S3] esp32s3_breadboard_1.54_lcd_official - ESP32-S3 面包板 (1.54寸 LCD, 官方服务版)"
         depends on IDF_TARGET_ESP32S3
 
 endchoice

@@ -1,7 +1,7 @@
 /**
  * official_commands.c - 官方服务版专用指令
  *
- * 仅 breadboard_1.54_lcd_official（official_service=true）板型注册。
+ * 仅 esp32s3_breadboard_1.54_lcd_official（official_service=true）板型注册。
  * 官方服务(espai.fun)与自定义服务的指令行为不同(对照 esp-ai-client command_handler.cpp)：
  *   - play_music: 官方只设置播放状态+表情,音乐音频由 play_audio("play_music") WS 推流
  *     (websocket.c 的 s_music_streaming 分支处理)；自定义服务走 instruct + HTTP 流式

@@ -305,8 +305,8 @@ uni-app 跨平台移动端，四个 Tab：首页 / 技能管理 / 配网 / 我�
 
 | 板型 | 说明 | 屏幕 |
 |------|------|------|
-| `breadboard` | 基础面包板 | 无屏 |
-| `breadboard_1.54_lcd` | 面包板 + 1.54 寸彩屏 | ST7789 240×240（SPI） |
+| `esp32s3_breadboard` | 基础面包板 | 无屏 |
+| `esp32s3_breadboard_1.54_lcd` | 面包板 + 1.54 寸彩屏 | ST7789 240×240（SPI） |
 
 > 主控 **ESP32-S3**（ESP-IDF v6.0），8MB PSRAM + 16MB Flash。板型由 Kconfig 选择，适配新板参考[适配自己的开发板](/dev/client/idf-board-adaptation)。
 
@@ -332,7 +332,7 @@ esp-ai/
 ├── esp-ai-idf-client/        # 客户端固件（ESP-IDF）
 │   └── main/
 │       ├── commands/         # 指令注册表 + 各指令模块（8 文件 / 29 指令）
-│       ├── boards/           # 板级支持包（breadboard / breadboard_1.54_lcd）
+│       ├── boards/           # 板级支持包（esp32s3_breadboard / esp32s3_breadboard_1.54_lcd）
 │       ├── displays/         # 显示驱动（LCD / OLED / UART）
 │       ├── lua/              # Lua 5.4 运行时 + 绑定
 │       └── websocket.c       # 消息接收 + 分发（勿改）

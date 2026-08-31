@@ -538,9 +538,14 @@
                 <input type="file" accept=".bin,.elf,.hex" hidden @change="onFirmwareFileChange" />
               </label>
               <span class="cell-sub" style="min-width:140px">{{ fwFile ? fwFile.name : '未选择文件' }}</span>
-              <input class="input input-sm" v-model="fwBinId" placeholder="固件 bin_id（必填）" style="width:220px" />
+              <div class="fw-mode-seg">
+                <button class="fw-mode-btn" :class="{ active: fwBinIdMode === 'auto' }" @click="fwBinIdMode = 'auto'">自动识别</button>
+                <button class="fw-mode-btn" :class="{ active: fwBinIdMode === 'custom' }" @click="fwBinIdMode = 'custom'">自定义输入</button>
+              </div>
+              <input v-if="fwBinIdMode === 'custom'" class="input input-sm" v-model="fwBinId" placeholder="固件 bin_id（必填）" style="width:220px" />
+              <span v-else class="cell-sub" style="font-size:12px">从固件中自动识别 bin_id（板卡编译 ID）</span>
               <input class="input input-sm" v-model="fwVersion" placeholder="版本号（可选）" style="width:140px" />
-              <button class="btn btn-mint btn-sm" :disabled="!fwFile || uploadingFw" @click="uploadFirmware">
+              <button class="btn btn-mint btn-sm" :disabled="!fwFile || uploadingFw || (fwBinIdMode === 'custom' && !fwBinId.trim())" @click="uploadFirmware">
                 {{ uploadingFw ? '上传中…' : '上传固件' }}
               </button>
             </div>
@@ -1390,6 +1395,7 @@ const firmwares = ref([])
 const loadingFirmwares = ref(false)
 const uploadingFw = ref(false)
 const fwFile = ref(null)
+const fwBinIdMode = ref('auto')
 const fwBinId = ref('')
 const fwVersion = ref('')
 
@@ -1407,12 +1413,13 @@ function onFirmwareFileChange(e) { fwFile.value = e.target.files?.[0] || null }
 
 async function uploadFirmware() {
   if (!fwFile.value) { emit('toast', '请先选择固件文件'); return }
-  if (!fwBinId.value.trim()) { emit('toast', '请填写固件 bin_id'); return }
+  if (fwBinIdMode.value === 'custom' && !fwBinId.value.trim()) { emit('toast', '请填写固件 bin_id'); return }
   uploadingFw.value = true
   try {
-    const res = await api.adminFirmwareUpload(fwFile.value, fwBinId.value.trim(), fwVersion.value.trim())
+    const res = await api.adminFirmwareUpload(fwFile.value, fwBinId.value.trim(), fwVersion.value.trim(), fwBinIdMode.value)
     if (res.status === 200 && res.data?.code === 0) {
-      emit('toast', res.data.message || '固件已上传并设为启用中')
+      const bid = res.data.data?.bin_id || ''
+      emit('toast', (res.data.message || '固件已上传并设为启用中') + (bid ? `（bin_id: ${bid}）` : ''))
       fwFile.value = null; fwBinId.value = ''; fwVersion.value = ''
       loadFirmwares()
     } else emit('toast', res.data?.message || res.data?.detail || '上传失败')
@@ -2385,6 +2392,26 @@ tbody tr:hover { background: var(--mint-softer); }
 .switch-input:checked + .switch-box { background: var(--mint); }
 .switch-input:checked + .switch-box::after { transform: translateX(14px); }
 .switch-text { font-size: 12px; color: var(--text-sub); }
+.fw-mode-seg {
+  display: inline-flex; padding: 3px; gap: 2px;
+  background: var(--glass-bg-soft); border: 1px solid var(--glass-border);
+  border-radius: 999px;
+}
+.fw-mode-btn {
+  border: none; background: transparent; cursor: pointer;
+  padding: 5px 14px; font-size: 12px; color: var(--text-sub);
+  border-radius: 999px; transition: all .2s var(--ease);
+}
+.fw-mode-btn:hover { color: var(--mint-deep); }
+.fw-mode-btn.active {
+  background: var(--mint-soft); color: var(--mint-deep);
+  border: 1px solid var(--mint-border); font-weight: 600;
+  animation: fwModePulse 2s ease-in-out infinite;
+}
+@keyframes fwModePulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--mint-softer); }
+  50% { box-shadow: 0 0 0 4px var(--mint-softer); }
+}
 .upload-btn { cursor: pointer; }
 .broadcast-input { width: 220px; }
 

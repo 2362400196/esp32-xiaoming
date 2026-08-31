@@ -34,8 +34,8 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
 CONFIG_LOG_DEFAULT_LEVEL_VERBOSE=y
 CONFIG_LOG_MAXIMUM_LEVEL=5
 # 默认板型:1.54寸 LCD 普通板(使用配网配置的服务器)
-# 官方服务版 breadboard_1.54_lcd_official 可在 menuconfig "选择开发板型号" 中切换
-CONFIG_BOARD_BREADBOARD_1_54_LCD=y
+# 官方服务版 esp32s3_breadboard_1.54_lcd_official 可在 menuconfig "选择开发板型号" 中切换
+CONFIG_BOARD_ESP32S3_BREADBOARD_1_54_LCD=y
 CONFIG_PROV_TYPE_BLE=y
 CONFIG_BT_ENABLED=y
 CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y

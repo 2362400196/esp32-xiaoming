@@ -12,23 +12,23 @@
  */
 #pragma once
 
-#ifdef CONFIG_BOARD_BREADBOARD
-#include "boards/defs/breadboard.h"
-#define ACTIVE_BOARD_CONFIG (&BOARD_CONFIG)
-#endif
-
-#ifdef CONFIG_BOARD_BREADBOARD_1_54_LCD
-#include "boards/defs/breadboard_1.54_lcd.h"
-#define ACTIVE_BOARD_CONFIG (&BOARD_CONFIG)
-#endif
-
-#ifdef CONFIG_BOARD_BREADBOARD_1_54_LCD_OFFICIAL
-#include "boards/defs/breadboard_1.54_lcd_official.h"
-#define ACTIVE_BOARD_CONFIG (&BOARD_CONFIG)
-#endif
-
 #ifdef CONFIG_BOARD_ESP32C3_SUPERMINI
 #include "boards/defs/esp32c3_supermini.h"
+#define ACTIVE_BOARD_CONFIG (&BOARD_CONFIG)
+#endif
+
+#ifdef CONFIG_BOARD_ESP32S3_BREADBOARD
+#include "boards/defs/esp32s3_breadboard.h"
+#define ACTIVE_BOARD_CONFIG (&BOARD_CONFIG)
+#endif
+
+#ifdef CONFIG_BOARD_ESP32S3_BREADBOARD_1_54_LCD
+#include "boards/defs/esp32s3_breadboard_1.54_lcd.h"
+#define ACTIVE_BOARD_CONFIG (&BOARD_CONFIG)
+#endif
+
+#ifdef CONFIG_BOARD_ESP32S3_BREADBOARD_1_54_LCD_OFFICIAL
+#include "boards/defs/esp32s3_breadboard_1.54_lcd_official.h"
 #define ACTIVE_BOARD_CONFIG (&BOARD_CONFIG)
 #endif
 

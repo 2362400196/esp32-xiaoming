@@ -1,5 +1,5 @@
 /**
- * breadboard_1.54_lcd_official 板型定义
+ * esp32s3_breadboard_1.54_lcd_official 板型定义
  *
  * ESP32-S3 面包板 + 1.54寸 ST7789 LCD (240x240)
  *
@@ -18,9 +18,9 @@
 #include "boards/defs/board_templates.h"
 
 static const board_config_t BOARD_CONFIG = {
-    .name        = "breadboard_1.54_lcd_official",
+    .name        = "esp32s3_breadboard_1.54_lcd_official",
     .description = "ESP32-S3 面包板 (1.54寸 LCD, 官方服务版)",
-    .bin_id      = "0f3a7c21e8d94b56a2c1d5e4f6071829",
+    .bin_id      = BOARD_BIN_ID,
 
     BOARD_BASE_ESP32S3(0),
     BOARD_DISPLAY_ST7789_240(9, 13, 38, 39),

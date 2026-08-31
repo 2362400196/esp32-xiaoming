@@ -862,13 +862,19 @@ class WeChatBot:
                 break
 
             sent = False
+            last_err = None
             for attempt in range(3):
                 try:
                     await self._send_text_chunk(chat_id, chunk)
                     sent = True
                     break
                 except WeChatAPIError as e:
+                    last_err = e
                     if e.code == -2 and attempt < 2:
+                        # prepare failed 多为设备断连后会话上下文（context_token）失效，
+                        # 清除该会话缓存后重试（不带 context_token 重新建立会话）
+                        if self.state.context_cache.pop(chat_id, None):
+                            logger.info(f"[WeChat] context_token 失效，已清除 {chat_id[:12]} 的会话上下文")
                         logger.warning(f"[WeChat] 发送文本分片失败 (retry {attempt+1}/3): {e}")
                         await asyncio.sleep(1.0)
                     else:
@@ -876,15 +882,10 @@ class WeChatBot:
                         break
             if not sent:
                 success = False
-                # ret=-2 持续失败说明 token 可能已失效，标记为无效并停止收发。
-                # 注意：不清除持久化 token——发送失败可能只是网络抖动，
-                # 保留凭据让重启/重试可自动恢复；若 token 真已失效，
-                # 恢复轮询后会以 -14×5 再次判定并清除（那边才允许清）。
-                logger.error(f"[WeChat] 发送消息彻底失败，token 可能已失效，请重新扫码登录。"
-                            f"base_url={self.state.base_url}, token_len={len(self.state.token)}")
-                self.state.token_invalid = True
-                self.state.configured = False
-                self.state.sync_buf = ""
+                # -2 prepare failed 是临时性会话错误（如设备断连瞬间上下文失效），
+                # 不代表 token 失效；仅记录日志并保留配置，让后续重试自动恢复。
+                # 真正的 token 失效由轮询的 HTTP 401/403 判定（_invalidate_token）。
+                logger.error(f"[WeChat] 发送文本失败: {last_err}（临时性错误，保留配置）")
                 break
             offset += len(chunk)
         return success

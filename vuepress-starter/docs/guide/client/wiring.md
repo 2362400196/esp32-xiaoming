@@ -4,7 +4,7 @@
 
 | 板型 | 芯片 | 屏幕 | 音频方案 | 板级配置文件 |
 |------|------|------|----------|--------------|
-| 面包板方案（默认）| ESP32-S3 | 1.54 寸 ST7789 | ES8311（默认）/ I2S 直连 | `main/boards/defs/breadboard_1.54_lcd.h` |
+| 面包板方案（默认）| ESP32-S3 | 1.54 寸 ST7789 | ES8311（默认）/ I2S 直连 | `main/boards/defs/esp32s3_breadboard_1.54_lcd.h` |
 | SuperMini 方案 | ESP32-C3 | 无（串口输出）| **仅 ES8311** | `main/boards/defs/esp32c3_supermini.h` |
 
 **音频方案由 menuconfig → 音频编解码器 二选一**（与板型独立）：
@@ -180,7 +180,7 @@ ESP32-C3 SuperMini 开发板（单核 160MHz，**无 PSRAM**，4MB Flash）。C3
 >
 > 屏幕丝印列对应常见 ST7789 屏幕模块上标注的引脚名（如 `SCL/SDA/RES/DC/SC/BCLK`）。
 >
-> 背光引脚如需更换（如与其他外设冲突），修改板型配置 `main/boards/defs/breadboard_1.54_lcd.h` 中的 `BOARD_DISPLAY_ST7789_240_BL(9, 13, 38, 39, 16)` 最后一个参数即可。
+> 背光引脚如需更换（如与其他外设冲突），修改板型配置 `main/boards/defs/esp32s3_breadboard_1.54_lcd.h` 中的 `BOARD_DISPLAY_ST7789_240_BL(9, 13, 38, 39, 16)` 最后一个参数即可。
 
 ## 唤醒按钮
 

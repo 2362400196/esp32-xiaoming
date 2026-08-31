@@ -41,7 +41,7 @@ static const es8311_config_t ES8311_CFG = {
 static const board_config_t BOARD_CONFIG = {
     .name        = "esp32c3_supermini",
     .description = "ESP32-C3 SuperMini (ES8311 全双工, 无屏)",
-    .bin_id      = "e3a9c5f21d8b47a6b3c0e9d8f7a61234",
+    .bin_id      = BOARD_BIN_ID,
 
     .wake_button_gpio = 9,                                   // 板载 BOOT 按键 (GPIO9)
     BOARD_AUDIO_ES8311_CUSTOM(3, 6, 7, 10, &ES8311_CFG),     // bck, ws, spk_tx, mic_rx

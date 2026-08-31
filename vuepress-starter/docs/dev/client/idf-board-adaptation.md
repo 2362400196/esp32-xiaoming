@@ -16,9 +16,9 @@ main/boards/
 │
 ├── defs/                  # ★ 板型定义（你只需在这里加文件）
 │   ├── board_templates.h  # 板型配置模板宏（BASE/AUDIO/DISPLAY/SERVICE/EXTRAS）
-│   ├── breadboard.h            # 面包板无屏幕
-│   ├── breadboard_1.54_lcd.h   # 面包板 1.54寸 LCD
-│   ├── breadboard_1.54_lcd_official.h  # 官方服务版
+│   ├── esp32s3_breadboard.h            # 面包板无屏幕
+│   ├── esp32s3_breadboard_1.54_lcd.h   # 面包板 1.54寸 LCD
+│   ├── esp32s3_breadboard_1.54_lcd_official.h  # 官方服务版
 │   └── your_board.h            # ← 你的板型定义（新建）
 ├── extras/                # ★ 板级扩展组件（LED/传感器等，见「板级扩展组件（Extras）」）
 │   └── extras_led.c/.h         # 示例组件：状态 LED
@@ -65,7 +65,7 @@ main/boards/
 static const board_config_t BOARD_CONFIG = {
     .name        = "your_board",
     .description = "我的开发板",
-    .bin_id      = "your_unique_bin_id_32hex",   // OTA 固件ID，全工程唯一（gen_boards 会校验）
+    .bin_id      = BOARD_BIN_ID,   // 编译期自动生成（md5(板卡名 + git commit)），无需手动填写
 
     BOARD_BASE_ESP32S3(0),                        // 唤醒按钮 + 音频（引脚见下方说明）
     BOARD_DISPLAY_ST7789_240(9, 13, 38, 39),      // 显示（无屏幕用 BOARD_DISPLAY_NONE()）
@@ -77,11 +77,11 @@ static const board_config_t BOARD_CONFIG = {
 要点：
 
 - **宏展开顺序必须固定**：`name/description/bin_id` → `BOARD_BASE_*`（音频）→ `BOARD_DISPLAY_*` → `BOARD_SERVICE_*` → `BOARD_EXTRAS_*`。这是因为 C++ 指定初始化器要求按 `board_config_t` 字段声明顺序赋值，且禁止同一字段重复赋值（`-Werror=override-init`）。
-- **`bin_id` 必填且全工程唯一**：`gen_boards.py` 校验失败会直接报错。它是 OTA 升级识别板型的固件 ID（32 位十六进制字符串）。
+- **`bin_id` 由编译期自动生成**：`main/CMakeLists.txt` 在编译时计算 `md5(板卡名 + git commit 短哈希)` 并注入 `BOARD_BIN_ID` 宏，板卡定义只需写 `.bin_id = BOARD_BIN_ID`。不同板卡 / 不同 commit 会得到不同 bin_id（OTA 能识别新版本），同一板卡同一 commit 重复编译 bin_id 稳定（避免 OTA 无限升级）。`gen_boards.py` 识别到宏引用后跳过唯一性校验。
 - **可选 `@meta` 注释**：控制 Kconfig 按芯片分组显示（多芯片工程时需要）：
 
 ```c
-/// @meta chip=esp32s3 vendor=espressif series=breadboard
+/// @meta chip=esp32s3 vendor=espressif series=esp32s3_breadboard
 ```
 
 ### 第二步：选择音频编解码器（独立于板型）
@@ -128,7 +128,7 @@ static const es8311_config_t ES8311_CFG = {
 static const board_config_t BOARD_CONFIG = {
     .name        = "your_board",
     .description = "我的开发板",
-    .bin_id      = "your_unique_bin_id_32hex",
+    .bin_id      = BOARD_BIN_ID,   // 编译期自动生成
 
     BOARD_BASE_ESP32S3(0),
     BOARD_AUDIO_ES8311_CUSTOM(6, 4, 15, 17, &ES8311_CFG),  // bck, ws, spk_tx, mic_rx, cfg
@@ -148,7 +148,7 @@ static const board_config_t BOARD_CONFIG = {
 static const board_config_t BOARD_CONFIG = {
     .name        = "esp32c3_supermini",
     .description = "ESP32-C3 SuperMini (ES8311 全双工, 无屏)",
-    .bin_id      = "...",
+    .bin_id      = BOARD_BIN_ID,   // 编译期自动生成
     BOARD_BASE_ESP32C3(9),
     BOARD_DISPLAY_NONE(),
     BOARD_SERVICE_SELF_HOSTED(),
@@ -402,7 +402,7 @@ const display_driver_t *display_driver_oled_get(void)
 
 ## 板型信息上报
 
-固件通过 `board_get_info_json()` 向服务端上报板型能力（`{"name","bin_id","display","display_w","display_h","audio_codec"}`），服务端据此下发匹配的表情包与配置。`bin_id` 唯一性因此很关键——`gen_boards.py` 会在生成时校验重复。
+固件通过 `board_get_info_json()` 向服务端上报板型能力（`{"name","bin_id","display","display_w","display_h","audio_codec"}`），服务端据此下发匹配的表情包与配置。`bin_id` 由编译期自动生成（`md5(板卡名 + git commit)`），不同板卡名天然产生不同 bin_id，无需人工维护唯一性。
 
 ## 常见问题
 
@@ -439,7 +439,7 @@ idf.py reconfigure   # 或删除 build/ 后 idf.py build
 使用 `idf.py monitor` 查看启动日志。板型选择与音频方案会打印在 `board` 日志里：
 
 ```
-I (1498) board: 初始化板级包: breadboard_1.54_lcd
+I (1498) board: 初始化板级包: esp32s3_breadboard_1.54_lcd
 I (1528) board:   音频: ES8311 编解码器 + NS4150B 功放 (全双工 I2S)
 ```
 
@@ -454,5 +454,5 @@ I (6172) wakeup: [MIC诊断] ret=ESP_OK bytes=1024 peak=1
 - [board_interface.h](../../main/boards/board_interface.h) - 接口定义（`board_config_t` / `board_extra_t`）
 - [board_templates.h](../../main/boards/defs/board_templates.h) - 板型配置模板宏
 - [gen_boards.py](../../main/boards/tools/gen_boards.py) - 板型自动生成脚本
-- [breadboard_1.54_lcd.h](../../main/boards/defs/breadboard_1.54_lcd.h) - LCD 板型定义示例
-- [breadboard.h](../../main/boards/defs/breadboard.h) - 无屏板型定义示例
+- [esp32s3_breadboard_1.54_lcd.h](../../main/boards/defs/esp32s3_breadboard_1.54_lcd.h) - LCD 板型定义示例
+- [esp32s3_breadboard.h](../../main/boards/defs/esp32s3_breadboard.h) - 无屏板型定义示例

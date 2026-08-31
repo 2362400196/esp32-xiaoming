@@ -500,6 +500,31 @@ def _sanitize_firmware_name(name: str) -> str:
     return "".join(c for c in name if c.isalnum() or c in "._-")
 
 
+def _auto_bin_id(filename: str, meta: dict) -> str:
+    """兜底生成 bin_id：默认取文件名主干；与其他固件冲突时追加时间戳保证唯一"""
+    stem = Path(filename).stem
+    current = meta.get(filename, {}).get("bin_id", "")
+    if current and current == stem:
+        return stem  # 同一文件重复上传，保持 bin_id 稳定
+    used = {m.get("bin_id", "") for m in meta.values() if m.get("bin_id")}
+    if stem not in used:
+        return stem
+    import time as _t
+    return f"{stem}-{int(_t.time())}"
+
+
+# 板卡 bin_id：32 位十六进制字符串（board_config_t.bin_id，编译进固件的 C 字符串常量）
+_BIN_ID_RE = re.compile(rb"(?<![0-9a-fA-F])([0-9a-fA-F]{32})(?![0-9a-fA-F])")
+
+
+def _extract_bin_id_from_firmware(content: bytes) -> str:
+    """从固件二进制中提取 bin_id（板卡编译 ID），提取不到返回空串"""
+    m = _BIN_ID_RE.search(content)
+    if m:
+        return m.group(1).decode("ascii")
+    return ""
+
+
 @router.get("/firmwares")
 async def admin_list_firmwares(_: UserModel = Depends(require_admin)):
     # 固件列表（含 bin_id/版本/上传者/启用状态）
@@ -529,10 +554,12 @@ async def admin_upload_firmware(
     request: Request,
     file: UploadFile = File(...),
     bin_id: str = Form(""),
+    bin_id_mode: str = Form("auto"),
     version: str = Form(""),
     admin: UserModel = Depends(require_admin),
 ):
     # 上传固件并登记 bin_id/版本（上传后自动设为启用中，作为设备 OTA 回退目标）
+    # bin_id_mode: auto=一键生成（取文件名主干，冲突追加时间戳）; custom=自定义输入
     from src.infrastructure.device_api import (
         FIRMWARE_DIR, load_firmware_meta, save_firmware_meta,
     )
@@ -562,8 +589,15 @@ async def admin_upload_firmware(
     meta = load_firmware_meta()
     for name, m in meta.items():
         m["active"] = False
+
+    # bin_id：auto=从固件中识别（提取不到回退文件名主干）; custom=自定义输入
+    if bin_id_mode == "auto" or not bin_id.strip():
+        bin_id = _extract_bin_id_from_firmware(content) or _auto_bin_id(safe_filename, meta)
+    else:
+        bin_id = bin_id.strip()
+
     meta[safe_filename] = {
-        "bin_id": bin_id.strip(),
+        "bin_id": bin_id,
         "version": version.strip(),
         "uploaded_by": admin.email,
         "uploaded_at": _time.time(),

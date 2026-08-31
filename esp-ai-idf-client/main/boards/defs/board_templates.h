@@ -34,6 +34,14 @@
 #include "boards/board_interface.h"
 #include "boards/extras/extras_led.h"  // BOARD_EXTRAS_LED 组件接口
 
+// ==================== bin_id 自动生成 ====================
+// 编译时由 CMake 注入 BOARD_BIN_ID（md5(板卡名 + git commit)），
+// 不同板卡/不同版本 bin_id 不同，同一板卡同一 commit 重复编译 bin_id 稳定；
+// 直接编译（无 CMake 注入）时使用默认值
+#ifndef BOARD_BIN_ID
+#define BOARD_BIN_ID "5d47bb925ea440b3b615f4ed6e4d2263"
+#endif
+
 // ==================== ES8311 默认配置 ====================
 
 #ifdef CONFIG_AUDIO_CODEC_ES8311

@@ -27,7 +27,7 @@ gen_boards.py - 板型自动生成脚本（1000+ 板型架构）
 无需修改任何框架代码。
 
 @meta 注释格式（可选，放在文件头注释中）：
-    /// @meta chip=esp32s3 vendor=espressif series=breadboard
+    /// @meta chip=esp32s3 vendor=espressif series=esp32s3_breadboard
     /// @meta display=st7789_240 audio=es8311
 
 无 @meta 时默认 chip=esp32s3。
@@ -70,9 +70,13 @@ def extract_board_info(filepath):
     desc_match = re.search(r'\.description\s*=\s*"([^"]+)"', content)
     desc = desc_match.group(1) if desc_match else name
 
-    # 提取 .bin_id = "xxx"
+    # 提取 .bin_id = "xxx"；或 .bin_id = MACRO（如 BOARD_BIN_ID，编译时自动生成）
     bin_id_match = re.search(r'\.bin_id\s*=\s*"([^"]+)"', content)
     bin_id = bin_id_match.group(1) if bin_id_match else ""
+    if not bin_id:
+        macro_match = re.search(r'\.bin_id\s*=\s*([A-Za-z_][A-Za-z0-9_]*)', content)
+        if macro_match:
+            bin_id = "AUTO"  # 宏引用：编译期自动生成，跳过唯一性校验
 
     # 提取 @meta 元数据
     meta = extract_meta(content)
@@ -112,8 +116,8 @@ def validate_boards(boards):
         if not b["bin_id"]:
             errors.append("{}: 缺少 .bin_id 字段（OTA 升级必需）".format(b["basename"]))
 
-        # 检查 bin_id 唯一性
-        if b["bin_id"]:
+        # 检查 bin_id 唯一性（AUTO=编译时自动生成，跳过）
+        if b["bin_id"] and b["bin_id"] != "AUTO":
             if b["bin_id"] in bin_ids:
                 errors.append("{}: bin_id '{}' 与 {} 重复".format(
                     b["basename"], b["bin_id"], bin_ids[b["bin_id"]]))
@@ -260,7 +264,10 @@ def main():
     print("\n板型列表：")
     for b in boards:
         chip_tag = "[{}]".format(b["chip"].upper())
-        bin_id_short = b["bin_id"][:8] + "..." if len(b["bin_id"]) > 8 else b["bin_id"]
+        if b["bin_id"] == "AUTO":
+            bin_id_short = "AUTO(编译期自动生成)"
+        else:
+            bin_id_short = b["bin_id"][:8] + "..." if len(b["bin_id"]) > 8 else b["bin_id"]
         print("  - {:40s} {} bin_id={}".format(
             b["name"], chip_tag, bin_id_short))
 

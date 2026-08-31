@@ -2,7 +2,7 @@
  * display_uart.h - 串口显示驱动接口
  *
  * 通过串口输出状态信息，无图形显示
- * 适用于无屏幕的板型（如 breadboard）
+ * 适用于无屏幕的板型（如 esp32s3_breadboard）
  */
 #pragma once
 

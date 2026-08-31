@@ -94,6 +94,43 @@ Project build complete. To flash, run:
 
 > **新手常见问题**：如果编译到一半报错 `ccache not found`，忽略即可，不影响编译。
 
+### 3.1 一键生成全量固件与 OTA 固件
+
+项目根目录提供 `build_firmware.py` 脚本，一次编译同时产出**两种固件**：
+
+| 产物 | 文件名 | 用途 |
+|------|--------|------|
+| OTA 升级固件 | `esp32s3-xiaoming-{commit}.bin` | 纯 app 二进制，用于服务端 OTA 升级下发 |
+| 全量固件 | `esp32s3-xiaoming-{commit}-flash-all.bin` | 合并 bootloader + 分区表 + OTA 初始数据 + 唤醒词模型 + app，用于整片烧录 |
+
+`{commit}` 为当前 git 短提交号，自动获取，便于区分版本。
+
+#### 用法
+
+```bash
+python build_firmware.py                 # 编译 + 打包
+python build_firmware.py --no-build      # 只打包（编译已完成时）
+python build_firmware.py --target esp32c3   # 编译 C3 板
+python build_firmware.py --name myboard     # 自定义固件名
+python build_firmware.py --out dist         # 自定义输出目录
+```
+
+#### 参数说明
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--target` | 从 `sdkconfig` 自动识别 | 目标芯片，支持 `esp32s3` / `esp32c3` |
+| `--name` | `xiaoming` | 固件名称，输出为 `{chip}-{name}-{commit}.bin` |
+| `--out` | `dist` | 输出目录 |
+| `--no-build` | 关闭 | 跳过编译，只打包已构建的产物 |
+
+#### 说明
+
+- 脚本自动配置 ESP-IDF 6.0.2 编译环境（与 `build.ps1` 一致），无需手动激活环境。
+- OTA 分区上限为 **6MB**，app 固件超过该大小会告警（OTA 升级可能写失败）。
+- ESP32-C3 为工厂单槽分区，合并布局与 S3 不同，脚本已内置支持。
+- 合并时若某个文件缺失会自动跳过并告警，不会中断。
+
 ### 4. 烧录固件
 
 #### 4.1 连接硬件
@@ -162,7 +199,7 @@ I (1254) cmd_lyric: 歌词指令注册完成
 
 ### 6. 切换板型
 
-项目内置 3 种板型(breadboard / breadboard_1.54_lcd / breadboard_1.54_lcd_official),`sdkconfig.defaults` 默认选择 **1.54 LCD 普通板**。切换方法、板型差异与选择建议见独立文档:
+项目内置 3 种板型(esp32s3_breadboard / esp32s3_breadboard_1.54_lcd / esp32s3_breadboard_1.54_lcd_official),`sdkconfig.defaults` 默认选择 **1.54 LCD 普通板**。切换方法、板型差异与选择建议见独立文档:
 
 👉 [**切换开发板**](/dev/client/idf-board-switch)
 
