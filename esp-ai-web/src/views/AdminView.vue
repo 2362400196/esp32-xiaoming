@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="admin-layout">
     <!-- 左侧边栏 -->
     <aside class="admin-sidebar">
@@ -29,11 +29,11 @@
           <span>市场管理</span>
         </button>
         <button class="nav-item" :class="{ active: section === 'firmware' }" @click="section = 'firmware'">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
           <span>固件管理</span>
         </button>
         <button class="nav-item" :class="{ active: section === 'system' }" @click="section = 'system'">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
           <span>系统运维</span>
         </button>
         <button class="nav-item" :class="{ active: section === 'conversations' }" @click="section = 'conversations'">
@@ -63,6 +63,14 @@
         <button class="nav-item" :class="{ active: section === 'export' }" @click="section = 'export'">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           <span>数据导出</span>
+        </button>
+        <button class="nav-item" :class="{ active: section === 'site' }" @click="section = 'site'">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          <span>网站设置</span>
+        </button>
+        <button class="nav-item" :class="{ active: section === 'billing' }" @click="section = 'billing'">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
+          <span>计费系统</span>
         </button>
       </nav>
 
@@ -159,14 +167,26 @@
             </div>
           </template>
 
-          <div class="action-bar">
-            <div class="action-info">
-              <p class="action-title">系统维护</p>
-              <p class="action-sub">修改插件代码后，无需重启服务即可热加载全部插件</p>
+          <!-- 近 7 天累计费用 -->
+          <div class="chart-card card-in">
+            <div class="chart-head">
+              <div>
+                <h3 class="section-subtitle" style="margin:0">近 7 天累计费用</h3>
+                <p class="table-sub">每日总费用（元）</p>
+              </div>
+              <button class="btn btn-ghost btn-xs" :disabled="loadingDailyCost" @click="loadDailyCost">刷新</button>
             </div>
-            <button class="btn btn-mint" :disabled="reloadingPlugins" @click="reloadPlugins">
-              {{ reloadingPlugins ? '重载中…' : '重载插件' }}
-            </button>
+            <div v-if="dailyCost.length" class="bar-chart">
+              <div class="bar-col" v-for="d in dailyCost" :key="d.date">
+                <div class="bar-track">
+                  <div class="bar-fill" :style="{ height: barHeight(d.total_cost) + '%' }" :title="d.date + '：¥' + d.total_cost">
+                    <span class="bar-value">{{ fmtCost(d.total_cost) }}</span>
+                  </div>
+                </div>
+                <span class="bar-label">{{ fmtDay(d.date) }}</span>
+              </div>
+            </div>
+            <div v-else class="table-empty" style="padding:40px 0">暂无费用数据</div>
           </div>
         </section>
 
@@ -925,6 +945,269 @@
   </div>
 </div>
 
+        <!-- 网站设置 -->
+        <section v-else-if="section === 'site'" class="admin-section">
+          <div class="site-form-card">
+            <div class="site-form-head">
+              <div>
+                <h3 class="table-title">基本信息</h3>
+                <p class="table-sub">配置展示在前端导航栏、登录页与页脚等位置的网站信息</p>
+              </div>
+              <button class="btn btn-mint" :disabled="savingSite" @click="saveSiteSettings">{{ savingSite ? '保存中…' : '保存设置' }}</button>
+            </div>
+
+            <div class="site-form-body">
+              <div class="form-row">
+                <label class="form-label">网站名称</label>
+                <input class="form-input" v-model="siteForm.site_name" placeholder="例如：小明同学" maxlength="30" />
+                <p class="form-hint">显示在浏览器标题、导航栏与登录页</p>
+              </div>
+              <div class="form-row">
+                <label class="form-label">网站副标题</label>
+                <input class="form-input" v-model="siteForm.site_subtitle" placeholder="例如：智能语音助手" maxlength="50" />
+                <p class="form-hint">显示在登录页 Logo 下方</p>
+              </div>
+              <div class="form-row">
+                <label class="form-label">网站 Logo（图片 URL）</label>
+                <input class="form-input" v-model="siteForm.site_logo" placeholder="https://…/logo.png（留空使用默认图标）" />
+                <p class="form-hint">导航栏与登录页展示的 Logo 图片地址</p>
+              </div>
+              <div class="form-row">
+                <label class="form-label">登录页欢迎语</label>
+                <input class="form-input" v-model="siteForm.login_welcome" placeholder="例如：欢迎回来，开始你的智能语音之旅" maxlength="60" />
+                <p class="form-hint">显示在登录表单上方</p>
+              </div>
+              <div class="form-row">
+                <label class="form-label">页脚信息</label>
+                <input class="form-input" v-model="siteForm.site_footer" placeholder="例如：© 2026 小明同学 · 保留所有权利" maxlength="100" />
+                <p class="form-hint">显示在页面底部</p>
+              </div>
+              <div class="form-row">
+                <label class="form-label">ICP 备案号</label>
+                <input class="form-input" v-model="siteForm.site_icp" placeholder="例如：粤ICP备XXXXXXXX号（留空不显示）" maxlength="60" />
+                <p class="form-hint">显示在页脚，留空则隐藏</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 计费系统 -->
+        <section v-else-if="section === 'billing'" class="admin-section">
+          <div class="stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
+            <div class="stat-card card-in">
+              <span class="stat-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
+              <div class="stat-info"><p class="stat-value">{{ billingStats.record_count ?? '—' }}</p><p class="stat-label">计费会话</p></div>
+            </div>
+            <div class="stat-card card-in" style="animation-delay:.05s">
+              <span class="stat-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></span>
+              <div class="stat-info"><p class="stat-value">{{ fmtNum(billingStats.asr_minutes) }}</p><p class="stat-label">ASR 时长(分钟)</p></div>
+            </div>
+            <div class="stat-card card-in" style="animation-delay:.1s">
+              <span class="stat-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
+              <div class="stat-info"><p class="stat-value">{{ fmtBigNum(billingStats.llm_input_tokens) }}</p><p class="stat-label">LLM 输入 tokens</p></div>
+            </div>
+            <div class="stat-card card-in" style="animation-delay:.15s">
+              <span class="stat-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
+              <div class="stat-info"><p class="stat-value">{{ fmtBigNum(billingStats.llm_output_tokens) }}</p><p class="stat-label">LLM 输出 tokens</p></div>
+            </div>
+            <div class="stat-card card-in" style="animation-delay:.2s">
+              <span class="stat-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg></span>
+              <div class="stat-info"><p class="stat-value">{{ fmtBigNum(billingStats.tts_chars) }}</p><p class="stat-label">TTS 字数</p></div>
+            </div>
+            <div class="stat-card card-in" style="animation-delay:.25s">
+              <span class="stat-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg></span>
+              <div class="stat-info"><p class="stat-value" style="color:var(--mint)">¥ {{ (billingStats.total_cost ?? 0).toFixed(4) }}</p><p class="stat-label">累计费用</p></div>
+            </div>
+          </div>
+
+          <div class="site-form-card" style="margin-top:20px">
+            <div class="site-form-head" style="cursor:pointer" @click="billingConfigOpen = !billingConfigOpen">
+              <div>
+                <h3 class="table-title">计费单价配置 <span class="collapse-arrow" :class="{ open: billingConfigOpen }">▾</span></h3>
+                <p class="table-sub">按用量计费：ASR 按小时、LLM 按百万 tokens、TTS 按千字，单位元</p>
+              </div>
+              <button class="btn btn-mint" :disabled="savingBilling" @click.stop="saveBillingConfig">{{ savingBilling ? '保存中…' : '保存配置' }}</button>
+            </div>
+            <div v-show="billingConfigOpen" class="site-form-body">
+              <div class="form-row">
+                <label class="form-label">计费开关</label>
+                <label class="switch-label" style="margin-top:8px">
+                  <input v-model="billingForm.enabled" type="checkbox" class="switch-input" />
+                  <span class="switch-box"></span>
+                  <span class="switch-text">{{ billingForm.enabled ? '已启用' : '已停用' }}</span>
+                </label>
+                <p class="form-hint">关闭后会话结束不再保存计费记录</p>
+              </div>
+              <div class="form-row">
+                <label class="form-label">ASR 单价（元/小时）</label>
+                <input class="form-input" v-model.number="billingForm.asr_price_per_hour" type="number" min="0" step="0.01" />
+                <p class="form-hint">语音识别每识别 1 小时音频收取的费用，时长按分钟记录（火山流式识别约 1 元/小时）</p>
+              </div>
+              <div class="form-row">
+                <label class="form-label">LLM 输入单价（元/百万 tokens）</label>
+                <input class="form-input" v-model.number="billingForm.llm_input_price_per_mtokens" type="number" min="0" step="0.01" />
+                <p class="form-hint">缓存未命中的输入 tokens 单价（DeepSeek V4 高峰 3.0 元/百万）</p>
+              </div>
+              <div class="form-row">
+                <label class="form-label">LLM 输入单价·缓存命中（元/百万 tokens）</label>
+                <input class="form-input" v-model.number="billingForm.llm_input_cache_hit_price_per_mtokens" type="number" min="0" step="0.01" />
+                <p class="form-hint">命中缓存的输入 tokens 单价（DeepSeek V4 高峰 0.10 元/百万）</p>
+              </div>
+              <div class="form-row">
+                <label class="form-label">LLM 输出单价（元/百万 tokens）</label>
+                <input class="form-input" v-model.number="billingForm.llm_output_price_per_mtokens" type="number" min="0" step="0.01" />
+                <p class="form-hint">大模型每输出 100 万 tokens 收取的费用（DeepSeek V4 高峰 9.0 元/百万）</p>
+              </div>
+              <div class="form-row">
+                <label class="form-label">TTS 单价（元/千字）</label>
+                <input class="form-input" v-model.number="billingForm.tts_price_per_kchars" type="number" min="0" step="0.01" />
+                <p class="form-hint">语音合成每合成 1000 字收取的费用</p>
+              </div>
+              <div class="form-row" style="border-top:1px dashed var(--glass-border-soft);padding-top:16px">
+                <label class="form-label">峰谷计费（DeepSeek）</label>
+                <label class="switch-label" style="margin-top:8px">
+                  <input v-model="billingForm.peak_offpeak_enabled" type="checkbox" class="switch-input" />
+                  <span class="switch-box"></span>
+                  <span class="switch-text">{{ billingForm.peak_offpeak_enabled ? '已启用' : '已停用' }}</span>
+                </label>
+                <p class="form-hint">开启后，峰时段内 LLM 按原价计费，其余时间为谷时按折扣计费（仅作用于 LLM）</p>
+              </div>
+              <div class="form-row" :class="{ 'field-disabled': !billingForm.peak_offpeak_enabled }">
+                <label class="form-label">谷时折扣</label>
+                <input class="form-input" v-model.number="billingForm.offpeak_discount" type="number" min="0" max="1" step="0.05" :disabled="!billingForm.peak_offpeak_enabled" />
+                <p class="form-hint">谷时价格 = LLM 单价 × 折扣（DeepSeek 谷时约 0.5 半价）</p>
+              </div>
+              <div class="form-row" :class="{ 'field-disabled': !billingForm.peak_offpeak_enabled }">
+                <label class="form-label">峰时段</label>
+                <div v-for="(w, i) in billingForm.peak_windows" :key="i" style="display:flex;align-items:center;gap:8px;margin-top:8px">
+                  <input class="form-input" style="max-width:110px" v-model="w[0]" type="time" :disabled="!billingForm.peak_offpeak_enabled" />
+                  <span style="color:var(--text-dim);font-size:13px">至</span>
+                  <input class="form-input" style="max-width:110px" v-model="w[1]" type="time" :disabled="!billingForm.peak_offpeak_enabled" />
+                  <button class="btn btn-ghost btn-xs" :disabled="!billingForm.peak_offpeak_enabled || billingForm.peak_windows.length <= 1" @click="billingForm.peak_windows.splice(i, 1)">删除</button>
+                </div>
+                <button class="btn btn-ghost btn-xs" style="margin-top:8px;align-self:flex-start" :disabled="!billingForm.peak_offpeak_enabled || billingForm.peak_windows.length >= 4" @click="billingForm.peak_windows.push(['00:00', '00:00'])">+ 添加峰时段</button>
+                <p class="form-hint">峰时段内 LLM 按原价，其余时间为谷时按折扣计费（HH:MM，支持跨零点）</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="table-card" style="margin-top:20px">
+            <div class="table-head">
+              <div>
+                <h3 class="table-title">设备费用汇总</h3>
+                <p class="table-sub">每台设备的累计用量与费用（设备级记账）</p>
+              </div>
+            </div>
+            <div v-if="!billingStats.per_device || !billingStats.per_device.length" class="table-empty" style="padding:32px;text-align:center">
+              <p style="font-size:13px;color:var(--text-dim)">暂无设备计费数据</p>
+            </div>
+            <div v-else class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>设备</th>
+                    <th>会话数</th>
+                    <th>ASR 时长(分钟)</th>
+                    <th>LLM 输入</th>
+                    <th>LLM 输出</th>
+                    <th>TTS 字数</th>
+                    <th>费用</th>
+                    <th>占比</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="d in billingStats.per_device" :key="d.device_id">
+                    <td data-label="设备"><span class="cell-muted">{{ d.device_id || '—' }}</span></td>
+                    <td data-label="会话数">{{ d.record_count }}</td>
+                    <td data-label="ASR 时长(分钟)">{{ fmtNum(d.asr_minutes) }}</td>
+                    <td data-label="LLM 输入">{{ fmtBigNum(d.llm_input_tokens) }}<span v-if="d.llm_cache_hit_tokens" class="cell-muted" style="font-size:11px">(命中{{ fmtBigNum(d.llm_cache_hit_tokens) }})</span></td>
+                    <td data-label="LLM 输出">{{ fmtBigNum(d.llm_output_tokens) }}</td>
+                    <td data-label="TTS 字数">{{ fmtBigNum(d.tts_chars) }}</td>
+                    <td data-label="费用"><span class="badge badge-mint">¥ {{ d.total_cost.toFixed(4) }}</span></td>
+                    <td data-label="占比">
+                      <div style="display:flex;align-items:center;gap:8px">
+                        <div style="flex:1;min-width:60px;height:6px;border-radius:3px;background:var(--glass-border-soft);overflow:hidden">
+                          <div :style="{ height: '100%', borderRadius: '3px', background: 'var(--mint)', width: billingStats.total_cost > 0 ? (d.total_cost / billingStats.total_cost * 100) + '%' : '0%' }"></div>
+                        </div>
+                        <span style="font-size:12px;color:var(--text-dim);white-space:nowrap">{{ billingStats.total_cost > 0 ? (d.total_cost / billingStats.total_cost * 100).toFixed(1) + '%' : '0%' }}</span>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="table-card" style="margin-top:20px">
+            <div class="table-head">
+              <div>
+                <h3 class="table-title">计费记录</h3>
+                <p class="table-sub">每次会话的用量与费用明细</p>
+              </div>
+              <div class="row-actions">
+                <input class="form-input" style="max-width:220px" v-model="billingSearch" placeholder="搜索设备 ID" @keyup.enter="searchBillingRecords" />
+                <button class="btn btn-ghost" :disabled="loadingBilling" @click="searchBillingRecords">查找</button>
+                <button class="btn btn-ghost" :disabled="loadingBilling" @click="loadBillingRecords">刷新</button>
+              </div>
+            </div>
+            <div v-if="loadingBilling" class="table-empty">加载中…</div>
+            <div v-else-if="!billingRecords.length" class="table-empty" style="padding:40px;text-align:center">
+              <p style="font-size:14px;font-weight:600;margin-bottom:8px">暂无计费记录</p>
+              <p style="font-size:12px;color:var(--text-dim)">设备完成一次对话会话后，用量与费用会自动记录在这里</p>
+            </div>
+            <div v-else class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>设备</th>
+                    <th>ASR 时长(分钟)</th>
+                    <th>LLM 输入</th>
+                    <th>LLM 输出</th>
+                    <th>TTS 字数</th>
+                    <th>ASR 费用</th>
+                    <th>LLM 费用</th>
+                    <th>TTS 费用</th>
+                    <th>合计</th>
+                    <th>峰谷</th>
+                    <th>时间</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="r in billingRecords" :key="r.id">
+                    <td data-label="设备"><span class="cell-muted">{{ r.device_id || '—' }}</span></td>
+                    <td data-label="ASR 时长(分钟)">{{ r.asr_minutes }}</td>
+                    <td data-label="LLM 输入">{{ fmtBigNum(r.llm_input_tokens) }}<span v-if="r.llm_cache_hit_tokens" class="cell-muted" style="font-size:11px">(命中{{ fmtBigNum(r.llm_cache_hit_tokens) }})</span></td>
+                    <td data-label="LLM 输出">{{ fmtBigNum(r.llm_output_tokens) }}</td>
+                    <td data-label="TTS 字数">{{ fmtBigNum(r.tts_chars) }}</td>
+                    <td data-label="ASR 费用">¥ {{ r.asr_cost.toFixed(4) }}</td>
+                    <td data-label="LLM 费用">¥ {{ r.llm_cost.toFixed(4) }}</td>
+                    <td data-label="TTS 费用">¥ {{ r.tts_cost.toFixed(4) }}</td>
+                    <td data-label="合计"><span class="badge badge-mint">¥ {{ r.total_cost.toFixed(4) }}</span></td>
+                    <td data-label="峰谷">
+                      <span v-if="r.llm_offpeak" class="badge" style="background:rgba(38,166,154,.12);color:var(--mint)">谷时</span>
+                      <span v-else class="badge" style="background:rgba(255,255,255,.06);color:var(--text-dim)">峰时</span>
+                    </td>
+                    <td data-label="时间" class="cell-muted">{{ formatDate(r.created_at) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="table-head" style="border-top:1px solid var(--glass-border-soft);border-bottom:none">
+              <span class="table-sub">共 {{ billingTotal }} 条 · 每页 15 条 · 第 {{ billingPage }} / {{ billingTotalPages }} 页</span>
+              <div class="row-actions">
+                <button class="btn btn-ghost btn-xs" :disabled="billingPage <= 1" @click="billingPage = 1; loadBillingRecords()">«</button>
+                <button class="btn btn-ghost btn-xs" :disabled="billingPage <= 1" @click="billingPage--; loadBillingRecords()">上一页</button>
+                <template v-for="p in billingPageList" :key="p">
+                  <button v-if="p === '…'" class="btn btn-ghost btn-xs" disabled>…</button>
+                  <button v-else class="btn btn-ghost btn-xs" :class="{ 'btn-mint': p === billingPage }" @click="billingPage = p; loadBillingRecords()">{{ p }}</button>
+                </template>
+                <button class="btn btn-ghost btn-xs" :disabled="billingPage >= billingTotalPages" @click="billingPage++; loadBillingRecords()">下一页</button>
+                <button class="btn btn-ghost btn-xs" :disabled="billingPage >= billingTotalPages" @click="billingPage = billingTotalPages; loadBillingRecords()">»</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <!-- 数据导出 -->
         <section v-else-if="section === 'export'" class="admin-section">
           <div class="stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr))">
@@ -1169,6 +1452,8 @@ const section = ref('stats')
 const stats = ref({})
 const metrics = ref(null)
 const reloadingPlugins = ref(false)
+const dailyCost = ref([])
+const loadingDailyCost = ref(false)
 
 const users = ref([])
 const loadingUsers = ref(false)
@@ -1206,7 +1491,7 @@ const filteredDevices = computed(() => {
 })
 
 const currentUserId = computed(() => getUser()?.user_id || '')
-const sectionTitle = computed(() => ({ stats: '仪表盘', users: '用户管理', devices: '设备管理', plugins: '插件管理', market: '市场管理', firmware: '固件管理', system: '系统运维', conversations: '对话记录', ws_monitor: '连接监控', health: '健康检查', oplogs: '操作日志', emojis: '表情包', tasks: '定时任务', export: '数据导出' }[section.value] || ''))
+const sectionTitle = computed(() => ({ stats: '仪表盘', users: '用户管理', devices: '设备管理', plugins: '插件管理', market: '市场管理', firmware: '固件管理', system: '系统运维', site: '网站设置', billing: '计费系统', conversations: '对话记录', ws_monitor: '连接监控', health: '健康检查', oplogs: '操作日志', emojis: '表情包', tasks: '定时任务', export: '数据导出' }[section.value] || ''))
 	const sectionSub = computed(() => ({
 	  stats: '系统总览与服务性能',
 	  users: '管理角色、设备上限与账号状态',
@@ -1215,6 +1500,8 @@ const sectionTitle = computed(() => ({ stats: '仪表盘', users: '用户管理'
 	  market: '管理插件上下架与推荐状态',
 	  firmware: '上传固件、登记 bin_id、管理 OTA 比对目标',
 	  system: '数据库备份与服务日志',
+	  site: '配置网站名称、Logo、页脚等公开信息',
+	  billing: '配置计费单价，查看各会话用量与费用',
 	  llm_configs: '查看和编辑各设备的 LLM/ASR/TTS 配置',
 	  conversations: '浏览所有设备的对话历史记录',
   ws_monitor: '实时查看 WebSocket 连接状态',
@@ -1272,7 +1559,7 @@ const stateText = computed(() => {
   const d = deviceDetail.value
   if (!d) return '—'
   if (!d.online) return '离线'
-  const map = { idle: '空闲', asr: '聆听中', llm: '思考中', tts: '说话中' }
+  const map = { idle: '待机中', asr: '聆听中', llm: '思考中', tts: '说话中' }
   return map[d.device_state] || d.device_state || '未知'
 })
 
@@ -1469,6 +1756,139 @@ function toggleBackups() {
 }
 const broadcastText = ref('')
 
+// 网站设置
+const siteForm = ref({ site_name: '', site_subtitle: '', site_logo: '', site_footer: '', site_icp: '', login_welcome: '' })
+const savingSite = ref(false)
+
+async function loadSiteSettings() {
+  const res = await api.adminSiteSettings()
+  if (res.status === 200 && res.data?.code === 0) {
+    siteForm.value = { ...siteForm.value, ...(res.data.data || {}) }
+  }
+}
+
+async function saveSiteSettings() {
+  savingSite.value = true
+  try {
+    const res = await api.adminSaveSiteSettings({ ...siteForm.value })
+    if (res.status === 200 && res.data?.code === 0) {
+      emit('toast', res.data.message || '网站设置已保存')
+      siteForm.value = { ...siteForm.value, ...(res.data.data || {}) }
+    } else {
+      emit('toast', res.data?.message || res.data?.detail || '保存失败')
+    }
+  } catch { emit('toast', '保存失败') }
+  savingSite.value = false
+}
+
+// 计费系统
+const billingForm = ref({
+  enabled: true,
+  asr_price_per_hour: 1.0,
+  llm_input_price_per_mtokens: 3.0,
+  llm_input_cache_hit_price_per_mtokens: 0.1,
+  llm_output_price_per_mtokens: 9.0,
+  tts_price_per_kchars: 0.5,
+  peak_offpeak_enabled: true,
+  offpeak_discount: 0.5,
+  peak_windows: [['09:00', '12:00'], ['14:00', '18:00']],
+})
+const savingBilling = ref(false)
+const billingStats = ref({})
+const billingRecords = ref([])
+const loadingBilling = ref(false)
+const billingPage = ref(1)
+const billingTotal = ref(0)
+const billingTotalPages = ref(1)
+const billingConfigOpen = ref(false)
+const billingSearch = ref('')
+// 页码列表（当前页前后各 1 页 + 首尾页，中间用省略号）
+const billingPageList = computed(() => {
+  const total = billingTotalPages.value
+  const cur = billingPage.value
+  const pages = []
+  const push = (p) => { if (pages[pages.length - 1] !== p) pages.push(p) }
+  for (let i = 1; i <= total; i++) {
+    if (i === 1 || i === total || Math.abs(i - cur) <= 1) push(i)
+    else if (pages[pages.length - 1] !== '…') push('…')
+  }
+  return pages
+})
+
+function fmtNum(n) {
+  if (n == null) return '—'
+  return Number(n).toLocaleString('zh-CN')
+}
+
+// 大数自动转换：>=1万 显示 X.X万，>=1亿 显示 X.X亿（LLM tokens / TTS 字数会持续增长）
+function fmtBigNum(n) {
+  if (n == null) return '—'
+  n = Number(n)
+  if (n >= 100000000) return trimBigNum(n / 100000000) + '亿'
+  if (n >= 10000) return trimBigNum(n / 10000) + '万'
+  return n.toLocaleString('zh-CN')
+}
+function trimBigNum(v) {
+  return parseFloat(v.toFixed(2)).toString()
+}
+
+async function loadBillingConfig() {
+  try {
+    const res = await api.adminBillingConfig()
+    if (res.status === 200 && res.data?.code === 0) billingForm.value = { ...billingForm.value, ...(res.data.data || {}) }
+  } catch { /* 忽略 */ }
+}
+
+async function saveBillingConfig() {
+  savingBilling.value = true
+  try {
+    const res = await api.adminSaveBillingConfig({ ...billingForm.value })
+    if (res.status === 200 && res.data?.code === 0) {
+      emit('toast', res.data.message || '计费配置已保存')
+      billingForm.value = { ...billingForm.value, ...(res.data.data || {}) }
+    } else {
+      emit('toast', res.data?.message || res.data?.detail || '保存失败')
+    }
+  } catch { emit('toast', '保存失败') }
+  savingBilling.value = false
+}
+
+async function loadBillingStats() {
+  try {
+    const res = await api.adminBillingStats()
+    if (res.status === 200 && res.data?.code === 0) billingStats.value = res.data.data || {}
+  } catch { /* 忽略 */ }
+}
+
+async function loadBillingRecords() {
+  loadingBilling.value = true
+  try {
+    const res = await api.adminBillingRecords({ page: billingPage.value, page_size: 15, device_id: billingSearch.value.trim() })
+    if (res.status === 200 && res.data?.code === 0) {
+      billingRecords.value = res.data.data?.records || []
+      billingTotal.value = res.data.data?.total || 0
+      billingTotalPages.value = Math.max(1, Math.ceil(billingTotal.value / 15))
+      if (billingPage.value > billingTotalPages.value) {
+        billingPage.value = billingTotalPages.value
+        await loadBillingRecords()
+        return
+      }
+    }
+  } catch { /* 忽略 */ }
+  loadingBilling.value = false
+}
+
+function searchBillingRecords() {
+  billingPage.value = 1
+  loadBillingRecords()
+}
+
+function loadBilling() {
+  loadBillingConfig()
+  loadBillingStats()
+  loadBillingRecords()
+}
+
 // 新增板块状态
 const conversations = ref([])
 const loadingConvs = ref(false)
@@ -1505,6 +1925,29 @@ async function loadMetrics() {
   } catch { /* 忽略 */ }
 }
 
+async function loadDailyCost() {
+  loadingDailyCost.value = true
+  try {
+    const res = await api.adminBillingDaily({ days: 7 })
+    if (res.status === 200 && res.data?.code === 0) dailyCost.value = res.data.data?.daily || []
+  } catch { /* 忽略 */ }
+  loadingDailyCost.value = false
+}
+
+// 柱状图：按最大值归一化高度，最小 4% 保证有柱
+function barHeight(v) {
+  const max = Math.max(...dailyCost.value.map(d => d.total_cost), 0.0001)
+  return Math.max(4, (Number(v) / max) * 100)
+}
+function fmtCost(v) {
+  if (v == null) return '—'
+  return '¥' + Number(v).toFixed(2)
+}
+function fmtDay(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00')
+  return (d.getMonth() + 1) + '/' + d.getDate()
+}
+
 async function reloadPlugins() {
   reloadingPlugins.value = true
   try {
@@ -1538,7 +1981,7 @@ async function loadDevices() {
   loadingDevices.value = false
 }
 
-function loadAll() { loadStats(); loadMetrics(); loadUsers(); loadDevices() }
+function loadAll() { loadStats(); loadMetrics(); loadDailyCost(); loadUsers(); loadDevices() }
 
 function startEditUser(u) { editingUser.value = u.user_id; editForm.value = { role: u.role, max_devices: u.max_devices, is_active: u.is_active, nickname: u.nickname } }
 function cancelEditUser() { editingUser.value = ''; editForm.value = {} }
@@ -2039,6 +2482,8 @@ watch(section, (val) => {
   else if (val === 'market') { loadMarketplacePlugins(); loadMarketplaceReviews() }
   else if (val === 'firmware') loadFirmwares()
   else if (val === 'system') { loadSystemInfo(); loadBackups(); loadLogs() }
+  else if (val === 'site') loadSiteSettings()
+  else if (val === 'billing') loadBilling()
   else if (val === 'conversations') { loadAllDevices(); loadConversations() }
   else if (val === 'ws_monitor') loadWsStatus()
   else if (val === 'oplogs') loadOpLogs()
@@ -2282,6 +2727,71 @@ watch(section, (val) => {
 .action-info { min-width: 0; }
 .action-title { font-size: 15px; font-weight: 700; }
 .action-sub { margin-top: 3px; font-size: 12px; color: var(--text-sub); }
+
+/* ===== 近 7 天费用柱状图 ===== */
+.chart-card {
+  margin-top: 20px;
+  padding: 20px 24px 24px;
+  background: var(--grad-card);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--shadow), var(--glass-hi);
+  border-radius: var(--radius-lg);
+}
+.chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+.bar-chart {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  height: 360px;
+  padding-top: 26px;
+}
+.bar-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.bar-track {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.bar-fill {
+  position: relative;
+  width: 58%;
+  min-height: 4px;
+  border-radius: 6px 6px 3px 3px;
+  background: var(--grad-mint);
+  box-shadow: var(--shadow-mint);
+  transition: height .6s cubic-bezier(.22, .61, .36, 1);
+}
+.bar-fill:hover { filter: brightness(1.08); }
+.bar-value {
+  position: absolute;
+  top: -22px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  color: var(--text-sub);
+  white-space: nowrap;
+}
+.bar-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
 
 /* ===== 表格 ===== */
 .table-card {
@@ -2690,6 +3200,47 @@ tbody tr:hover { background: var(--mint-softer); }
 .form-checkbox { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-top: 10px; cursor: pointer; }
 .form-hint { display: block; font-size: 11px; color: var(--text-dim); margin: 2px 0 8px 0; line-height: 1.4; }
 .card-body { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+
+/* ===== 网站设置 ===== */
+.site-form-card {
+  background: var(--grad-card);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--shadow), var(--glass-hi);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.site-form-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--glass-border);
+  background: linear-gradient(180deg, rgba(255,255,255,0.5), rgba(255,255,255,0));
+}
+.collapse-arrow {
+  display: inline-block;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-left: 6px;
+  transition: transform .25s ease;
+  vertical-align: 2px;
+}
+.collapse-arrow.open {
+  transform: rotate(180deg);
+}
+.site-form-body {
+  padding: 8px 24px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 720px;
+}
+.form-row { display: flex; flex-direction: column; }
+.form-row .form-label { margin-top: 16px; }
+.field-disabled { opacity: .45; pointer-events: none; }
 
 /* ===== 表情包网格 ===== */
 .emo-grid {

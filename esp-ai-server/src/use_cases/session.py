@@ -1,4 +1,4 @@
-"""
+﻿"""
 Session Management - 会话管理
 
 与旧架构(app/session/session.py, app/websocket/session_runtime.py)完全对齐：
@@ -18,6 +18,7 @@ from src.domain.entities import SessionState
 from src.infrastructure.logging import get_logger, trace_id_var
 from src.infrastructure.monitoring import get_metrics
 from src.use_cases.auxiliary_services import AudioProcessor, ConversationMemory
+from src.use_cases.billing import BillingAccumulator
 from src.use_cases.pipeline import ConversationPipeline, PipelineConfig
 from src.use_cases.session_fsm import SessionFSM, WSChannel
 from src.use_cases.voice_generator import VoiceGenerator
@@ -47,6 +48,7 @@ class SessionRuntime:
         self.asr_last_audio_time = None
         self.asr_last_result_time = None
         self.asr_start_time = None
+        self.asr_duration_ms = 0  # 计费：ASR 音频时长（毫秒），取自响应 audio_info.duration
         self.asr_stop_event: asyncio.Event | None = None
         self.asr_task: asyncio.Task | None = None
         self.audio_queue: asyncio.Queue | None = None
@@ -59,6 +61,7 @@ class SessionRuntime:
         self.asr_last_audio_time = None
         self.asr_last_result_time = None
         self.asr_start_time = None
+        self.asr_duration_ms = 0
         self.asr_stop_event = None
         self.asr_task = None
         self.audio_queue = None
@@ -106,6 +109,7 @@ class Session:
         self.session_id = str(uuid.uuid4())[:8]
         self.runtime = SessionRuntime()
         self.audio_processor = AudioProcessor()
+        self.billing = BillingAccumulator(device_id, self.session_id)
 
         self.cancel_event = asyncio.Event()
         self._current_pipeline = None
@@ -141,6 +145,16 @@ class Session:
 
         self.no_speech_timeout = no_speech_timeout
         self.silence_timeout = silence_timeout
+
+    def _billing_asr_minutes(self) -> float:
+        """ASR 计费时长（分钟）：优先用响应 audio_info.duration，缺失时回退墙钟时长"""
+        dur_ms = getattr(self.runtime, "asr_duration_ms", 0) or 0
+        if dur_ms > 0:
+            return dur_ms / 1000.0 / 60.0
+        st = self.runtime.asr_start_time
+        if st:
+            return max(0.0, time.time() - st) / 60.0
+        return 0.0
 
     @property
     def tts_playing(self):
@@ -409,6 +423,10 @@ class Session:
                             continue
                         text = result.get("text", "")
                         is_final = result.get("is_final", False)
+                        # 计费：记录 ASR 音频时长（毫秒），取最大值（最终响应最完整）
+                        _dur = result.get("duration") or 0
+                        if _dur:
+                            self.runtime.asr_duration_ms = max(self.runtime.asr_duration_ms, int(_dur))
                         if text:
                             logger.info(f"ASR 识别: {text}")
                         on_text(text)
@@ -895,6 +913,7 @@ class Session:
             device_id=self.device_id,
             ltm_service=self.ltm_service,
             config=pipeline_config,
+            billing=self.billing,
         )
         self._current_pipeline = pipeline
         # 标记"已下发音频、等待设备回 client_out_audio_over"：
@@ -986,6 +1005,7 @@ class Session:
 
             text = self.runtime.asr_full_text
             logger.info(f"[Session:{self.session_id}] ASR 最终: {text}")
+            self.billing.add_asr(self._billing_asr_minutes())
             await self.drain_asr()
 
             if not text.strip():
@@ -1006,8 +1026,12 @@ class Session:
             if result and getattr(result, 'stop_pipeline', False):
                 logger.info(f"[Session:{self.session_id}] Pipeline 被 StopPipeline 终止，不启动下一轮")
                 await self.fsm.set(SessionState.IDLE)
+                # 计费：本轮对话结束（工具接管），保存记录并重置累计器
+                await self.billing.save_record_and_reset()
                 return
 
+            # 计费：本轮对话结束，保存记录并重置累计器
+            await self.billing.save_record_and_reset()
             await self._start_next_cycle()
 
         await self.start_asr(on_text, _on_vad_end_auto)
@@ -1041,6 +1065,7 @@ class Session:
             await self.channel.send_json({"type": "session_status", "status": "iat_end"})
 
             text = self.runtime.asr_full_text
+            self.billing.add_asr(self._billing_asr_minutes())
             await self.drain_asr()
 
             if not text.strip():
@@ -1061,8 +1086,12 @@ class Session:
             if result and getattr(result, 'stop_pipeline', False):
                 logger.info(f"[Session:{self.session_id}] Pipeline 被 StopPipeline 终止，不启动下一轮")
                 await self.fsm.set(SessionState.IDLE)
+                # 计费：本轮对话结束（工具接管），保存记录并重置累计器
+                await self.billing.save_record_and_reset()
                 return
 
+            # 计费：本轮对话结束，保存记录并重置累计器
+            await self.billing.save_record_and_reset()
             await self._start_next_cycle()
 
         await self.start_asr(on_text, _on_vad_end_cycle)
@@ -1174,6 +1203,13 @@ class Session:
             get_metrics().track_session_closed(time.time() - self.session_start_time)
         except Exception:
             pass
+
+        # 计费：保存本次会话用量记录（后台任务，失败不阻断关闭）
+        try:
+            from src.infrastructure.task_manager import background_task
+            background_task(self.billing.save_record(), name=f"billing_save_{self.session_id}")
+        except Exception as e:
+            logger.debug(f"[Session:{self.session_id}] 保存计费记录调度失败: {e}")
 
         logger.info(f"[Session:{self.session_id}] 已关闭")
 

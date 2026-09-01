@@ -19,6 +19,8 @@ from src.infrastructure.db.models.growth import (
 )
 from src.infrastructure.db.models.emo import EmoPackModel
 from src.infrastructure.db.models.skill import SkillModel
+from src.infrastructure.db.models.site_setting import SiteSettingModel
+from src.infrastructure.db.models.billing import BillingConfigModel, BillingRecordModel
 from src.infrastructure.db.models.marketplace import (
     MarketplacePluginModel,
     PluginReviewModel,
@@ -40,6 +42,9 @@ __all__ = [
     "LearningLogModel",
     "EmoPackModel",
     "SkillModel",
+    "SiteSettingModel",
+    "BillingConfigModel",
+    "BillingRecordModel",
     "MarketplacePluginModel",
     "PluginVersionModel",
     "PluginReviewModel",

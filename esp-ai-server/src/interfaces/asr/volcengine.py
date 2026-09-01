@@ -301,6 +301,12 @@ class VolcEngineASRGateway(BaseASRGateway):
             result_data = result.get("result", {})
             texts = result_data.get("texts", [])
 
+            # 计费：音频时长（毫秒），火山 ASR 按音频时长计费
+            duration_ms = 0
+            audio_info = result_data.get("audio_info") or {}
+            if isinstance(audio_info, dict):
+                duration_ms = int(audio_info.get("duration", 0) or 0)
+
             is_final = result.get("is_final", False)
 
             if not is_final:
@@ -319,12 +325,14 @@ class VolcEngineASRGateway(BaseASRGateway):
                 return {
                     "text": text,
                     "is_final": is_final,
+                    "duration": duration_ms,
                 }
 
             text = result_data.get("text", "")
             return {
                 "text": text,
                 "is_final": is_final,
+                "duration": duration_ms,
             }
         except Exception as e:
             logger.debug(f"VolcEngine ASR response parse error: {e}")

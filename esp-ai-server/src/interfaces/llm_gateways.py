@@ -180,6 +180,10 @@ class OpenAILLMGateway:
         # 业务指标：LLM 请求计时起点
         _llm_track_start = time.time()
         _llm_track_status = "success"
+        # 计费：累计本轮所有 LLM 调用的 tokens（finally 中暴露给 pipeline）
+        total_tokens = 0          # 输出 tokens
+        total_input_tokens = 0    # 输入 tokens（含缓存命中）
+        total_cache_hit_tokens = 0  # 输入中命中缓存的部分
         # 向下游 LLM 服务传播 trace_id（从 contextvar 读取）
         _trace_headers = {}
         try:
@@ -209,6 +213,8 @@ class OpenAILLMGateway:
                             model=model,
                             messages=messages,
                             stream=True,
+                            # 计费：流式必须显式请求 usage，否则末尾 chunk 不返回 tokens 统计
+                            stream_options={"include_usage": True},
                             extra_headers=_trace_headers,
                             **({"tools": tools_param, "tool_choice": "auto"} if tools_param else {}),
                         )
@@ -222,6 +228,12 @@ class OpenAILLMGateway:
 
                     logger.info("[OpenAI LLM Pipeline streaming output started]")
                     async for chunk in response:
+                        # 计费：usage 通常出现在空 choices 的末尾 chunk，需先于 delta 判空捕获
+                        if hasattr(chunk, "usage") and chunk.usage:
+                            total_tokens += (chunk.usage.completion_tokens or 0)
+                            total_input_tokens += (chunk.usage.prompt_tokens or 0)
+                            total_cache_hit_tokens += (getattr(chunk.usage, "prompt_cache_hit_tokens", None) or 0)
+
                         delta = chunk.choices[0].delta if chunk.choices else None
                         if not delta:
                             continue
@@ -379,6 +391,8 @@ class OpenAILLMGateway:
                             model=_model,
                             messages=messages,
                             stream=True,
+                            # 计费：流式必须显式请求 usage，否则末尾 chunk 不返回 tokens 统计
+                            stream_options={"include_usage": True},
                             extra_headers=_trace_headers,
                             **({"tools": _tools_param, "tool_choice": "auto"} if _tools_param else {}),
                         )
@@ -391,6 +405,12 @@ class OpenAILLMGateway:
 
                     logger.info(f"[OpenAI LLM Pipeline streaming output started (round {round_num})]")
                     async for chunk in response:
+                        # 计费：usage 通常出现在空 choices 的末尾 chunk，需先于 delta 判空捕获
+                        if hasattr(chunk, "usage") and chunk.usage:
+                            total_tokens += (chunk.usage.completion_tokens or 0)
+                            total_input_tokens += (chunk.usage.prompt_tokens or 0)
+                            total_cache_hit_tokens += (getattr(chunk.usage, "prompt_cache_hit_tokens", None) or 0)
+
                         delta = chunk.choices[0].delta if chunk.choices else None
                         if not delta:
                             continue
@@ -507,6 +527,10 @@ class OpenAILLMGateway:
             logger.error(f"[OpenAI LLM] Streaming request exception (after {LLM_MAX_RETRIES} retries): {e}")
             yield f"LLM error: {str(e)}"
         finally:
+            # 计费：暴露本轮累计 tokens，供 pipeline 读取
+            self.last_completion_tokens = total_tokens
+            self.last_prompt_tokens = total_input_tokens
+            self.last_cache_hit_tokens = total_cache_hit_tokens
             # 业务指标：LLM 请求结果与耗时
             try:
                 get_metrics().track_llm_request(self.model or "openai", _llm_track_status, time.time() - _llm_track_start)

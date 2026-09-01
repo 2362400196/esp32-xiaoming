@@ -800,6 +800,10 @@ def _register_routes(app: FastAPI) -> None:
     from src.infrastructure.routes.wechat import router as wechat_router
     app.include_router(wechat_router)
 
+    # 网站设置公共路由（网站名称等公开信息）
+    from src.infrastructure.routes.site import router as site_router
+    app.include_router(site_router)
+
 
 def get_server_ips() -> list[str]:
     ips = []

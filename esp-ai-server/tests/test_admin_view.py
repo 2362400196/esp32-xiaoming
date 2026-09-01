@@ -455,10 +455,10 @@ class TestAdminFirmwares:
         from src.infrastructure import device_api
         tc, fw_dir = fw_client
 
-        # 上传（带 bin_id/版本）→ 自动启用
+        # 上传（bin_id_mode=custom 指定 bin_id/版本）→ 自动启用
         res = tc.post("/api/v1/admin/firmwares/upload",
                       files={"file": ("esp32s3-1.1.0.bin", b"FWDATA123", "application/octet-stream")},
-                      data={"bin_id": "bin-new", "version": "1.1.0"})
+                      data={"bin_id_mode": "custom", "bin_id": "bin-new", "version": "1.1.0"})
         assert res.status_code == 200
         assert res.json()["data"]["active"] is True
         assert (fw_dir / "esp32s3-1.1.0.bin").exists()
@@ -479,7 +479,7 @@ class TestAdminFirmwares:
         # 上传第二个固件 → 旧的自动取消启用
         tc.post("/api/v1/admin/firmwares/upload",
                 files={"file": ("esp32s3-1.2.0.bin", b"FWDATA456", "application/octet-stream")},
-                data={"bin_id": "bin-newer", "version": "1.2.0"})
+                data={"bin_id_mode": "custom", "bin_id": "bin-newer", "version": "1.2.0"})
         items = tc.get("/api/v1/admin/firmwares").json()["data"]["firmwares"]
         actives = [i for i in items if i["active"]]
         assert len(actives) == 1 and actives[0]["filename"] == "esp32s3-1.2.0.bin"

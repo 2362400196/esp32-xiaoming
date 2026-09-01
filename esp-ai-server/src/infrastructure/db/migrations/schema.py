@@ -69,6 +69,7 @@ async def init_db() -> None:
         devices_cols = await _existing_columns(conn, "devices")
         marketplace_cols = await _existing_columns(conn, "marketplace_plugins")
         users_cols = await _existing_columns(conn, "users")
+        billing_cols = await _existing_columns(conn, "billing_records")
 
         # token_version：JWT 吊销版本号（改密码/停用用户时 +1），旧库补列默认 0
         await _ensure_column(conn, "users", "token_version",
@@ -114,6 +115,29 @@ async def init_db() -> None:
         await _ensure_column(conn, "marketplace_plugins", "icon",
             "ALTER TABLE marketplace_plugins ADD COLUMN icon VARCHAR(256) NOT NULL DEFAULT ''",
             marketplace_cols)
+        # 计费：LLM 是否按谷时折扣计费（峰谷计费审计标记），旧库补列默认 0
+        await _ensure_column(conn, "billing_records", "llm_offpeak",
+            "ALTER TABLE billing_records ADD COLUMN llm_offpeak BOOLEAN NOT NULL DEFAULT 0",
+            billing_cols)
+        # ASR 改为按时长计费：新增 asr_seconds（秒），旧 asr_chars 字段保留
+        await _ensure_column(conn, "billing_records", "asr_seconds",
+            "ALTER TABLE billing_records ADD COLUMN asr_seconds FLOAT NOT NULL DEFAULT 0",
+            billing_cols)
+        # ASR 时长单位改为分钟：新增 asr_minutes，并把旧秒数据转换为分钟（/60）
+        await _ensure_column(conn, "billing_records", "asr_minutes",
+            "ALTER TABLE billing_records ADD COLUMN asr_minutes FLOAT NOT NULL DEFAULT 0",
+            billing_cols)
+        try:
+            await conn.execute(text(
+                "UPDATE billing_records SET asr_minutes = asr_seconds / 60.0 "
+                "WHERE asr_minutes = 0 AND asr_seconds > 0"
+            ))
+        except Exception as e:
+            logger.debug(f"[DB] asr_minutes 数据迁移跳过: {e}")
+        # 计费：LLM 输入 tokens 中缓存命中的部分（DeepSeek 缓存命中价低于未命中价）
+        await _ensure_column(conn, "billing_records", "llm_cache_hit_tokens",
+            "ALTER TABLE billing_records ADD COLUMN llm_cache_hit_tokens INTEGER NOT NULL DEFAULT 0",
+            billing_cols)
 
         # === 权限引导：系统中没有管理员时，最早注册的用户自动提升为管理员 ===
         # （兼容已部署系统：首个用户注册时已是 admin 的逻辑只对新系统生效）

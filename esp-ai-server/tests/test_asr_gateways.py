@@ -305,6 +305,29 @@ class TestVolcEngineASRGateway:
         assert parsed["text"] == "partial"
         assert parsed["is_final"] is False
 
+    def test_parse_response_extracts_audio_duration(self, patched_asr):
+        """计费：解析 audio_info.duration（毫秒）"""
+        gw = VolcEngineASRGateway(config={"api_key": "k"})
+        result_dict = {
+            "result": {
+                "texts": [{"text": "你好"}],
+                "audio_info": {"duration": 8040},
+            },
+            "is_final": True,
+        }
+        response = _build_volc_response(gw, result_dict)
+        parsed = gw.parse_response(response)
+        assert parsed["text"] == "你好"
+        assert parsed["duration"] == 8040
+
+    def test_parse_response_duration_default_zero(self, patched_asr):
+        """计费：无 audio_info 时 duration 为 0"""
+        gw = VolcEngineASRGateway(config={"api_key": "k"})
+        result_dict = {"result": {"texts": [{"text": "hi"}]}}
+        response = _build_volc_response(gw, result_dict)
+        parsed = gw.parse_response(response)
+        assert parsed["duration"] == 0
+
     def test_parse_response_error_code_returns_none(self, patched_asr):
         gw = VolcEngineASRGateway(config={"api_key": "k"})
         result_dict = {"code": 1001, "message": "bad"}

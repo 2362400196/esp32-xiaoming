@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from src.interfaces.llm_gateways import OpenAILLMGateway
     from src.interfaces.tts_gateways import VolcEngineTTSGateway
     from src.use_cases.auxiliary_services import ConversationMemory
+    from src.use_cases.billing import BillingAccumulator
     from src.use_cases.memory import LongTermMemoryServiceImpl
     from src.use_cases.session_fsm import SessionFSM, WSChannel
 
@@ -353,6 +354,7 @@ class ConversationPipeline:
         precomputed_skill_catalog: Optional[str] = None,
         memory_search_keywords: Optional[list[str]] = None,
         max_sentences: int = 100,
+        billing: Optional["BillingAccumulator"] = None,
     ) -> None:
         self.llm_processor = llm_processor
         self.tts_processor = tts_processor
@@ -364,6 +366,8 @@ class ConversationPipeline:
         self.user_config = user_config
         self.device_id = device_id
         self.ltm_service = ltm_service
+        # 计费累加器（由 Session 注入，记录本轮 LLM tokens / TTS 字数）
+        self.billing = billing
         # 记忆检索关键词：None 时使用 DEFAULT_MEMORY_SEARCH_KEYWORDS
         self.memory_search_keywords = memory_search_keywords
 
@@ -852,6 +856,12 @@ class ConversationPipeline:
             _perf["llm_end"] = time.time()
             _perf["llm_chars"] = len(full_text)
             _perf["llm_sentences"] = seq_id
+            # 计费：累加 LLM tokens（网关已按本轮所有调用累计 completion/prompt/cache_hit）
+            if self.billing is not None:
+                _llm_tokens = getattr(llm, "last_completion_tokens", 0) or 0
+                _llm_input = getattr(llm, "last_prompt_tokens", 0) or 0
+                _llm_cache_hit = getattr(llm, "last_cache_hit_tokens", 0) or 0
+                self.billing.add_llm(output_tokens=_llm_tokens, input_tokens=_llm_input, cache_hit_tokens=_llm_cache_hit)
             logger.info(f"[Pipeline] LLM 结束，共 {seq_id} 句，full_text={len(full_text)}字符")
 
         memory_enabled = True
@@ -1078,6 +1088,10 @@ class ConversationPipeline:
                 sentence_text = sentence_text.replace('\n\n', '\n').replace('  ', ' ').strip()
 
                 sentence_text = self._detect_and_send_emotion(sentence_text)
+
+                # 计费：累加本次 TTS 合成文本字符数（含标点）
+                if self.billing is not None:
+                    self.billing.add_tts(len(sentence_text))
 
                 logger.info(f"[Pipeline] TTS 合成 #{seq_id}: {sentence_text[:60]}...")
 

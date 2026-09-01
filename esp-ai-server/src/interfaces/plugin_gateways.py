@@ -74,9 +74,11 @@ class PluginLLMGateway:
         config = self._build_plugin_config(user_config)
         _start = time.time()
         _status = "success"
+        # 计费：收集本轮 tokens，流结束后暴露给 pipeline
+        _usage_sink: dict = {}
 
         try:
-            async for token in call_llm_chat(messages, config, self.tool_manager):
+            async for token in call_llm_chat(messages, config, self.tool_manager, usage_sink=_usage_sink):
                 if token.startswith("[LLM"):
                     if "error" in token:
                         _status = "error"
@@ -95,6 +97,10 @@ class PluginLLMGateway:
                 get_metrics().track_llm_request("plugin", _status, time.time() - _start)
             except Exception:
                 pass
+            # 计费：暴露本轮累计 tokens，供 pipeline 读取
+            self.last_prompt_tokens = _usage_sink.get("input_tokens", 0)
+            self.last_completion_tokens = _usage_sink.get("output_tokens", 0)
+            self.last_cache_hit_tokens = _usage_sink.get("cache_hit_tokens", 0)
 
     async def generate(self, messages, **kwargs):
         """非流式生成 - 收集所有 token 后返回完整文本"""

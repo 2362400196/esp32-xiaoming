@@ -53,6 +53,8 @@ async def llm_openai_start_chat(messages: list, config: dict | None = None,
         "model": model,
         "messages": messages,
         "stream": True,
+        # 计费：流式必须显式请求 usage，否则末尾 chunk 不返回 tokens 统计
+        "stream_options": {"include_usage": True},
     }
     # 工具调用：config["tools"] 由框架适配层传入（已按用户查询预筛选）
     tools = cfg.get("tools")
@@ -125,12 +127,17 @@ async def llm_openai_get_next(chat_id: str, tool_manager=None) -> dict:
         data = line[5:].strip()
         if data == "[DONE]":
             session["done"] = True
-            return {"token": "", "done": True, "error": None}
+            return {"token": "", "done": True, "error": None, "usage": session.get("usage")}
 
         try:
             obj = json.loads(data)
         except json.JSONDecodeError:
             continue
+
+        # 计费：usage 通常出现在空 choices 的末尾 chunk，需先于 choices 判空捕获
+        usage = obj.get("usage")
+        if usage:
+            session["usage"] = usage
 
         choices = obj.get("choices") or []
         if not choices:
@@ -175,7 +182,7 @@ async def llm_openai_get_next(chat_id: str, tool_manager=None) -> dict:
                 for i, v in sorted(session["raw_tool_calls"].items())
                 if v["function_name"]
             ]
-            return {"token": "", "tool_calls": tool_calls, "done": True, "error": None}
+            return {"token": "", "tool_calls": tool_calls, "done": True, "error": None, "usage": session.get("usage")}
 
 
 @tool(cache=False)

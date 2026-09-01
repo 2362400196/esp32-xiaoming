@@ -3,7 +3,7 @@
     <div class="nav-inner">
       <div class="nav-brand" @click="$emit('switch', 'home')">
         <span class="brand-logo"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4m-2 0h4"/><circle cx="9" cy="13" r="0.5" fill="currentColor"/><circle cx="15" cy="13" r="0.5" fill="currentColor"/><path d="M9 17h6"/></svg></span>
-        <span class="brand-name">ESP-<span class="text-mint">AI</span></span>
+        <span class="brand-name">{{ brandMain }}<span v-if="brandAccent" class="text-mint">{{ brandAccent }}</span></span>
       </div>
 
       <nav class="nav-menu">
@@ -72,11 +72,23 @@ const props = defineProps({
   active: { type: String, default: 'home' },
   items: { type: Array, default: () => [] },
   isAdmin: { type: Boolean, default: false },
+  siteName: { type: String, default: '' },
 })
 const emit = defineEmits(['switch'])
 
 const dropdownOpen = ref(null)
 const userMenuOpen = ref(false)
+
+// 品牌名：默认 小明同学，末段（最后一个空格后）用薄荷绿强调
+const brandName = computed(() => props.siteName?.trim() || '小明同学')
+const brandMain = computed(() => {
+  const i = brandName.value.lastIndexOf(' ')
+  return i > 0 ? brandName.value.slice(0, i + 1) : brandName.value
+})
+const brandAccent = computed(() => {
+  const i = brandName.value.lastIndexOf(' ')
+  return i > 0 ? brandName.value.slice(i + 1) : ''
+})
 
 function toggleDropdown(id) {
   dropdownOpen.value = dropdownOpen.value === id ? null : id

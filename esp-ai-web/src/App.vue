@@ -2,7 +2,7 @@
   <div class="app">
     <!-- 未登录时不显示导航栏（登录页保持干净）；开发者编辑器打开时隐藏导航栏（带过渡动画） -->
     <Transition name="nav">
-      <NavBar v-if="loggedIn && !editorOpen && tab !== 'admin'" :active="tab" :items="navItems" :is-admin="isAdmin" @switch="switchTab" />
+      <NavBar v-if="loggedIn && !editorOpen && tab !== 'admin'" :active="tab" :items="navItems" :is-admin="isAdmin" :site-name="siteName" @switch="switchTab" />
     </Transition>
 
     <main class="stage">
@@ -73,6 +73,17 @@ function onEditorChange(v) {
 }
 const loggedIn = ref(isLoggedIn())
 const isAdmin = computed(() => getUser()?.role === 'admin')
+const siteName = ref('')
+const siteSettings = ref({})
+
+async function loadSiteSettings() {
+  const res = await api.siteSettings()
+  if (res.status === 200 && res.data?.code === 0) {
+    siteSettings.value = res.data.data || {}
+    siteName.value = siteSettings.value.site_name || ''
+    document.title = siteName.value ? `${siteName.value} · 智能语音助手` : '小明同学 · 智能语音助手'
+  }
+}
 const navItems = ref([
   { id: 'devices', label: '设备' },
   { id: 'store', label: '商店' },
@@ -370,6 +381,7 @@ onMounted(async () => {
   refreshDevices()
   await syncPluginNav()
   connectWs()
+  loadSiteSettings()
   pollTimer = setInterval(() => { if (isLoggedIn()) refreshDevices() }, 20000)
 })
 onBeforeUnmount(() => { clearInterval(pollTimer); clearTimeout(editorCloseTimer); disconnectWs() })

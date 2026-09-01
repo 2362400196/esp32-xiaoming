@@ -685,6 +685,9 @@ class WebSocketSessionHandler:
             await session.send_session_end()
             return
 
+        # 计费：累加本次 ASR 音频时长（分钟），火山 ASR 按时长计费
+        session.billing.add_asr(session._billing_asr_minutes())
+
         rate_limit = user_config.rate_limit_rpm if user_config and user_config.rate_limit_rpm is not None else settings.rate_limit.max_rpm
         if rate_limit > 0:
             now = time.time()
@@ -778,6 +781,8 @@ class WebSocketSessionHandler:
                 self._trigger_growth()
                 await fsm.set(SessionState.IDLE)
                 session.tts_playback_done.set()
+                # 计费：本轮对话结束（工具接管），保存记录并重置累计器
+                await session.billing.save_record_and_reset()
                 return
 
             # 获取音频总时长（毫秒）
@@ -790,6 +795,8 @@ class WebSocketSessionHandler:
                 _log_perf_report(session, result, _pipeline, session.runtime.asr_full_text)
                 session.tts_playback_done.set()
                 self._trigger_growth()
+                # 计费：本轮对话结束（无音频输出），保存记录并重置累计器
+                await session.billing.save_record_and_reset()
                 if not session._closed and fsm.get() != SessionState.IDLE:
                     # 新一轮唤醒流程进行中（新 start 命令取消了本 pipeline）：
                     # 不在此启动下一轮 ASR，由 _do_wake_start 在唤醒音频播完后统一启动，
@@ -825,6 +832,9 @@ class WebSocketSessionHandler:
             # 检查是否有 WeChat 回复待发送
             if result and result.full_text:
                 await self._send_wechat_reply_if_needed(result.full_text)
+
+            # 计费：本轮对话结束（TTS 播放完成），保存记录并重置累计器
+            await session.billing.save_record_and_reset()
 
             if not session._closed and fsm.get() != SessionState.IDLE:
                 await self._start_next_asr()

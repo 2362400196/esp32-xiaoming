@@ -1,4 +1,4 @@
-// ============ API 封装（复用 esp-ai-server 全部接口） ============
+// ============ API 封装（复用小明同学服务端全部接口） ============
 const BASE = ''
 
 let _token = localStorage.getItem('espai_token') || ''
@@ -243,6 +243,16 @@ getActiveEmoPack: (deviceId) => request('/api/v1/emos/active/' + encodeURICompon
     adminCreateScheduledTask: (data) => request('/api/v1/admin/scheduled-tasks', 'POST', data),
     adminDeleteScheduledTask: (taskId) => request('/api/v1/admin/scheduled-tasks/' + encodeURIComponent(taskId), 'DELETE'),
     adminDeleteEmojiFile: (packName, filename) => request('/api/v1/admin/emojis/' + encodeURIComponent(packName) + '/emoji/' + encodeURIComponent(filename), 'DELETE'),
+    // 网站设置
+    siteSettings: () => request('/api/v1/site/settings'),
+    adminSiteSettings: () => request('/api/v1/admin/site-settings'),
+    adminSaveSiteSettings: (data) => request('/api/v1/admin/site-settings', 'PUT', data),
+    // 计费系统
+    adminBillingConfig: () => request('/api/v1/admin/billing/config'),
+    adminSaveBillingConfig: (data) => request('/api/v1/admin/billing/config', 'PUT', data),
+    adminBillingRecords: (params = {}) => request('/api/v1/admin/billing/records?' + new URLSearchParams(params)),
+    adminBillingStats: () => request('/api/v1/admin/billing/stats'),
+    adminBillingDaily: (params = {}) => request('/api/v1/admin/billing/daily?' + new URLSearchParams(params)),
     // 微信绑定
     wechatQrStart: () => request('/api/v1/wechat/qr-start', 'POST'),
     wechatQrStatus: () => request('/api/v1/wechat/qr-status'),

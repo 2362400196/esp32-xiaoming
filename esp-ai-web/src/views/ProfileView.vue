@@ -3,9 +3,9 @@
     <!-- 未登录：居中登录卡 -->
     <div v-if="!loggedIn" class="auth-wrap">
       <div class="auth-card glass">
-        <div class="auth-logo"><span class="auth-logo-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4m-2 0h4"/><circle cx="9" cy="13" r="0.5" fill="currentColor"/><circle cx="15" cy="13" r="0.5" fill="currentColor"/><path d="M9 17h6"/></svg></span>ESP-<span class="grad-text">AI</span></div>
+        <div class="auth-logo"><span class="auth-logo-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4m-2 0h4"/><circle cx="9" cy="13" r="0.5" fill="currentColor"/><circle cx="15" cy="13" r="0.5" fill="currentColor"/><path d="M9 17h6"/></svg></span>{{ brandMain }}<span v-if="brandAccent" class="grad-text">{{ brandAccent }}</span></div>
         <h2 class="auth-title">{{ mode === 'login' ? '欢迎回来' : '创建账号' }}</h2>
-        <p class="auth-sub">{{ mode === 'login' ? '登录以管理你的智能设备' : '首个注册用户将成为管理员' }}</p>
+        <p class="auth-sub">{{ mode === 'login' ? (loginWelcome || '登录以管理你的智能设备') : '首个注册用户将成为管理员' }}</p>
         <input class="input" v-model="email" placeholder="邮箱 / 手机号" type="text" />
         <input v-if="mode === 'register'" class="input" v-model="nickname" placeholder="昵称（可选）" type="text" />
         <input class="input" v-model="password" placeholder="密码" type="password" @keyup.enter="submit" />
@@ -146,7 +146,30 @@ async function syncProfile() {
 
 onMounted(() => {
   syncProfile()
+  loadSiteSettings()
 })
+
+// 网站设置：登录页 Logo 名称与欢迎语
+const siteName = ref('')
+const loginWelcome = ref('')
+const brandName = computed(() => siteName.value?.trim() || '小明同学')
+const brandMain = computed(() => {
+  const i = brandName.value.lastIndexOf(' ')
+  return i > 0 ? brandName.value.slice(0, i + 1) : brandName.value
+})
+const brandAccent = computed(() => {
+  const i = brandName.value.lastIndexOf(' ')
+  return i > 0 ? brandName.value.slice(i + 1) : ''
+})
+
+async function loadSiteSettings() {
+  const res = await api.siteSettings()
+  if (res.status === 200 && res.data?.code === 0) {
+    const d = res.data.data || {}
+    siteName.value = d.site_name || ''
+    loginWelcome.value = d.login_welcome || ''
+  }
+}
 
 function logout() {
   setAuth('', null)

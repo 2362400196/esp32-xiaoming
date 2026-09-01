@@ -163,6 +163,7 @@ async def call_llm_chat(
     config: dict | None = None,
     tool_manager=None,
     provider: str | None = None,
+    usage_sink: dict | None = None,
 ) -> AsyncIterator[str]:
     """通过 LLM 服务插件流式调用对话，逐 token 产出（含工具调用链）。
 
@@ -171,6 +172,8 @@ async def call_llm_chat(
         config: 插件配置（如 api_key, model, base_url 等）
         tool_manager: 工具管理器
         provider: 指定 Provider 名称，为 None 时用第一个注册的
+        usage_sink: 计费用可变字典；流结束后写入本轮累计的
+            input_tokens / output_tokens / cache_hit_tokens
 
     Yields:
         逐 token 文本
@@ -189,6 +192,10 @@ async def call_llm_chat(
 
     round_num = 0
     failed_tool_calls: set = set()
+    # 计费：跨所有工具轮次累计 tokens（usage_sink 由 PluginLLMGateway 传入）
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_cache_hit_tokens = 0
 
     while round_num < MAX_TOOL_ROUNDS:
         round_num += 1
@@ -249,6 +256,11 @@ async def call_llm_chat(
                         idx = tc.get("index", len(raw_tool_calls))
                         raw_tool_calls[idx] = tc
                     if chunk_parsed.get("done"):
+                        # 计费：累加本轮 usage（插件在流结束时返回 usage）
+                        _usage = chunk_parsed.get("usage") or {}
+                        total_input_tokens += int(_usage.get("prompt_tokens", 0) or 0)
+                        total_output_tokens += int(_usage.get("completion_tokens", 0) or 0)
+                        total_cache_hit_tokens += int(_usage.get("prompt_cache_hit_tokens", 0) or 0)
                         break
                 else:
                     break
@@ -347,6 +359,12 @@ async def call_llm_chat(
                 logger.info("[PluginLLM] 工具执行完毕，已发送清除指令")
             except Exception as _clr_err:
                 logger.debug(f"[PluginLLM] 发送清除指令失败: {_clr_err}")
+
+    # 计费：暴露本轮累计 tokens，供 PluginLLMGateway 读取
+    if usage_sink is not None:
+        usage_sink["input_tokens"] = total_input_tokens
+        usage_sink["output_tokens"] = total_output_tokens
+        usage_sink["cache_hit_tokens"] = total_cache_hit_tokens
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -1,4 +1,4 @@
-"""管理员后台 API
+﻿"""管理员后台 API
 
 所有接口均要求当前用户 role=admin：
 - GET    /api/v1/admin/stats              - 后台仪表盘统计
@@ -2020,6 +2020,202 @@ async def admin_update_settings(data: dict, admin: UserModel = Depends(require_a
         "message": f"已保存 {len(updates)} 项设置",
         "data": {"updated": len(updates), "restart_keys": restart_keys},
     }
+
+
+# ==================== 网站设置 ====================
+
+@router.get("/site-settings")
+async def admin_get_site_settings(_: UserModel = Depends(require_admin)):
+    """获取网站设置（管理员）"""
+    from src.infrastructure.routes.site import get_site_settings
+    settings = await get_site_settings()
+    return {"code": 0, "message": "ok", "data": settings}
+
+
+@router.put("/site-settings")
+async def admin_update_site_settings(data: dict, admin: UserModel = Depends(require_admin)):
+    """更新网站设置（管理员）：白名单过滤后写入数据库"""
+    if not isinstance(data, dict) or not data:
+        raise HTTPException(400, "请求体不能为空")
+    from src.infrastructure.routes.site import save_site_settings
+    settings = await save_site_settings(data)
+    _add_oplog(admin.email, "update_site_settings", f"修改网站设置: {', '.join(sorted(k for k in data if k))}")
+    logger.info(f"[Admin] 更新网站设置: {sorted(k for k in data if k)}")
+    return {"code": 0, "message": "网站设置已保存", "data": settings}
+
+
+# ==================== 计费系统 ====================
+
+@router.get("/billing/config")
+async def admin_get_billing_config(_: UserModel = Depends(require_admin)):
+    """获取计费配置（单价）"""
+    from src.use_cases.billing import get_billing_config
+    config = await get_billing_config()
+    return {"code": 0, "message": "ok", "data": config}
+
+
+@router.put("/billing/config")
+async def admin_update_billing_config(data: dict, admin: UserModel = Depends(require_admin)):
+    """更新计费配置（单价）：白名单过滤 + 数值校验后写入数据库"""
+    if not isinstance(data, dict) or not data:
+        raise HTTPException(400, "请求体不能为空")
+    from src.use_cases.billing import save_billing_config
+    config = await save_billing_config(data)
+    _add_oplog(admin.email, "update_billing_config", f"修改计费配置: {', '.join(sorted(k for k in data if k))}")
+    logger.info(f"[Admin] 更新计费配置: {sorted(k for k in data if k)}")
+    return {"code": 0, "message": "计费配置已保存", "data": config}
+
+
+@router.get("/billing/records")
+async def admin_billing_records(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    device_id: str = Query("", description="按设备过滤"),
+    _: UserModel = Depends(require_admin),
+):
+    """计费记录列表（分页，按时间倒序）"""
+    from src.infrastructure.db.models.billing import BillingRecordModel
+    async with get_session_ctx() as session:
+        conds = []
+        if device_id:
+            conds.append(BillingRecordModel.device_id == device_id)
+        total = await session.scalar(
+            select(func.count()).select_from(BillingRecordModel).where(*conds)
+        ) or 0
+        rows = (
+            await session.execute(
+                select(BillingRecordModel)
+                .where(*conds)
+                .order_by(desc(BillingRecordModel.created_at))
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        ).scalars().all()
+        records = [
+            {
+                "id": r.id,
+                "device_id": r.device_id,
+                "session_id": r.session_id,
+                "asr_minutes": r.asr_minutes,
+                "llm_input_tokens": r.llm_input_tokens,
+                "llm_output_tokens": r.llm_output_tokens,
+                "llm_cache_hit_tokens": r.llm_cache_hit_tokens,
+                "tts_chars": r.tts_chars,
+                "asr_cost": r.asr_cost,
+                "llm_cost": r.llm_cost,
+                "tts_cost": r.tts_cost,
+                "total_cost": r.total_cost,
+                "llm_offpeak": bool(r.llm_offpeak),
+                "created_at": r.created_at,
+            }
+            for r in rows
+        ]
+        return {"code": 0, "message": "ok", "data": {"total": total, "records": records}}
+
+
+@router.get("/billing/stats")
+async def admin_billing_stats(_: UserModel = Depends(require_admin)):
+    """计费统计：累计用量与费用 + 按设备汇总（设备级记账）"""
+    from src.infrastructure.db.models.billing import BillingRecordModel
+    async with get_session_ctx() as session:
+        row = (
+            await session.execute(
+                select(
+                    func.count(BillingRecordModel.id),
+                    func.coalesce(func.sum(BillingRecordModel.asr_minutes), 0),
+                    func.coalesce(func.sum(BillingRecordModel.llm_input_tokens), 0),
+                    func.coalesce(func.sum(BillingRecordModel.llm_output_tokens), 0),
+                    func.coalesce(func.sum(BillingRecordModel.llm_cache_hit_tokens), 0),
+                    func.coalesce(func.sum(BillingRecordModel.tts_chars), 0),
+                    func.coalesce(func.sum(BillingRecordModel.asr_cost), 0.0),
+                    func.coalesce(func.sum(BillingRecordModel.llm_cost), 0.0),
+                    func.coalesce(func.sum(BillingRecordModel.tts_cost), 0.0),
+                    func.coalesce(func.sum(BillingRecordModel.total_cost), 0.0),
+                )
+            )
+        ).one()
+        # 按设备汇总（费用从高到低）
+        per_device_rows = (
+            await session.execute(
+                select(
+                    BillingRecordModel.device_id,
+                    func.count(BillingRecordModel.id),
+                    func.coalesce(func.sum(BillingRecordModel.asr_minutes), 0),
+                    func.coalesce(func.sum(BillingRecordModel.llm_input_tokens), 0),
+                    func.coalesce(func.sum(BillingRecordModel.llm_output_tokens), 0),
+                    func.coalesce(func.sum(BillingRecordModel.llm_cache_hit_tokens), 0),
+                    func.coalesce(func.sum(BillingRecordModel.tts_chars), 0),
+                    func.coalesce(func.sum(BillingRecordModel.asr_cost), 0.0),
+                    func.coalesce(func.sum(BillingRecordModel.llm_cost), 0.0),
+                    func.coalesce(func.sum(BillingRecordModel.tts_cost), 0.0),
+                    func.coalesce(func.sum(BillingRecordModel.total_cost), 0.0),
+                )
+                .group_by(BillingRecordModel.device_id)
+                .order_by(desc(func.sum(BillingRecordModel.total_cost)))
+            )
+        ).all()
+        per_device = [
+            {
+                "device_id": r[0],
+                "record_count": r[1],
+                "asr_minutes": r[2],
+                "llm_input_tokens": r[3],
+                "llm_output_tokens": r[4],
+                "llm_cache_hit_tokens": r[5],
+                "tts_chars": r[6],
+                "asr_cost": round(r[7], 6),
+                "llm_cost": round(r[8], 6),
+                "tts_cost": round(r[9], 6),
+                "total_cost": round(r[10], 6),
+            }
+            for r in per_device_rows
+        ]
+        return {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "record_count": row[0],
+                "asr_minutes": row[1],
+                "llm_input_tokens": row[2],
+                "llm_output_tokens": row[3],
+                "llm_cache_hit_tokens": row[4],
+                "tts_chars": row[5],
+                "asr_cost": round(row[6], 6),
+                "llm_cost": round(row[7], 6),
+                "tts_cost": round(row[8], 6),
+                "total_cost": round(row[9], 6),
+                "per_device": per_device,
+            },
+        }
+
+
+@router.get("/billing/daily")
+async def admin_billing_daily(days: int = Query(7, ge=1, le=31), _: UserModel = Depends(require_admin)):
+    """近 N 天每日累计费用（按本地日期分组 sum(total_cost)，无记录的天补 0）"""
+    from datetime import datetime, timedelta
+    from src.infrastructure.db.models.billing import BillingRecordModel
+    async with get_session_ctx() as session:
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        start = today - timedelta(days=days - 1)
+        # created_at 为 UTC UNIX 时间戳（秒），按本地时区转日期后分组
+        rows = (
+            await session.execute(
+                select(BillingRecordModel.created_at, BillingRecordModel.total_cost)
+                .where(BillingRecordModel.created_at >= start.timestamp())
+            )
+        ).all()
+        by_date: dict[str, float] = {}
+        for ts, cost in rows:
+            key = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+            by_date[key] = by_date.get(key, 0.0) + (cost or 0.0)
+        daily = [
+            {
+                "date": (start + timedelta(days=i)).strftime("%Y-%m-%d"),
+                "total_cost": round(by_date.get((start + timedelta(days=i)).strftime("%Y-%m-%d"), 0.0), 6),
+            }
+            for i in range(days)
+        ]
+        return {"code": 0, "message": "ok", "data": {"days": days, "daily": daily}}
 
 
 # ==================== 动态日志级别 ====================

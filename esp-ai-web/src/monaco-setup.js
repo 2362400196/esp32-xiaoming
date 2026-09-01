@@ -2,7 +2,7 @@
  * Monaco Editor 初始化配置（CDN 加载方案 + 代码补全 + 多主题）
  *
  * 使用 @monaco-editor/loader 从 CDN 异步加载 Monaco Editor
- * 包含 Python 代码补全、ESP-AI 专用片段、三套主题
+ * 包含 Python 代码补全、小明同学 专用片段、三套主题
  */
 import loader from '@monaco-editor/loader'
 
@@ -33,17 +33,17 @@ const PYTHON_BUILTINS = [
   'open', 'format', 'input', 'hasattr', 'getattr', 'setattr',
 ]
 
-/** ESP-AI 框架专用代码片段 */
+/** 小明同学 框架专用代码片段 */
 const ESPAI_SNIPPETS = [
   {
     label: '@tool()',
-    detail: 'ESP-AI 工具装饰器',
+    detail: '小明同学 工具装饰器',
     insertText: '@tool()\ndef ${1:name}(${2:args}) -> ${3:str}:\n    """${4:描述}\n\n    Args:\n        ${2:args}: 参数说明\n\n    Returns:\n        返回值说明\n    """\n    ${5:pass}',
     kind: 'Snippet',
   },
   {
     label: '@tool(cache=False)',
-    detail: 'ESP-AI 工具（禁用缓存）',
+    detail: '小明同学 工具（禁用缓存）',
     insertText: '@tool(cache=False)\ndef ${1:name}(${2:args}) -> ${3:str}:\n    """${4:描述}"""\n    ${5:pass}',
     kind: 'Snippet',
   },

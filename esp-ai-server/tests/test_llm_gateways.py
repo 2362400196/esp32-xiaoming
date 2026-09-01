@@ -414,6 +414,29 @@ class TestStreamChat:
             results.append(chunk)
         assert "".join(results) == "hello world"
 
+    async def test_stream_chat_captures_completion_tokens(self, patched_llm):
+        """计费：stream_chat 结束后暴露累计输出 tokens"""
+        gw = OpenAILLMGateway(config={"api_key": "k"})
+        # 流式响应末尾 chunk 携带 usage.completion_tokens
+        chunks = [
+            FakeChunk(FakeDelta(content="hello")),
+            FakeChunk(FakeDelta(content=" world")),
+            FakeChunk(None, usage=MagicMock(completion_tokens=42)),
+        ]
+        patched_llm["client"].chat.completions.create.return_value = FakeStreamResponse(chunks)
+        async for _ in gw.stream_chat([{"role": "user", "content": "hi"}]):
+            pass
+        assert gw.last_completion_tokens == 42
+
+    async def test_stream_chat_tokens_default_zero(self, patched_llm):
+        """计费：无 usage 信息时 tokens 为 0，不报错"""
+        gw = OpenAILLMGateway(config={"api_key": "k"})
+        chunks = [FakeChunk(FakeDelta(content="hello"))]
+        patched_llm["client"].chat.completions.create.return_value = FakeStreamResponse(chunks)
+        async for _ in gw.stream_chat([{"role": "user", "content": "hi"}]):
+            pass
+        assert gw.last_completion_tokens == 0
+
     async def test_stream_chat_with_tool_calls(self, patched_llm):
         # 工具调用场景：第一轮返回工具调用，工具执行后第二轮返回最终文本
         tm = MagicMock()
