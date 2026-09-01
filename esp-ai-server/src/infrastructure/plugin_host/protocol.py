@@ -64,6 +64,11 @@ SDK 操作类型（sdk_request.op）注册表：
         http_stream_open  {method, url, headers, content, timeout}         -> [stream_id, err]
         http_stream_read  {stream_id, timeout}                             -> [line, err]
         http_stream_close {stream_id}                                      -> None
+
+    计费上报（billing）——参数对照 src/use_cases/sdk/billing.py：
+        billing_add_asr   {minutes}                                        -> None
+        billing_add_llm   {input_tokens, output_tokens, cache_hit_tokens}  -> None
+        billing_add_tts   {chars}                                          -> None
     （ltm_* / diary_* / device_config_* / env_read / llm_* / tts_synthesize /
       plugin_data_* / kv_* / get_user_profile_summary / ws_* 等其余 op 详见 adjudicator._OP_PERMS）
 """

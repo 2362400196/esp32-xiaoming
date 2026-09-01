@@ -358,12 +358,42 @@ async def delete_user(user_id: str, admin: UserModel = Depends(require_admin)):
 
 @router.get("/devices")
 async def list_devices(_: UserModel = Depends(require_admin)):
-    """全量设备列表（含归属用户邮箱）"""
+    """全量设备列表（含归属用户邮箱 + 计费统计）"""
     async with get_session_ctx() as session:
         devices = (await session.execute(
             select(DeviceModel).order_by(DeviceModel.created_at.desc())
         )).scalars().all()
         owners = await _load_owner_map(session, {d.user_id for d in devices})
+
+        # 计费统计：按设备分组汇总用量与费用（供设备列表快速查看）
+        from src.infrastructure.db.models.billing import BillingRecordModel
+        billing_rows = (
+            await session.execute(
+                select(
+                    BillingRecordModel.device_id,
+                    func.count(BillingRecordModel.id),
+                    func.coalesce(func.sum(BillingRecordModel.asr_minutes), 0),
+                    func.coalesce(func.sum(BillingRecordModel.llm_input_tokens), 0),
+                    func.coalesce(func.sum(BillingRecordModel.llm_output_tokens), 0),
+                    func.coalesce(func.sum(BillingRecordModel.llm_cache_hit_tokens), 0),
+                    func.coalesce(func.sum(BillingRecordModel.tts_chars), 0),
+                    func.coalesce(func.sum(BillingRecordModel.total_cost), 0.0),
+                )
+                .group_by(BillingRecordModel.device_id)
+            )
+        ).all()
+        billing_map = {
+            r[0]: {
+                "record_count": r[1],
+                "asr_minutes": round(r[2], 2),
+                "llm_input_tokens": r[3],
+                "llm_output_tokens": r[4],
+                "llm_cache_hit_tokens": r[5],
+                "tts_chars": r[6],
+                "total_cost": round(r[7], 6),
+            }
+            for r in billing_rows
+        }
 
     # 注册表快照（诊断用：核对运行时连接与数据库设备的映射关系）
     registry_snapshot = []
@@ -386,11 +416,14 @@ async def list_devices(_: UserModel = Depends(require_admin)):
         "message": "ok",
         "data": {
             "devices": [
-                _serialize_device(
-                    d,
-                    owners.get(d.user_id or "", {}).get("email", ""),
-                    owners.get(d.user_id or "", {}).get("nickname", ""),
-                )
+                {
+                    **_serialize_device(
+                        d,
+                        owners.get(d.user_id or "", {}).get("email", ""),
+                        owners.get(d.user_id or "", {}).get("nickname", ""),
+                    ),
+                    "billing": billing_map.get(d.device_key) or billing_map.get(d.device_id),
+                }
                 for d in devices
             ],
             "registry_devices": registry_snapshot,
@@ -2114,9 +2147,10 @@ async def admin_billing_records(
 
 
 @router.get("/billing/stats")
-async def admin_billing_stats(_: UserModel = Depends(require_admin)):
+async def admin_billing_stats(device_id: str = Query("", description="按设备过滤，空则返回全部"), _: UserModel = Depends(require_admin)):
     """计费统计：累计用量与费用 + 按设备汇总（设备级记账）"""
     from src.infrastructure.db.models.billing import BillingRecordModel
+    conds = [BillingRecordModel.device_id == device_id] if device_id else []
     async with get_session_ctx() as session:
         row = (
             await session.execute(
@@ -2131,7 +2165,7 @@ async def admin_billing_stats(_: UserModel = Depends(require_admin)):
                     func.coalesce(func.sum(BillingRecordModel.llm_cost), 0.0),
                     func.coalesce(func.sum(BillingRecordModel.tts_cost), 0.0),
                     func.coalesce(func.sum(BillingRecordModel.total_cost), 0.0),
-                )
+                ).where(*conds)
             )
         ).one()
         # 按设备汇总（费用从高到低）
@@ -2150,6 +2184,7 @@ async def admin_billing_stats(_: UserModel = Depends(require_admin)):
                     func.coalesce(func.sum(BillingRecordModel.tts_cost), 0.0),
                     func.coalesce(func.sum(BillingRecordModel.total_cost), 0.0),
                 )
+                .where(*conds)
                 .group_by(BillingRecordModel.device_id)
                 .order_by(desc(func.sum(BillingRecordModel.total_cost)))
             )

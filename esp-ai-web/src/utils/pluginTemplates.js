@@ -103,6 +103,7 @@ export const ALL_PERMS = [
   { id: 'db', desc: '读写数据库（日记、用户画像）' },
   { id: 'llm', desc: '调用大模型对话（llm_chat / llm_generate）' },
   { id: 'tts', desc: '调用语音合成（tts_synthesize）' },
+  { id: 'billing', desc: '上报本轮用量到计费系统（ASR/LLM/TTS）' },
   { id: 'env_read', desc: '读取环境变量（获取 API Key 等配置）' },
   { id: 'file_read', desc: '读取插件目录和状态目录的文件' },
   { id: 'file_write', desc: '写入插件目录和状态目录' },

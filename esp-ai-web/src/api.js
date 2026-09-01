@@ -251,7 +251,7 @@ getActiveEmoPack: (deviceId) => request('/api/v1/emos/active/' + encodeURICompon
     adminBillingConfig: () => request('/api/v1/admin/billing/config'),
     adminSaveBillingConfig: (data) => request('/api/v1/admin/billing/config', 'PUT', data),
     adminBillingRecords: (params = {}) => request('/api/v1/admin/billing/records?' + new URLSearchParams(params)),
-    adminBillingStats: () => request('/api/v1/admin/billing/stats'),
+    adminBillingStats: (params = {}) => request('/api/v1/admin/billing/stats?' + new URLSearchParams(params)),
     adminBillingDaily: (params = {}) => request('/api/v1/admin/billing/daily?' + new URLSearchParams(params)),
     // 微信绑定
     wechatQrStart: () => request('/api/v1/wechat/qr-start', 'POST'),

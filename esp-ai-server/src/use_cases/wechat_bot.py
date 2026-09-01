@@ -137,6 +137,7 @@ class WeChatState:
     sync_buf: str = ""
     seen_msg_keys: list[int] = field(default_factory=list)
     context_cache: dict[str, str] = field(default_factory=dict)
+    last_user_msg_time: dict[str, float] = field(default_factory=dict)  # chat_id → 最近一次用户消息时间戳
     conversation_history: dict[str, list[dict]] = field(default_factory=dict)  # chat_id → [{"role":"user/assistant","content":"..."}]
     voice_mode: dict[str, bool] = field(default_factory=dict)  # chat_id → True=语音模式
     qr: QRLoginState = field(default_factory=QRLoginState)
@@ -736,6 +737,8 @@ class WeChatBot:
 
         full_text = "".join(text_parts)
         if full_text:
+            # 记录最近一次用户互动时间：主动推送前据此判断 iLink 会话是否仍有效
+            self.state.last_user_msg_time[chat_id] = time.time()
             logger.info(f"[WeChat] 收到消息: chat_id={chat_id[:20]}, text={full_text[:80]}, "
                          f"有回调={self.on_message is not None}")
         if full_text and self.on_message:
@@ -846,6 +849,18 @@ class WeChatBot:
 
     # ── 消息发送 ──────────────────────────────
 
+    def is_chat_session_fresh(self, chat_id: str, max_age_seconds: float = 24 * 3600) -> bool:
+        """判断该聊天的 iLink 会话是否仍有效（用户最近是否发过消息）。
+
+        iLink 协议中主动推送依赖缓存的 context_token，用户长时间未互动后
+        服务端会话过期，发送会返回 -2 prepare failed。主动推送前调用此方法
+        可跳过已过期的会话，避免无谓的失败重试。
+        """
+        last = self.state.last_user_msg_time.get(chat_id)
+        if last is None:
+            return False
+        return (time.time() - last) <= max_age_seconds
+
     async def send_text(self, chat_id: str, text: str) -> bool:
         """发送文本消息（支持长文本自动分片），返回是否全部发送成功"""
         if not self.state.configured:
@@ -863,19 +878,21 @@ class WeChatBot:
 
             sent = False
             last_err = None
-            for attempt in range(3):
+            for attempt in range(2):
                 try:
                     await self._send_text_chunk(chat_id, chunk)
                     sent = True
                     break
                 except WeChatAPIError as e:
                     last_err = e
-                    if e.code == -2 and attempt < 2:
-                        # prepare failed 多为设备断连后会话上下文（context_token）失效，
-                        # 清除该会话缓存后重试（不带 context_token 重新建立会话）
+                    if e.code == -2 and attempt == 0:
+                        # -2 prepare failed：多为会话上下文（context_token）失效
+                        # （用户长时间未互动）。清除缓存后不带 context_token 重试一次；
+                        # 若仍失败说明服务端会话已过期，需用户先发一条消息刷新，
+                        # 继续重试无意义。
                         if self.state.context_cache.pop(chat_id, None):
                             logger.info(f"[WeChat] context_token 失效，已清除 {chat_id[:12]} 的会话上下文")
-                        logger.warning(f"[WeChat] 发送文本分片失败 (retry {attempt+1}/3): {e}")
+                        logger.warning(f"[WeChat] 发送文本分片失败，清除 context_token 后重试: {e}")
                         await asyncio.sleep(1.0)
                     else:
                         logger.warning(f"[WeChat] 发送文本分片失败: {e}")

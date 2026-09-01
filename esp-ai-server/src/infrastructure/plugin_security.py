@@ -23,6 +23,7 @@
     - llm        LLM 对话（SDK llm_chat / llm_generate）
     - tts        TTS 语音合成（SDK tts_synthesize）
     - kv         键值存储（SDK kv_get / kv_set / kv_delete / kv_list）
+    - billing    上报本轮用量到计费系统（SDK billing.add_asr / add_llm / add_tts）
 
 内置插件必须声明其 SDK 能力（network/device/ltm），官方插件仓库同规则。
 """
@@ -53,6 +54,7 @@ _SDK_FUNCTIONS = frozenset({
     "get_device_key", "resolve_device_key", "mask_secret",
     "llm_chat", "llm_generate",
     "tts_synthesize",
+    "add_asr", "add_llm", "add_tts",
     "device_is_online", "device_get_info",
     "plugin_data_read", "plugin_data_write", "plugin_data_list", "plugin_data_delete",
     "kv_get", "kv_set", "kv_delete", "kv_list",

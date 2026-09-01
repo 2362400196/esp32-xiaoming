@@ -110,6 +110,9 @@ class Session:
         self.runtime = SessionRuntime()
         self.audio_processor = AudioProcessor()
         self.billing = BillingAccumulator(device_id, self.session_id)
+        # 计费累加器挂到 tool_manager：插件工具通过 sdk.billing.add_* 上报用量
+        if tool_mgr is not None:
+            tool_mgr.billing = self.billing
 
         self.cancel_event = asyncio.Event()
         self._current_pipeline = None

@@ -69,6 +69,10 @@ _OP_PERMS: dict[str, str] = {
     "kv_delete": "kv",
     "kv_list": "kv",
     "get_user_profile_summary": "db",
+    # 计费上报（插件主动上报本轮用量）
+    "billing_add_asr": "billing",
+    "billing_add_llm": "billing",
+    "billing_add_tts": "billing",
     # WebSocket 操作（网络权限）
     "ws_connect": "network",
     "ws_send": "network",
@@ -86,7 +90,7 @@ _NO_PERM_OPS = frozenset({
 # 内置插件默认权限（内置插件仍可放宽，但已声明为准）
 BUILTIN_DEFAULT_PERMS = frozenset({
     "network", "device", "ltm", "db", "file_read", "file_write",
-    "subprocess", "exec", "env_read", "llm", "tts", "kv",
+    "subprocess", "exec", "env_read", "llm", "tts", "kv", "billing",
 })
 
 
@@ -893,6 +897,27 @@ class Adjudicator:
         if audio_bytes:
             return base64.b64encode(audio_bytes).decode("ascii")
         return None
+
+    # ═════════════════════════════════════════════════════════
+    # 计费上报（插件主动上报本轮用量）
+    # ═════════════════════════════════════════════════════════
+
+    async def _op_billing_add_asr(self, params, ctx) -> None:
+        from src.use_cases._plugin_helpers import add_asr
+        add_asr(minutes=params.get("minutes", 0.0), tool_manager=ctx.tool_manager)
+
+    async def _op_billing_add_llm(self, params, ctx) -> None:
+        from src.use_cases._plugin_helpers import add_llm
+        add_llm(
+            input_tokens=params.get("input_tokens", 0),
+            output_tokens=params.get("output_tokens", 0),
+            cache_hit_tokens=params.get("cache_hit_tokens", 0),
+            tool_manager=ctx.tool_manager,
+        )
+
+    async def _op_billing_add_tts(self, params, ctx) -> None:
+        from src.use_cases._plugin_helpers import add_tts
+        add_tts(chars=params.get("chars", 0), tool_manager=ctx.tool_manager)
 
     # ═════════════════════════════════════════════════════════
     # 设备状态

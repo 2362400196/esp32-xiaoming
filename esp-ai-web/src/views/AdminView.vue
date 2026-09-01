@@ -321,6 +321,7 @@
                     <th>归属用户</th>
                     <th>状态</th>
                     <th>绑定时间</th>
+                    <th>计费统计</th>
                     <th>操作</th>
                   </tr>
                 </thead>
@@ -349,6 +350,15 @@
                       </span>
                     </td>
                     <td data-label="绑定时间" class="cell-muted">{{ formatDate(d.bound_at) }}</td>
+                    <td data-label="计费统计">
+                      <div class="cell-billing clickable" @click="openDeviceBilling(d)">
+                        <template v-if="d.billing">
+                          <p class="cell-title" style="color:var(--mint-deep)">¥ {{ d.billing.total_cost.toFixed(4) }}</p>
+                          <p class="cell-sub">ASR {{ fmtNum(d.billing.asr_minutes) }}分 · LLM {{ fmtBigNum(d.billing.llm_output_tokens) }} · TTS {{ fmtBigNum(d.billing.tts_chars) }}字</p>
+                        </template>
+                        <span v-else class="badge badge-sub">查看计费 ›</span>
+                      </div>
+                    </td>
                     <td data-label="操作">
                       <div class="row-actions">
                         <button class="btn btn-ghost btn-xs" :disabled="!d.online" @click="wakeupDevice(d)">唤醒</button>
@@ -390,6 +400,9 @@
                 <h3 class="table-title">已安装插件</h3>
                 <p class="table-sub">版本、来源、加载状态、工具列表</p>
               </div>
+              <div class="row-actions">
+                <input class="form-input" style="max-width:220px" v-model="pluginSearch" placeholder="搜索插件名/描述" @keyup.enter="searchPlugins" />
+              </div>
             </div>
             <div v-if="loadingPlugins" class="table-empty">加载中…</div>
             <div v-else-if="!installedPlugins.length" class="table-empty">暂无已安装插件</div>
@@ -408,7 +421,7 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="p in installedPlugins" :key="p.name">
+                  <tr v-for="p in pagedPlugins" :key="p.name">
                     <td data-label="插件">
                       <div class="cell-main">
                         <p class="cell-title">{{ p.display_name || p.name }}</p>
@@ -445,6 +458,19 @@
                   </tr>
                 </tbody>
               </table>
+            </div>
+            <div class="table-head" style="border-top:1px solid var(--glass-border-soft);border-bottom:none">
+              <span class="table-sub">共 {{ filteredPlugins.length }} 条 · 每页 {{ PLUGIN_PAGE_SIZE }} 条 · 第 {{ pluginPage }} / {{ pluginTotalPages }} 页</span>
+              <div class="row-actions">
+                <button class="btn btn-ghost btn-xs" :disabled="pluginPage <= 1" @click="pluginPage = 1">«</button>
+                <button class="btn btn-ghost btn-xs" :disabled="pluginPage <= 1" @click="pluginPage--">上一页</button>
+                <template v-for="p in pluginPageList" :key="p">
+                  <button v-if="p === '…'" class="btn btn-ghost btn-xs" disabled>…</button>
+                  <button v-else class="btn btn-ghost btn-xs" :class="{ 'btn-mint': p === pluginPage }" @click="pluginPage = p">{{ p }}</button>
+                </template>
+                <button class="btn btn-ghost btn-xs" :disabled="pluginPage >= pluginTotalPages" @click="pluginPage++">下一页</button>
+                <button class="btn btn-ghost btn-xs" :disabled="pluginPage >= pluginTotalPages" @click="pluginPage = pluginTotalPages">»</button>
+              </div>
             </div>
           </div>
         </section>
@@ -758,7 +784,7 @@
         <section v-else-if="section === 'ws_monitor'" class="admin-section">
           <div class="stat-grid">
             <div class="stat-card card-in">
-              <span class="stat-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0"/></svg></span>
+              <span class="stat-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><line x1="12" y1="8" x2="5" y2="16"/><line x1="12" y1="8" x2="19" y2="16"/></svg></span>
               <div class="stat-info"><p class="stat-value">{{ wsConnections.length }}</p><p class="stat-label">总连接数</p></div>
             </div>
             <div class="stat-card card-in">
@@ -1321,6 +1347,60 @@
       </div>
     </div>
 
+    <!-- 设备计费详情弹窗 -->
+    <div v-if="billingModalVisible" class="modal-mask" @click.self="billingModalVisible = false">
+      <div class="modal-card modal-card-billing" style="width:760px;max-width:94vw;height:480px">
+        <div class="modal-head">
+          <span class="modal-title">计费详情</span>
+          <button class="modal-close" @click="billingModalVisible = false">×</button>
+        </div>
+        <div class="modal-body" style="max-height:380px">
+          <div v-if="loadingDeviceBilling" class="modal-empty">加载中…</div>
+          <template v-else-if="billingDevice">
+            <div class="device-hero">
+              <span class="device-avatar-lg">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+              </span>
+              <div class="cell-main">
+                <p class="cell-title">{{ billingDevice.name || '未命名设备' }}</p>
+                <p class="cell-sub">{{ billingDevice.device_id }}</p>
+              </div>
+              <div class="device-hero-right">
+                <span class="badge badge-mint">¥ {{ (deviceBillingStats.total_cost || 0).toFixed(4) }}</span>
+                <p class="cell-sub">{{ deviceBillingStats.record_count || 0 }} 条记录</p>
+              </div>
+            </div>
+
+            <div class="stat-grid" style="grid-template-columns:repeat(4,1fr);gap:10px">
+              <div class="stat-card" style="padding:10px 12px">
+                <p class="stat-value" style="font-size:20px;color:var(--mint-deep)">{{ fmtNum(deviceBillingStats.asr_minutes || 0) }}</p>
+                <p class="stat-label">ASR 时长(分钟)</p>
+              </div>
+              <div class="stat-card" style="padding:10px 12px">
+                <p class="stat-value" style="font-size:20px">{{ fmtBigNum(deviceBillingStats.llm_input_tokens || 0) }}</p>
+                <p class="stat-label">LLM 输入 tokens</p>
+                <p v-if="deviceBillingStats.llm_cache_hit_tokens" class="stat-label" style="font-size:11px;color:var(--text-sub)">命中 {{ fmtBigNum(deviceBillingStats.llm_cache_hit_tokens) }}</p>
+              </div>
+              <div class="stat-card" style="padding:10px 12px">
+                <p class="stat-value" style="font-size:20px">{{ fmtBigNum(deviceBillingStats.llm_output_tokens || 0) }}</p>
+                <p class="stat-label">LLM 输出 tokens</p>
+              </div>
+              <div class="stat-card" style="padding:10px 12px">
+                <p class="stat-value" style="font-size:20px">{{ fmtBigNum(deviceBillingStats.tts_chars || 0) }}</p>
+                <p class="stat-label">TTS 字数</p>
+              </div>
+            </div>
+
+            <div class="detail-rows" style="margin-top:14px">
+              <div class="detail-row"><span class="detail-k">ASR 费用</span>¥ {{ (deviceBillingStats.asr_cost || 0).toFixed(4) }}</div>
+              <div class="detail-row"><span class="detail-k">LLM 费用</span>¥ {{ (deviceBillingStats.llm_cost || 0).toFixed(4) }}</div>
+              <div class="detail-row"><span class="detail-k">TTS 费用</span>¥ {{ (deviceBillingStats.tts_cost || 0).toFixed(4) }}</div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+
     <!-- 后台任务明细弹窗 -->
     <div v-if="taskDetailVisible" class="modal-mask" @click.self="taskDetailVisible = false">
       <div class="modal-card">
@@ -1628,6 +1708,25 @@ async function wakeupDevice(d) {
   } catch { emit('toast', '唤醒失败') }
 }
 
+const billingModalVisible = ref(false)
+const billingDevice = ref(null)
+const deviceBillingStats = ref({})
+const loadingDeviceBilling = ref(false)
+
+async function openDeviceBilling(d) {
+  billingDevice.value = d
+  billingModalVisible.value = true
+  loadingDeviceBilling.value = true
+  deviceBillingStats.value = {}
+  // 计费记录以 device_key（bound_xxx）为准，device_id 是数据库主键，两者不同
+  const billingKey = d.device_key || d.device_id
+  try {
+    const res = await api.adminBillingStats({ device_id: billingKey })
+    if (res.status === 200 && res.data?.code === 0) deviceBillingStats.value = res.data.data || {}
+  } catch { /* 静默失败，弹窗内显示空数据 */ }
+  loadingDeviceBilling.value = false
+}
+
 const taskDetailVisible = ref(false)
 const taskDetailList = ref([])
 const recentTaskList = ref([])
@@ -1736,6 +1835,37 @@ const installedPlugins = ref([])
 const loadingPlugins = ref(false)
 const updatingPlugin = ref('')
 const uninstallingPlugin = ref('')
+const pluginSearch = ref('')
+const pluginPage = ref(1)
+const PLUGIN_PAGE_SIZE = 15
+const filteredPlugins = computed(() => {
+  const q = pluginSearch.value.trim().toLowerCase()
+  if (!q) return installedPlugins.value
+  return installedPlugins.value.filter(p =>
+    (p.display_name || p.name || '').toLowerCase().includes(q) ||
+    (p.description || '').toLowerCase().includes(q) ||
+    (p.slug || '').toLowerCase().includes(q)
+  )
+})
+const pluginTotalPages = computed(() => Math.max(1, Math.ceil(filteredPlugins.value.length / PLUGIN_PAGE_SIZE)))
+const pagedPlugins = computed(() => {
+  const start = (pluginPage.value - 1) * PLUGIN_PAGE_SIZE
+  return filteredPlugins.value.slice(start, start + PLUGIN_PAGE_SIZE)
+})
+const pluginPageList = computed(() => {
+  const total = pluginTotalPages.value
+  const cur = pluginPage.value
+  const pages = []
+  const push = (p) => { if (pages[pages.length - 1] !== p) pages.push(p) }
+  for (let i = 1; i <= total; i++) {
+    if (i === 1 || i === total || Math.abs(i - cur) <= 1) push(i)
+    else if (pages[pages.length - 1] !== '…') push('…')
+  }
+  return pages
+})
+function searchPlugins() {
+  pluginPage.value = 1
+}
 
 const marketplacePlugins = ref([])
 const loadingMarketPlugins = ref(false)
@@ -2964,6 +3094,7 @@ tbody tr:hover { background: var(--mint-softer); }
   overflow: hidden;
   animation: modalPop 0.3s var(--ease);
 }
+.modal-card-billing { width: 760px; max-width: 94vw; height: 480px; }
 @keyframes modalPop {
   from { opacity: 0; transform: scale(0.92) translateY(8px); }
   to { opacity: 1; transform: scale(1) translateY(0); }

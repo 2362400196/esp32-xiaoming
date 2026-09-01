@@ -155,6 +155,7 @@ msvcrt / curses / tkinter / winreg / configparser / email / platform / gc / sign
 | `plugin_data_read` / `plugin_data_list` | `file_read` | 读取插件数据目录 |
 | `plugin_data_write` / `plugin_data_delete` | `file_write` | 写入插件数据目录 |
 | `kv_get` / `kv_set` / `kv_delete` / `kv_list` | `kv` | 键值存储读写 |
+| `billing_add_asr` / `billing_add_llm` / `billing_add_tts` | `billing` | 上报本轮用量到计费系统 |
 | `device_key` / `resolve_device_key` / `plugin_config` / `skill_catalog` / `plugin_log` | 无需权限 | 只读基础信息 |
 
 #### 权限白名单语义
@@ -174,6 +175,7 @@ msvcrt / curses / tkinter / winreg / configparser / email / platform / gc / sign
 | `["llm"]` | 可调用 LLM 对话（`llm_chat` / `llm_generate`） |
 | `["tts"]` | 可调用 TTS 语音合成 |
 | `["kv"]` | 可使用插件键值存储（`kv_get` / `kv_set` / `kv_delete` / `kv_list`） |
+| `["billing"]` | 可上报本轮用量到计费系统（`add_asr` / `add_llm` / `add_tts`） |
 
 **内置插件的权限声明**：`alarm=[]`、`device_config=[device,db]`、`device_control=[device]`、`diary=[db]`、`http_tool=[network]`、`media_player=[network,device]`、`memory=[ltm]`、`screen=[device]`、`system_basic=[device]`、`weather=[network,device]`。
 
@@ -263,6 +265,7 @@ msvcrt / curses / tkinter / winreg / configparser / email / platform / gc / sign
 | `插件未声明 network 权限，SDK 操作 http_get_json 已被阻止` | 权限不足 | 在 manifest 声明 `permissions: ["network"]` |
 | `插件未声明 file_write 权限，禁止写入文件` | 尝试写文件 | 声明 `file_write`，且只写插件目录/状态目录 |
 | `PermissionError: 插件「x」尝试读取非白名单环境变量 FOO` | 读环境变量越权 | 用 `<插件id>_FOO` 命名，或加 `PLUGIN_ENV_ALLOWLIST=FOO` |
+| `PermissionError: 插件「x」未声明 billing 权限，上报 ASR 计费用量被拒绝` | 计费上报越权 | 在 manifest 声明 `permissions: ["billing"]` |
 
 ### 沙箱 SDK 能力对照（RPC 支持的操作）
 
@@ -280,6 +283,7 @@ msvcrt / curses / tkinter / winreg / configparser / email / platform / gc / sign
 | LLM / TTS | `llm_chat` / `llm_generate` / `tts_synthesize` | `llm` / `tts` | 见 API 参考 |
 | 记忆 / KV | LTM 服务 / `kv_*` | `db` / `kv` | 见 API 参考 |
 | 文件持久化 | `plugin_data_*` | `file_read` / `file_write` | 见 API 参考 |
+| 计费上报 | `add_asr` / `add_llm` / `add_tts` | `billing` | 无返回值 |
 
 ::: tip 设备语音播报
 沙箱插件声明 `device` + `tts` 权限后可直接调用 `speak_to_device(device_key="", text=...)` 让设备播报一段文本：主进程会完成 TTS 合成并按帧推流到设备实时播放（不经过 LLM 流程），`device_key` 留空时自动回退到本次调用绑定的设备。设备离线 / 语音服务不可用时返回 `False`。

@@ -28,6 +28,7 @@
 | 技能目录 | `skill_catalog_text()` | 渲染当前设备可用技能目录文本 |
 | **LLM 对话** | `llm_chat()` / `llm_generate()` | 调用大模型进行对话或文本生成 |
 | **TTS 合成** | `tts_synthesize()` | 文本转语音，返回 MP3 音频数据 |
+| **计费上报** | `add_asr()` / `add_llm()` / `add_tts()` | 上报本轮用量到框架计费系统（第三方服务接入计费） |
 | **设备状态** | `device_is_online()` / `device_get_info()` | 查询设备在线状态与基本信息 |
 | **设备 IO 控制** | `gpio_mode()` / `gpio_write()` / `gpio_read()` / `pwm_write()` / `adc_read()` / `servo_write()` | 控制设备 GPIO、PWM、ADC、舵机 |
 | **主动播报** | `speak_to_device()` | 让指定设备直接播报一段语音（无需获取 channel 等内部对象） |
@@ -528,7 +529,42 @@ async def speak_text(text: str, tool_manager=None) -> str:
 
 ---
 
-## 十二、设备状态查询（权限 `device`）
+## 十二、计费上报（权限 `billing`）
+
+插件调用**外部 AI 服务**（非火山引擎/DeepSeek）后，把实际用量上报给当前会话的计费累加器，框架按配置单价计算费用并生成计费记录。适用于服务商返回格式不同、框架无法自动解析用量的场景。
+
+### `add_asr(minutes, tool_manager=None)`
+
+上报 ASR 用量（分钟）。
+
+### `add_llm(input_tokens=0, output_tokens=0, cache_hit_tokens=0, tool_manager=None)`
+
+上报 LLM 用量（tokens：输入 / 输出 / 缓存命中）。
+
+### `add_tts(chars, tool_manager=None)`
+
+上报 TTS 用量（字数）。
+
+```python
+from src.use_cases.sdk.billing import add_asr, add_llm, add_tts
+
+@tool()
+async def my_asr(audio: str, tool_manager=None) -> str:
+    """调用第三方 ASR 服务并上报用量。"""
+    minutes = await third_party_asr(audio)  # 从服务响应解析实际时长（分钟）
+    add_asr(minutes, tool_manager=tool_manager)
+    return "识别完成"
+```
+
+::: warning 权限与口径
+- 插件必须在 `manifest.json` 的 `permissions` 中声明 `billing`，否则调用会抛 `PermissionError`
+- 用量累计到**当前会话**的计费累加器，随本轮对话结束统一生成计费记录
+- 计费口径与框架内置一致：ASR 按时长（分钟）、LLM 按 tokens、TTS 按字数
+:::
+
+---
+
+## 十三、设备状态查询（权限 `device`）
 
 查询设备的在线状态和基本信息，无需下发指令即可获取设备信息。
 
@@ -579,7 +615,7 @@ async def get_device_status(tool_manager=None) -> str:
 
 ---
 
-## 十三、插件数据持久化（权限 `file_read` / `file_write`）
+## 十四、插件数据持久化（权限 `file_read` / `file_write`）
 
 每个插件拥有**独立的文件系统目录**，可以读写自己的数据文件。路径自动隔离，插件之间互不可见，且带有**路径穿越防护**。
 
@@ -635,7 +671,7 @@ if plugin_data_delete("old_cache.json", tool_manager=tool_manager):
 
 ---
 
-## 十四、键值存储（权限 `kv`）
+## 十五、键值存储（权限 `kv`）
 
 插件专属的**持久化键值存储**，适合保存配置、状态、缓存等简单数据。无需处理文件路径，开箱即用。
 
@@ -684,7 +720,7 @@ cache_data = kv_list(prefix="cache_", tool_manager=tool_manager)
 
 ---
 
-## 十五、用户画像（权限 `db`）
+## 十六、用户画像（权限 `db`）
 
 获取当前设备用户的画像摘要，用于了解用户偏好、姓名、兴趣等信息，实现个性化服务。
 
@@ -706,7 +742,7 @@ async def greet_user(tool_manager=None) -> str:
 
 ---
 
-## 十六、通用工具函数（无需权限）
+## 十七、通用工具函数（无需权限）
 
 纯本地执行的工具函数，不涉及 RPC 通信，零开销。
 
@@ -752,7 +788,7 @@ data = json_loads('{"name": "小明"}')
 
 ---
 
-## 十七、设备 IO 控制：控制 GPIO、PWM、舵机
+## 十八、设备 IO 控制：控制 GPIO、PWM、舵机
 
 插件可以直接通过 SDK 控制 ESP32 设备的硬件引脚，无需编写 Lua 代码。
 
@@ -823,7 +859,7 @@ async def read_light_sensor(tool_manager=None) -> str:
 - 读操作需要 `tool_manager` 参数，写操作可选 `device_key` 参数
 - 写操作先发送硬件配置再发送数据，无需手动调用 `pinMode`
 
-## 十八、WebSocket 与流式 HTTP（权限 `network`）
+## 十九、WebSocket 与流式 HTTP（权限 `network`）
 
 ASR / TTS 插件需要 WebSocket 双向通信，LLM 插件需要 SSE 流式读取。SDK 提供了底层封装，插件只需关注协议拼装与解析。完整开发示例见 [插件开发教程 → 语音服务插件开发](./plugin-dev.md#语音服务插件开发（asr--llm--tts）)。
 
@@ -909,7 +945,7 @@ while True:
 `http_request` 一次性拿到完整响应体，适合普通 API；`http_stream_open/read` 逐行返回，适合 SSE（`text/event-stream`）等流式协议。流有 120 秒空闲 TTL，长时间不读取会被自动回收。
 :::
 
-## 十九、主动播报：让设备直接说话（权限 `device`）
+## 二十、主动播报：让设备直接说话（权限 `device`）
 
 ### `speak_to_device(device_key, text) -> bool`
 
@@ -960,7 +996,7 @@ async def speak_text(text: str = "", tool_manager=None) -> str:
 
 ---
 
-## 二十、事件订阅：响应框架事件
+## 二十一、事件订阅：响应框架事件
 
 插件可以订阅框架运行过程中发出的事件，实现"被动响应"型逻辑（设备上线提醒、会话统计等）：
 
@@ -999,7 +1035,7 @@ unsubscribe(sub_id)
 
 ---
 
-## 二十一、插件生命周期钩子
+## 二十二、插件生命周期钩子
 
 插件可以定义两个可选的模块级函数，框架在加载/卸载时自动调用：
 

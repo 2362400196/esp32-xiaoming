@@ -4,9 +4,10 @@ WeChat 微信集成单元测试
 覆盖范围：
 - wechat_binding.py：配对码创建 / 消费（一次性）/ 过期
 - routes/wechat.py：配对码生成接口（JWT 认证 + 设备归属校验）
-- wechat_bot.py：群聊消息忽略，仅支持私聊
+- wechat_bot.py：群聊消息忽略，仅支持私聊；会话新鲜度判断；send_text -2 处理
 """
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -18,6 +19,7 @@ from src.use_cases.wechat_binding import (
     consume_pairing_code,
     create_pairing_code,
 )
+from src.use_cases.wechat_bot import WeChatAPIError
 
 
 @pytest.fixture(autouse=True)
@@ -172,3 +174,103 @@ class TestGroupMessageIgnored:
         assert called[0][1] == "user1"
         assert called[0][2] == "user1"
         assert called[0][4] == "你好"
+
+
+# ── 会话新鲜度判断 ─────────────────────────────
+
+class TestChatSessionFreshness:
+    def test_fresh_session(self):
+        """用户最近发过消息 → 会话新鲜"""
+        bot = _make_bot_skeleton()
+        bot.state.last_user_msg_time["user1"] = time.time()
+        assert bot.is_chat_session_fresh("user1") is True
+
+    def test_stale_session(self):
+        """用户超过 24h 未互动 → 会话过期"""
+        bot = _make_bot_skeleton()
+        bot.state.last_user_msg_time["user1"] = time.time() - 25 * 3600
+        assert bot.is_chat_session_fresh("user1") is False
+
+    def test_no_record(self):
+        """无互动记录（如重启后）→ 视为过期"""
+        bot = _make_bot_skeleton()
+        assert bot.is_chat_session_fresh("user1") is False
+
+    def test_custom_max_age(self):
+        bot = _make_bot_skeleton()
+        bot.state.last_user_msg_time["user1"] = time.time() - 3600
+        assert bot.is_chat_session_fresh("user1", max_age_seconds=7200) is True
+        assert bot.is_chat_session_fresh("user1", max_age_seconds=1800) is False
+
+    def test_process_message_records_time(self):
+        """收到用户消息时记录互动时间"""
+        bot = _make_bot_skeleton()
+        bot.on_message = None
+        bot.on_attachment = None
+        msg = {
+            "from_user_id": "user1",
+            "message_id": 3,
+            "item_list": [{"type": 1, "text_item": {"text": "你好"}}],
+        }
+        asyncio.run(bot._process_message(msg))
+        assert "user1" in bot.state.last_user_msg_time
+        assert bot.is_chat_session_fresh("user1") is True
+
+
+# ── send_text -2 prepare failed 处理 ───────────
+
+class TestSendTextMinus2Handling:
+    def test_minus2_clears_context_and_retries_once(self):
+        """-2 prepare failed：清 context_token 后重试一次（不带 token），仍失败则放弃"""
+        bot = _make_bot_skeleton()
+        bot.state.configured = True
+        bot.state.context_cache["user1"] = "stale-token"
+        calls = []
+
+        async def fake_send(chat_id, chunk):
+            calls.append(bot.state.context_cache.get(chat_id))
+            raise WeChatAPIError(-2, "prepare failed")
+
+        bot._send_text_chunk = fake_send
+        ok = asyncio.run(bot.send_text("user1", "hello"))
+        assert ok is False
+        # 第一次带 context_token，第二次不带（已清除），不再盲目重试第三次
+        assert len(calls) == 2
+        assert calls[0] == "stale-token"
+        assert calls[1] is None
+        assert "user1" not in bot.state.context_cache
+
+    def test_minus2_then_success_without_context(self):
+        """清 context_token 后重试成功（服务端会话仍有效）"""
+        bot = _make_bot_skeleton()
+        bot.state.configured = True
+        bot.state.context_cache["user1"] = "stale-token"
+        calls = []
+
+        async def fake_send(chat_id, chunk):
+            calls.append(bot.state.context_cache.get(chat_id))
+            if len(calls) == 1:
+                raise WeChatAPIError(-2, "prepare failed")
+            return None
+
+        bot._send_text_chunk = fake_send
+        ok = asyncio.run(bot.send_text("user1", "hello"))
+        assert ok is True
+        assert len(calls) == 2
+        assert calls[0] == "stale-token"
+        assert calls[1] is None
+
+    def test_non_minus2_error_no_retry(self):
+        """非 -2 错误不重试，直接失败"""
+        bot = _make_bot_skeleton()
+        bot.state.configured = True
+        calls = []
+
+        async def fake_send(chat_id, chunk):
+            calls.append(1)
+            raise WeChatAPIError(-14, "session timeout")
+
+        bot._send_text_chunk = fake_send
+        ok = asyncio.run(bot.send_text("user1", "hello"))
+        assert ok is False
+        assert len(calls) == 1

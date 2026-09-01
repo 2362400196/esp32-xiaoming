@@ -149,6 +149,15 @@ from src.use_cases.sdk.services import (  # noqa: F401
 )
 
 # ════════════════════════════════════════════════════════════
+# 计费上报（插件主动上报本轮用量）
+# ════════════════════════════════════════════════════════════
+from src.use_cases.sdk.billing import (  # noqa: F401
+    add_asr,
+    add_llm,
+    add_tts,
+)
+
+# ════════════════════════════════════════════════════════════
 # 安全工具（来自 infrastructure）
 # ════════════════════════════════════════════════════════════
 from src.infrastructure.plugin_security import mask_secret, require_permission  # noqa: F401

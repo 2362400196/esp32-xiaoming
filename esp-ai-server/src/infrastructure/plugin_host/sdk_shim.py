@@ -631,6 +631,28 @@ async def get_user_profile_summary(device_key: str = "", tool_manager=None) -> s
 
 
 # ════════════════════════════════════════════════════════════
+# 计费上报（插件主动上报本轮用量）
+# ════════════════════════════════════════════════════════════
+
+
+def add_asr(minutes: float = 0.0, tool_manager=None) -> None:
+    client.send_sync("billing_add_asr", {"minutes": minutes})
+
+
+def add_llm(input_tokens: int = 0, output_tokens: int = 0,
+            cache_hit_tokens: int = 0, tool_manager=None) -> None:
+    client.send_sync("billing_add_llm", {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_hit_tokens": cache_hit_tokens,
+    })
+
+
+def add_tts(chars: int = 0, tool_manager=None) -> None:
+    client.send_sync("billing_add_tts", {"chars": chars})
+
+
+# ════════════════════════════════════════════════════════════
 # 通用工具函数（纯本地实现，无需 RPC）
 # ════════════════════════════════════════════════════════════
 
@@ -681,6 +703,9 @@ def build_helpers_shim() -> types.ModuleType:
         "llm_chat": llm_chat,
         "llm_generate": llm_generate,
         "tts_synthesize": tts_synthesize,
+        "add_asr": add_asr,
+        "add_llm": add_llm,
+        "add_tts": add_tts,
         "device_is_online": device_is_online,
         "device_get_info": device_get_info,
         "plugin_data_read": plugin_data_read,
@@ -741,6 +766,7 @@ def install_shims(plugin_id: str, src_dir: str) -> None:
         "src.use_cases.sdk.music",
         "src.use_cases.sdk.utils",
         "src.use_cases.sdk.services",
+        "src.use_cases.sdk.billing",
         "src.domain",
         "src.domain.entities",
         "src.domain.value_objects",
@@ -841,6 +867,12 @@ def install_shims(plugin_id: str, src_dir: str) -> None:
         skill_catalog_text=skill_catalog_text,
         plugin_log=plugin_log,
         get_user_profile_summary=get_user_profile_summary,
+    )
+    _sdk_sub(
+        "billing",
+        add_asr=add_asr,
+        add_llm=add_llm,
+        add_tts=add_tts,
     )
     _sdk_sub(
         "ws",

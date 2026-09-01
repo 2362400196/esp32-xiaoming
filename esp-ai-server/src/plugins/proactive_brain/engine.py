@@ -29,6 +29,7 @@ class ProactiveBrain:
     MIN_INTERVAL = 30 * 60      # 最小间隔 30 分钟
     MAX_INTERVAL = 120 * 60     # 最大间隔 2 小时
     DEFAULT_MAX_PUSHES = 20     # 默认每天 20 次
+    SESSION_MAX_AGE = 24 * 3600  # iLink 会话新鲜度窗口：用户超过该时长未互动则跳过主动推送
 
     def __init__(self):
         self._task: Optional[asyncio.Task] = None
@@ -119,10 +120,13 @@ class ProactiveBrain:
             return
 
         # 7. 推送
-        await self._push_to_all(thought)
+        pushed = await self._push_to_all(thought)
         self._last_push_time = time.time()
-        self._today_push_count += 1
-        logger.info(f"[Proactive] 已推送: {thought[:50]}... (今日第 {self._today_push_count} 次)")
+        if pushed:
+            self._today_push_count += 1
+            logger.info(f"[Proactive] 已推送: {thought[:50]}... (今日第 {self._today_push_count} 次)")
+        else:
+            logger.info(f"[Proactive] 推送未成功（会话过期或未绑定），不计入今日次数")
 
     async def _llm_decide(self, now: datetime) -> Optional[str]:
         """让 LLM 自主决定要不要发消息、发什么"""
@@ -244,15 +248,20 @@ class ProactiveBrain:
             logger.warning(f"[Proactive] LLM决策失败: {e}")
             return None
 
-    async def _push_to_all(self, text: str) -> None:
-        """推送给用户（直接调用微信 Bot）"""
+    async def _push_to_all(self, text: str) -> bool:
+        """推送给用户（直接调用微信 Bot），返回是否至少推送成功一次。
+
+        用户长时间未互动时 iLink 会话过期，主动推送必然返回 -2 prepare failed，
+        此时跳过该设备，避免无谓失败与配额消耗。
+        """
+        pushed = False
         try:
             from src.infrastructure.web import get_app
             app = get_app()
             bot = getattr(app.state, 'wechat_bot', None) if hasattr(app, 'state') else None
             if not bot:
                 logger.warning("[Proactive] wechat_bot 不可用")
-                return
+                return False
 
             device_ids = self._registry.get_all_ids()
             from src.use_cases.wechat_binding import get_wechat_binding_manager
@@ -260,15 +269,20 @@ class ProactiveBrain:
             for device_id in device_ids:
                 binding = bind_mgr.find_binding(device_id)
                 if binding and binding.wechat_chat_id:
+                    if not bot.is_chat_session_fresh(binding.wechat_chat_id, self.SESSION_MAX_AGE):
+                        logger.info(f"[Proactive] 跳过推送: 会话已过期（用户长时间未互动）device={device_id}")
+                        continue
                     ok = await bot.send_text(binding.wechat_chat_id, text)
                     if ok:
+                        pushed = True
                         logger.info(f"[Proactive] 微信推送成功: {text[:40]}...")
                     else:
-                        logger.warning(f"[Proactive] 微信推送失败: API返回错误")
+                        logger.warning(f"[Proactive] 微信推送失败: API返回错误（会话可能已过期）")
                 else:
                     logger.warning(f"[Proactive] 设备 {device_id} 未绑定微信")
         except Exception as e:
             logger.warning(f"[Proactive] 微信推送失败: {e}")
+        return pushed
 
 
 # ── 模块级单例：多处调用拿同一实例 ──────────────────────────────
