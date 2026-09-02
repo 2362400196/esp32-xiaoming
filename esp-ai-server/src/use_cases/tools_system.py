@@ -926,6 +926,17 @@ class ToolRetriever:
         # 取分数 > 0 的工具
         matched = [name for name, score in scores if score > 0]
 
+        # 弱信号检测：排除核心工具（恒在结果中）后，非核心强匹配过少
+        # （指代/追问/自然问法等无明确关键词的查询），说明检索无法可靠判断
+        # 用户意图，直接回退全部工具，避免误裁掉相关工具。
+        non_core_matched = [n for n in matched if n not in self.CORE_TOOLS]
+        if len(non_core_matched) < self._min_result:
+            logger.info(
+                f"[ToolRetriever] 非核心强匹配仅 {len(non_core_matched)} 个 "
+                f"(< {self._min_result})，弱信号查询回退全部工具 (query: {query[:40]})"
+            )
+            return all_tool_names
+
         # 不足 top_k 时补充未匹配工具（避免遗漏）
         if len(matched) < self._top_k:
             for name, _ in scores:

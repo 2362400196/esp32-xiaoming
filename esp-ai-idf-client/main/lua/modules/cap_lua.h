@@ -77,6 +77,47 @@ static inline esp_err_t cap_lua_register_module(const char *name, lua_CFunction 
     return ESP_OK;
 }
 
+/* ==================== 作业管理（cap_lua_jobs.c） ==================== */
+
+/**
+ * @brief 同步执行 Lua 脚本文件（包装 lua_runtime_run_file）
+ */
+esp_err_t cap_lua_run_script(const char *path,
+                             const char *args_json,
+                             uint32_t timeout_ms,
+                             char *output,
+                             size_t output_size);
+
+/**
+ * @brief 异步执行 Lua 脚本文件（FreeRTOS 任务），成功时 output 返回作业 ID
+ * @param name      作业名（可为 NULL，用于 list/get/stop 定位）
+ * @param exclusive 互斥键（可为 NULL，同键旧作业会被停止）
+ * @param replace   为 true 时替换同名旧作业
+ */
+esp_err_t cap_lua_run_script_async(const char *path,
+                                   const char *args_json,
+                                   uint32_t timeout_ms,
+                                   const char *name,
+                                   const char *exclusive,
+                                   bool replace,
+                                   char *output,
+                                   size_t output_size);
+
+/**
+ * @brief 列出作业，output 返回 JSON 数组；status 非空时按状态过滤
+ */
+esp_err_t cap_lua_list_jobs(const char *status, char *output, size_t output_size);
+
+/**
+ * @brief 查询单个作业，output 返回 JSON 对象（含 output 字段）
+ */
+esp_err_t cap_lua_get_job(const char *id_or_name, char *output, size_t output_size);
+
+/**
+ * @brief 停止作业（标记停止并等待其自行结束，最长 wait_ms）
+ */
+esp_err_t cap_lua_stop_job(const char *id_or_name, uint32_t wait_ms, char *output, size_t output_size);
+
 #ifdef __cplusplus
 }
 #endif

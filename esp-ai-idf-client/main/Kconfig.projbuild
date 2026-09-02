@@ -34,6 +34,14 @@ choice AUDIO_CODEC
 
 endchoice
 
+# ==================== 环境传感器（environmental_sensor Lua 模块）====================
+config LUA_MODULE_ENVIRONMENTAL_SENSOR_BACKEND_DHT
+    bool "DHT11/DHT22 温湿度传感器 (GPIO 单总线)"
+    default y
+    help
+        启用 environmental_sensor Lua 模块的 DHT 后端，通过 GPIO 单总线读取
+        DHT11/DHT22/AM2301/SI7021 温湿度数据。依赖 esp-dht 驱动组件。
+
 # ==================== 日志级别 ====================
 choice LOG_LEVEL_CHOICE
     prompt "日志级别"

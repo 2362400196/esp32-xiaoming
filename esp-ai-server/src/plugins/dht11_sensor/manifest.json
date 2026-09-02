@@ -1,0 +1,14 @@
+{
+    "id": "dht11_sensor",
+    "name": "DHT11温湿度传感器",
+    "version": "1.0.0",
+    "author": "user",
+    "description": "读取DHT11温湿度传感器数据",
+    "api_version": "1.0",
+    "optional": true,
+    "frontend": false,
+    "requires": [],
+    "permissions": [
+        "device"
+    ]
+}

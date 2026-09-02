@@ -22,3 +22,9 @@ dependencies:
       - if: "idf_version >= 5.0"
   # LVGL 8.4 - 用于 1.54 寸 TFT 表情显示（移植自 Arduino esp-ai-emo-ui 库）
   lvgl/lvgl: '~9.2.2'
+  # DHT11/DHT22 温湿度传感器驱动（environmental_sensor Lua 模块的 DHT 后端）
+  zorxx/dht: '^1.0.1'
+  # 按键驱动（button Lua 模块后端，提供 iot_button.h / button_gpio.h）
+  espressif/button: '^4.0.0'
+  # I2C 总线驱动（i2c Lua 模块后端，提供 i2c_bus.h）
+  espressif/i2c_bus: '^1.0.0'

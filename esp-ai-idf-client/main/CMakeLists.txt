@@ -47,6 +47,7 @@ idf_component_register(
         "lua/modules/lua_module_json.c"
         "lua/modules/lua_module_gpio.c"
         "lua/modules/lua_module_led.c"
+        "lua/modules/lua_module_environmental_sensor.c"
         # 新移植模块（触摸/MCPWM 驱动按芯片条件加入）
         "lua/modules/lua_driver_adc.c"
         "lua/modules/lua_driver_pcnt.c"
@@ -54,6 +55,15 @@ idf_component_register(
         "lua/modules/lua_driver_uart.c"
         "lua/modules/lua_module_ledc.c"
         "lua/modules/lua_module_storage.c"
+        "lua/modules/lua_driver_i2c.c"
+        "lua/modules/lua_module_button.c"
+        "lua/modules/lua_driver_rmt.c"
+        "lua/modules/lua_module_http.c"
+        "lua/modules/lua_module_sci.c"
+        "lua/modules/lua_module_thread.c"
+        "lua/modules/thread_job.c"
+        "lua/modules/thread_sync.c"
+        "lua/modules/cap_lua_jobs.c"
          # MP3 解码器
          "helix_mp3/mp3dec.c" "helix_mp3/bitstream.c" "helix_mp3/buffers.c"
          "helix_mp3/dct32.c" "helix_mp3/dequant.c" "helix_mp3/dqchan.c"
@@ -68,7 +78,8 @@ idf_component_register(
              esp_websocket_client esp_lcd esp_timer cjson esp-sr bt esp_http_server
              esp_adc app_update spiffs
              esp_driver_gpio esp_driver_i2s esp_driver_spi esp_driver_ledc esp_driver_rmt esp_driver_uart
-             ${EXTRA_LUA_DRIVER_REQS} esp_driver_pcnt
+             ${EXTRA_LUA_DRIVER_REQS} esp_driver_pcnt esp_driver_i2c
+             dht
             )
 
 # Kconfig.gen 由 gen_boards.py 自动生成，通过 Kconfig.projbuild source 引入

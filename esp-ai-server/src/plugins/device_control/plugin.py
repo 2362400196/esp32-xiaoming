@@ -21,8 +21,9 @@ async def execute_lua(code: str, tool_manager=None) -> str:
 - 用户要求"画 xxx"时，你**必须调用此工具**生成 Lua 代码来实际绘制。
 - ⚠️ **绝对不要清空屏幕！** 设备屏幕由系统管理，obj_clean(scr) 会误删系统控件导致崩溃重启！
   每次画新图时直接在屏幕上叠加绘制即可。如需清屏请调用 clear_screen 工具。
-- ⚠️ **不支持中文！** 设备固件没有编译中文字体，用 lvgl.label 显示中文会变成方框。
-  如果用户要求写字，写英文或数字，不要写中文。
+- ✅ **支持中文！** 设备固件内置中文字体（16px）。用 lvgl 显示中文时，创建 label 后必须调用
+  `lv.set_style_text_font(label, "puhui")` 切换为中文字体，否则中文会显示为方框。
+  示例：`local lv=require("lvgl"); local lb=lv.label(lv.scr_act()); lv.label_set_text(lb,"你好世界"); lv.set_style_text_font(lb,"puhui")`
 - ⚠️ **GPIO48 已被板载情绪灯占用，不能用作普通 GPIO！** 如需控制灯带请用 led 模块。
 - 用户要求"画图形"时，必须先画一个背景矩形（从 y=40 开始，避让顶部状态栏），再在背景上画图形。
 - 画三角形等形状使用 lvgl.line 系列函数。
@@ -33,6 +34,7 @@ async def execute_lua(code: str, tool_manager=None) -> str:
 - json: encode(table), decode(str), pretty(table)
 - lvgl: obj(parent)/scr_act()/label(parent)/btn(parent)/line(parent), obj_set_pos/size, obj_center/del/clean, label_set_text, line_set_points, set_style_*, color_make/hex, disp_hor/ver_res, LEFT/CENTER/RIGHT
   注：lvgl.obj(parent) 如果不传 parent 会自动使用当前屏幕，但**不要传 nil**。
+  注：显示中文必须调用 lv.set_style_text_font(obj, "puhui") 使用内置中文字体（16px）。
 - gpio: mode(pin, dir), write(pin, val), read(pin)
 - http: get(url), post(url, body, content_type)
 - led (WS2812): init(pin, count), set(idx,R,G,B), set_hsv(idx,H,S,V), show(), clear(), brightness(val), deinit()

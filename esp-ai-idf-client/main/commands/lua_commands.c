@@ -24,6 +24,20 @@
 #include "lua_module_json.h"
 #include "lua_module_gpio.h"
 #include "lua_module_led.h"
+#include "lua_module_environmental_sensor.h"
+#include "lua_driver_adc.h"
+#include "lua_module_ledc.h"
+#include "lua_module_storage.h"
+#include "lua_driver_i2c.h"
+#include "lua_module_button.h"
+#include "lua_driver_uart.h"
+#include "lua_driver_pcnt.h"
+#include "lua_driver_touch.h"
+#include "lua_driver_mcpwm.h"
+#include "lua_driver_rmt.h"
+#include "lua_module_http.h"
+#include "lua_module_sci.h"
+#include "lua_module_thread.h"
 
 // lua_lvgl 声明在 lua_runtime.h 中已有 lua_lvgl_reset()
 extern int luaopen_lvgl(lua_State *L);
@@ -129,7 +143,25 @@ static void register_lua_modules(void)
     lua_runtime_register_module("gpio",   luaopen_gpio);
     lua_runtime_register_module("led",    luaopen_led);
     lua_runtime_register_module("lvgl",   luaopen_lvgl);
-    ESP_LOGI(TAG, "Lua 模块注册完成: delay, system, json, gpio, led, lvgl");
+    lua_runtime_register_module("environmental_sensor", luaopen_environmental_sensor);
+    lua_runtime_register_module("adc",    luaopen_adc);
+    lua_runtime_register_module("ledc",   luaopen_ledc);
+    lua_runtime_register_module("storage", luaopen_storage);
+    lua_runtime_register_module("i2c",    luaopen_i2c);
+    lua_runtime_register_module("button", luaopen_button);
+    lua_runtime_register_module("uart",   luaopen_uart);
+    lua_runtime_register_module("pcnt",   luaopen_pcnt);
+    lua_runtime_register_module("rmt",    luaopen_rmt);
+    lua_runtime_register_module("http",   luaopen_http);
+    lua_runtime_register_module("sci",    luaopen_sci);
+    lua_runtime_register_module("thread", luaopen_thread);
+#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32C2 || CONFIG_IDF_TARGET_ESP32C6
+    lua_runtime_register_module("touch",  luaopen_touch);
+#endif
+#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32P4
+    lua_runtime_register_module("mcpwm",  luaopen_mcpwm);
+#endif
+    ESP_LOGI(TAG, "Lua 模块注册完成: delay, system, json, gpio, led, lvgl, environmental_sensor, adc, ledc, storage, i2c, button, uart, pcnt, rmt, http, sci, thread, touch, mcpwm");
 }
 
 // execute_lua: 执行 Lua 代码（异步到独立 task）

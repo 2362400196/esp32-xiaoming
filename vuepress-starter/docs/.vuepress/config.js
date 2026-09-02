@@ -108,6 +108,7 @@ export default defineUserConfig({
           collapsed: false,
           items: [
             { text: '公共工具库（Plugin SDK）', link: '/plugin/plugin-sdk' },
+            { text: '设备端 Lua 能力', link: '/plugin/lua-capabilities' },
             { text: '生命周期与事件', link: '/plugin/lifecycle-events' },
             { text: '插件沙箱机制', link: '/plugin/sandbox' },
           ],
