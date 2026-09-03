@@ -1234,7 +1234,10 @@ class ConversationPipeline:
         # 不依赖客户端 client_available_audio 上报（客户端已禁用该上报）。
         send_start_time = None
         sent_audio_ms_total = 0.0
-        TARGET_AUDIO_LEAD_MS = 300   # 允许发送超前播放的最大毫秒数
+        # 允许发送超前播放的最大毫秒数。300ms 过浅：TTS 首帧后生成间隙或句子间停顿
+        # 超过 300ms 时客户端流缓冲排空 → I2S 欠载（"卡顿一下"）。
+        # 加大到 1000ms，客户端维持 ~1s 缓冲吸收间隙（客户端流缓冲 50KB≈6.4s，足够容纳）。
+        TARGET_AUDIO_LEAD_MS = 1000
         AUDIO_BITRATE_KBPS = 64      # MP3 发送比特率（与客户端 spk_bitrate=64 一致）
 
         try:

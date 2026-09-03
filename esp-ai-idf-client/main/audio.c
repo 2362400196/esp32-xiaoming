@@ -37,6 +37,11 @@
 #define SPK_WATCHDOG_TIMEOUT_NORMAL 2000   // 10秒
 #define SPK_WATCHDOG_TIMEOUT_FIRST  6000   // 30秒（首帧更宽容）
 
+// 预缓冲：播放开始后等待流缓冲积累足够音频再开始解码，
+// 吸收 TTS 首帧后生成间隙（"卡顿一下"）。64kbps 下 4KB ≈ 500ms。
+#define SPK_PREBUFFER_BYTES      (4 * 1024)
+#define SPK_PREBUFFER_TIMEOUT_MS 800
+
 // 待播放缓冲（pending）：WebSocket 文本消息（play_audio）可能因 esp_websocket_client
 // 的消息处理延迟晚于二进制音频帧到达，导致 s_spk_ing 仍为 false 时音频帧被丢弃。
 // 该缓冲暂存这些提前到达的数据，play_audio 处理时补入播放流。
@@ -74,6 +79,8 @@ static volatile bool s_spk_drain_done = false;
 static volatile bool s_spk_reset_decoder_flag = false;  // 异步重置解码器标志
 static int s_spk_frame_count = 0;  // 调试：解码帧计数
 static int64_t s_last_i2s_write_us = 0;  // I2S 写入时间戳，用于检测写入间隔
+static volatile bool s_spk_prebuffer = false;  // 预缓冲进行中（等待流缓冲积累足够音频）
+static int64_t s_spk_prebuffer_start_ms = 0;   // 预缓冲开始时间戳（超时兜底）
 #if defined(AUDIO_SCHEME_ES8311)
 // 当前 I2S 硬件实际采样率（ES8311 方案，用于播放结束后恢复 16kHz 唤醒时钟）
 static int s_i2s_clock_rate = 0;
@@ -398,6 +405,25 @@ static void spk_task(void *arg)
 #endif
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
+        }
+
+        // 预缓冲：等待流缓冲积累足够音频再开始解码，吸收 TTS 首帧后生成间隙
+        // （"卡顿一下"）。收到结束帧(02/03)或超时则提前开始，避免短回复延迟过长。
+        if (s_spk_prebuffer) {
+            size_t avail = (s_spk_stream) ? xStreamBufferBytesAvailable(s_spk_stream) : 0;
+            if (avail >= SPK_PREBUFFER_BYTES || s_spk_wait_drain) {
+                s_spk_prebuffer = false;
+                ESP_LOGI(TAG, "预缓冲完成: %d bytes", (int)avail);
+            } else {
+                if (s_spk_prebuffer_start_ms == 0) s_spk_prebuffer_start_ms = esp_timer_get_time() / 1000;
+                if (esp_timer_get_time() / 1000 - s_spk_prebuffer_start_ms >= SPK_PREBUFFER_TIMEOUT_MS) {
+                    s_spk_prebuffer = false;
+                    ESP_LOGI(TAG, "预缓冲超时，直接开始播放: %d bytes", (int)avail);
+                } else {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    continue;
+                }
+            }
         }
 
         // 从 StreamBuffer 读一块数据（5ms 超时，减少 DMA 欠载风险）
@@ -1175,6 +1201,10 @@ esp_err_t audio_spk_play(void)
     s_spk_drain_done = false;
     s_spk_frame_count = 0;
     s_last_flow_report_ms = 0;
+    // 预缓冲：新音频流开始时等待流缓冲积累足够音频再解码，
+    // 吸收 TTS 首帧后生成间隙（"卡顿一下"）。由 spk_task 完成或超时清除。
+    s_spk_prebuffer = true;
+    s_spk_prebuffer_start_ms = 0;
 
     // 补入待播放缓冲：play_audio（文本）晚于音频帧到达时，先到的音频在此写入播放流
     if (s_spk_pending_buf != NULL && s_spk_pending_len > 0 && s_spk_stream != NULL) {
@@ -1208,6 +1238,7 @@ esp_err_t audio_spk_stop(void)
     s_spk_wait_drain = false;
     s_spk_drain_done = false;
     s_spk_need_reset = true;
+    s_spk_prebuffer = false;  // 停止时清除预缓冲，避免残留
     if (s_spk_pending_buf != NULL) {
         s_spk_pending_len = 0;  // 停止时丢弃未播出的待播放数据
     }
@@ -1228,6 +1259,7 @@ esp_err_t audio_spk_hard_stop(void)
     s_spk_ing = false;
     s_spk_wait_drain = false;
     s_spk_drain_done = false;
+    s_spk_prebuffer = false;  // 硬停止时清除预缓冲，避免残留
     if (s_spk_pending_buf != NULL) {
         s_spk_pending_len = 0;  // 硬停止时丢弃待播放数据
     }
