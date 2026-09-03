@@ -12,6 +12,7 @@
 #include "model_path.h"
 #include "esp_heap_caps.h"  /* heap_caps_get_free_size（内存诊断） */
 #include "gif_downloader.h" /* gif_download_is_busy：表情下载期间禁用唤醒 */
+#include "ota_update.h"     /* ota_is_updating：OTA 升级期间禁用唤醒/按键 */
 #include "freertos/idf_additions.h"  /* xTaskCreatePinnedToCoreWithCaps */
 #include "freertos/semphr.h"
 #if defined(AUDIO_SCHEME_ES8311)
@@ -105,6 +106,17 @@ static void button_wakeup_task(void *arg)
 
         // 检测按钮按下（下降沿）
         if (current_state == 0 && last_state == 1) {
+            // OTA 升级期间禁用所有按键操作（唤醒/配网）：写 flash 时被按键打断
+            // 可能导致异常会话或干扰升级，升级完成后自动恢复
+            if (ota_is_updating()) {
+                // 等待按钮释放并消抖
+                vTaskDelay(pdMS_TO_TICKS(50));
+                while (gpio_get_level(board_get_config()->wake_button_gpio) == 0) {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                }
+                last_state = 1;
+                continue;
+            }
             // 更新按键计数（滑动窗口：同一 2s 窗口内计数）
             if (s_press_count == 0) {
                 s_first_press_tick = xTaskGetTickCount();
@@ -368,14 +380,14 @@ static void wakenet_task(void *arg)
         }
 
         if (state == WAKENET_DETECTED) {
-            // 表情下载期间禁用唤醒（下载占用内存，唤醒后播放/重建可能分配失败
-            // 导致异常会话；下载完成自动恢复）。日志节流 5 秒一次避免刷屏。
-            if (gif_download_is_busy()) {
+            // 表情下载/OTA 升级期间禁用唤醒（下载/写 flash 占用内存，唤醒后播放/重建
+            // 可能分配失败导致异常会话；完成自动恢复）。日志节流 5 秒一次避免刷屏。
+            if (gif_download_is_busy() || ota_is_updating()) {
                 static TickType_t s_last_ignored_log = 0;
                 TickType_t now_t = xTaskGetTickCount();
                 if ((now_t - s_last_ignored_log) * portTICK_PERIOD_MS > 5000) {
                     s_last_ignored_log = now_t;
-                    ESP_LOGW(TAG, "表情下载中，忽略语音唤醒（下载完成后自动恢复）");
+                    ESP_LOGW(TAG, "表情下载/OTA升级中，忽略语音唤醒（完成后自动恢复）");
                 }
                 continue;
             }
@@ -466,8 +478,11 @@ esp_err_t wakeup_init(void)
     ESP_LOGI(TAG, "初始化 WakeNet I2S 通道...");
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true;
-    // DMA 缓冲区：与 xiaozhi 一致（6 描述符 × 240 帧），默认 2 描述符太小易欠载
-    chan_cfg.dma_desc_num = 6;
+    // DMA 缓冲区：6 描述符 × 240 帧 = 90ms，播放时被高优先级任务抢占易欠载。
+    // 增大到 12×240 = 180ms 吸收调度抖动（I2S 直连方案为 480ms）。
+    // 内存来自 DMA 预留池（CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL 160KB，WiFi 用 ~126KB，
+    // 富余 ~34KB），不影响用户可见的可用堆。
+    chan_cfg.dma_desc_num = 12;
     chan_cfg.dma_frame_num = 240;
     esp_err_t i2s_err = ESP_OK;
 

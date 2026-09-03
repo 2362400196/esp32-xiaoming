@@ -12,6 +12,7 @@
  *   6. 下载完成前使用编译器内置的 GIF 作为后备
  */
 #include "gif_downloader.h"
+#include "ota_update.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +20,7 @@
 #include <sys/stat.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "config.h"
 #include "board_compat.h"
 #include "device_id.h"
@@ -31,6 +33,7 @@
 #include "cJSON.h"
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
+#include "freertos/idf_additions.h"  /* xTaskCreatePinnedToCoreWithCaps */
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -197,10 +200,9 @@ static uint8_t *download_file(const char *url, size_t *out_size)
 #define EMO_CACHE_DIR "/spiffs/emos"
 
 // 从 SPIFFS 读取缓存的 GIF（不存在/读取失败返回 NULL）
-static uint8_t *load_gif_from_cache(const char *filename, size_t *out_size)
+// 注意：本函数执行 flash 操作，必须在内部 RAM 栈的任务中运行（见下方工作线程）
+static uint8_t *load_gif_from_cache_impl(const char *path, size_t *out_size)
 {
-    char path[128];
-    snprintf(path, sizeof(path), "%s/%s", EMO_CACHE_DIR, filename);
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
@@ -221,10 +223,9 @@ static uint8_t *load_gif_from_cache(const char *filename, size_t *out_size)
 }
 
 // 写入 SPIFFS 缓存（失败仅日志，不影响功能；空间不足时自动跳过缓存）
-static void save_gif_to_cache(const char *filename, const uint8_t *data, size_t size)
+// 注意：本函数执行 flash 操作，必须在内部 RAM 栈的任务中运行（见下方工作线程）
+static void save_gif_to_cache_impl(const char *path, const uint8_t *data, size_t size)
 {
-    char path[128];
-    snprintf(path, sizeof(path), "%s/%s", EMO_CACHE_DIR, filename);
     mkdir(EMO_CACHE_DIR, 0755);  // 确保目录存在（已存在时返回 EEXIST，忽略）
 
     // 空间预检：SPIFFS 空闲不足以容纳整个文件时直接跳过（留 8KB 索引/元数据余量），
@@ -234,7 +235,7 @@ static void save_gif_to_cache(const char *filename, const uint8_t *data, size_t 
         size_t free_bytes = total - used;
         if (free_bytes < size + 8 * 1024) {
             ESP_LOGW(TAG, "SPIFFS 空闲不足，跳过缓存: %s 需 %dKB，空闲 %dKB（表情仍可在本次运行中正常显示）",
-                     filename, (int)(size / 1024), (int)(free_bytes / 1024));
+                     path, (int)(size / 1024), (int)(free_bytes / 1024));
             return;
         }
     }
@@ -255,7 +256,7 @@ static void save_gif_to_cache(const char *filename, const uint8_t *data, size_t 
         size_t n = fwrite(data + written, 1, remain < chunk_max ? remain : chunk_max, f);
         if (n == 0) {
             ESP_LOGW(TAG, "缓存写入失败@%u/%u: %s (errno=%d %s, ferror=%d)",
-                     (unsigned)written, (unsigned)size, filename,
+                     (unsigned)written, (unsigned)size, path,
                      errno, strerror(errno), ferror(f) ? 1 : 0);
             break;
         }
@@ -263,7 +264,7 @@ static void save_gif_to_cache(const char *filename, const uint8_t *data, size_t 
     }
     // 显式落盘并校验：fclose 内部 flush 失败会被静默吞掉，必须先 fflush 检查
     if (written == size && (fflush(f) != 0 || fsync(fileno(f)) != 0)) {
-        ESP_LOGW(TAG, "缓存写入失败(flush/fsync): %s (errno=%d %s)", filename, errno, strerror(errno));
+        ESP_LOGW(TAG, "缓存写入失败(flush/fsync): %s (errno=%d %s)", path, errno, strerror(errno));
         written = 0;
     }
     fclose(f);
@@ -274,15 +275,15 @@ static void save_gif_to_cache(const char *filename, const uint8_t *data, size_t 
         size_t used2 = 0;
         if (esp_spiffs_info("storage", &total, &used2) == ESP_OK) {
             ESP_LOGW(TAG, "缓存写入不完整: %s (%u/%u)，删除无效缓存（SPIFFS 总=%luKB 已用=%luKB 空闲=%luKB）",
-                     filename, (unsigned)written, (unsigned)size,
+                     path, (unsigned)written, (unsigned)size,
                      (unsigned long)(total / 1024), (unsigned long)(used2 / 1024),
                      (unsigned long)((total - used2) / 1024));
         } else {
             ESP_LOGW(TAG, "缓存写入不完整: %s (%u/%u)，删除无效缓存（SPIFFS 信息读取失败）",
-                     filename, (unsigned)written, (unsigned)size);
+                     path, (unsigned)written, (unsigned)size);
         }
     } else {
-        ESP_LOGI(TAG, "%s 已写入缓存 (%d bytes)", filename, (int)size);
+        ESP_LOGI(TAG, "%s 已写入缓存 (%d bytes)", path, (int)size);
     }
 }
 
@@ -302,6 +303,112 @@ static void clear_gif_cache(void)
     }
     closedir(dir);
     ESP_LOGI(TAG, "GIF 缓存已清空");
+}
+
+// ==================== SPIFFS 内部 RAM 一次性工作线程 ====================
+// SPIFFS 读写会禁用 flash 缓存，期间 CPU 无法访问 PSRAM（含 PSRAM 栈），
+// 否则触发 esp_task_stack_is_sane_cache_disabled 断言崩溃。
+// 下载任务栈在 PSRAM（32KB 用于 HTTP），故所有 SPIFFS 操作统一委托给
+// 本内部 RAM 栈的一次性工作线程执行；下载任务同步等待结果。
+// 每次操作创建/删除任务（约 100µs），操作完成后 6KB 内部 RAM 立即释放，
+// 避免常驻工作线程长期占用紧张的内部 RAM。
+typedef struct {
+    void (*fn)(void *ctx);   // 在内部 RAM 栈中执行的函数
+    void *ctx;               // 上下文（必须分配在内部 RAM）
+    SemaphoreHandle_t done;  // 完成信号量
+} spiffs_job_t;
+
+static void spiffs_one_shot_task(void *arg)
+{
+    spiffs_job_t *p = (spiffs_job_t *)arg;
+    // 启动时立即把参数拷到内部 RAM 栈局部变量：后续 flash 操作期间缓存禁用，
+    // 不能再访问 p（p 在调用方 PSRAM 栈上）
+    void (*fn)(void *ctx) = p->fn;
+    void *ctx = p->ctx;
+    SemaphoreHandle_t done = p->done;
+    fn(ctx);
+    xSemaphoreGive(done);
+    vTaskDeleteWithCaps(NULL);  /* 配合 xTaskCreatePinnedToCoreWithCaps 释放内部 RAM 栈 */
+}
+
+// 同步执行 SPIFFS 操作：创建内部 RAM 栈任务执行并阻塞等待完成
+static void spiffs_sync(void (*fn)(void *ctx), void *ctx)
+{
+    spiffs_job_t p = { .fn = fn, .ctx = ctx, .done = xSemaphoreCreateBinary() };
+    if (!p.done) return;
+    // 栈必须在内部 RAM：SPIFFS 操作期间缓存禁用，PSRAM 栈会断言崩溃
+    BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(
+        spiffs_one_shot_task, "spiffs", 6144, &p, 2, NULL,
+        BOARD_TASK_CORE_1, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (ret == pdPASS) {
+        xSemaphoreTake(p.done, portMAX_DELAY);
+    } else {
+        ESP_LOGW(TAG, "SPIFFS 工作线程创建失败（内部 RAM 不足），本次跳过缓存");
+    }
+    vSemaphoreDelete(p.done);
+}
+
+// SPIFFS 操作上下文（必须分配在内部 RAM：工作线程在缓存禁用期间访问它）
+typedef struct {
+    char path[128];          // 目标文件完整路径
+    const uint8_t *data;     // 写入数据（SAVE）
+    size_t size;             // 数据大小（SAVE）/ 读取大小输出（LOAD）
+    uint8_t *out_buf;        // 读取缓冲输出（LOAD）
+} spiffs_op_ctx_t;
+
+static void spiffs_load_worker(void *ctx)
+{
+    spiffs_op_ctx_t *c = (spiffs_op_ctx_t *)ctx;
+    c->out_buf = load_gif_from_cache_impl(c->path, &c->size);
+}
+
+static void spiffs_save_worker(void *ctx)
+{
+    spiffs_op_ctx_t *c = (spiffs_op_ctx_t *)ctx;
+    save_gif_to_cache_impl(c->path, c->data, c->size);
+}
+
+static void spiffs_remove_worker(void *ctx)
+{
+    spiffs_op_ctx_t *c = (spiffs_op_ctx_t *)ctx;
+    remove(c->path);
+}
+
+// 从 SPIFFS 读取缓存的 GIF（委托内部 RAM 栈工作线程，不存在/失败返回 NULL）
+static uint8_t *load_gif_from_cache(const char *filename, size_t *out_size)
+{
+    spiffs_op_ctx_t *ctx = (spiffs_op_ctx_t *)heap_caps_malloc(sizeof(spiffs_op_ctx_t), MALLOC_CAP_INTERNAL);
+    if (!ctx) return NULL;
+    snprintf(ctx->path, sizeof(ctx->path), "%s/%s", EMO_CACHE_DIR, filename);
+    ctx->out_buf = NULL;
+    ctx->size = 0;
+    spiffs_sync(spiffs_load_worker, ctx);
+    uint8_t *buf = ctx->out_buf;
+    if (out_size) *out_size = ctx->size;
+    heap_caps_free(ctx);
+    return buf;
+}
+
+// 写入 SPIFFS 缓存（委托内部 RAM 栈工作线程）
+static void save_gif_to_cache(const char *filename, const uint8_t *data, size_t size)
+{
+    spiffs_op_ctx_t *ctx = (spiffs_op_ctx_t *)heap_caps_malloc(sizeof(spiffs_op_ctx_t), MALLOC_CAP_INTERNAL);
+    if (!ctx) return;
+    snprintf(ctx->path, sizeof(ctx->path), "%s/%s", EMO_CACHE_DIR, filename);
+    ctx->data = data;
+    ctx->size = size;
+    spiffs_sync(spiffs_save_worker, ctx);
+    heap_caps_free(ctx);
+}
+
+// 删除 SPIFFS 缓存文件（委托内部 RAM 栈工作线程）
+static void remove_gif_cache_file(const char *filename)
+{
+    spiffs_op_ctx_t *ctx = (spiffs_op_ctx_t *)heap_caps_malloc(sizeof(spiffs_op_ctx_t), MALLOC_CAP_INTERNAL);
+    if (!ctx) return;
+    snprintf(ctx->path, sizeof(ctx->path), "%s/%s", EMO_CACHE_DIR, filename);
+    spiffs_sync(spiffs_remove_worker, ctx);
+    heap_caps_free(ctx);
 }
 
 // 前向声明
@@ -410,9 +517,7 @@ static bool download_from_api(const char *http_base, const char *device_id)
                          target_file, (int)dsize, expected_size);
                 free(data_buf);
                 data_buf = NULL;
-                char path[128];
-                snprintf(path, sizeof(path), "%s/%s", EMO_CACHE_DIR, target_file);
-                remove(path);  // 删除无效缓存
+                remove_gif_cache_file(target_file);  // 删除无效缓存
             } else {
                 from_cache = true;
                 ESP_LOGI(TAG, "%s 使用本地缓存 (%d bytes)", target_file, (int)dsize);
@@ -493,7 +598,7 @@ typedef struct {
 static void download_gifs_task(void *arg)
 {
     if (s_download_done) {
-        vTaskDelete(NULL);
+        vTaskDeleteWithCaps(NULL);  /* 配合 xTaskCreatePinnedToCoreWithCaps 释放 PSRAM 栈 */
         return;
     }
 
@@ -541,7 +646,8 @@ static void download_gifs_task(void *arg)
     }
     if (!http_base || http_base[0] == '\0') {
         ESP_LOGW(TAG, "服务器 HTTP 地址（等待超时），无法下载表情");
-        vTaskDelete(NULL);
+        s_download_started = false;  // 复位，避免唤醒被永久禁用
+        vTaskDeleteWithCaps(NULL);  /* 配合 xTaskCreatePinnedToCoreWithCaps 释放 PSRAM 栈 */
         return;
     }
 
@@ -603,6 +709,7 @@ static void download_gifs_task(void *arg)
             download_all_from(base_url);
         } else {
             ESP_LOGW(TAG, "服务器不可达，使用内置 GIF");
+            s_download_started = false;  // 复位，避免唤醒被永久禁用
         }
     }
 
@@ -611,7 +718,13 @@ static void download_gifs_task(void *arg)
         eeui_port_hide_emo_downloading();
     }
 
-    vTaskDelete(NULL);
+    // 下载未成功完成（如内部内存分配失败/部分失败）时复位启动标志，
+    // 避免 gif_download_is_busy() 永久为 true 导致唤醒被禁用
+    if (!s_download_done) {
+        s_download_started = false;
+    }
+
+    vTaskDeleteWithCaps(NULL);  /* 配合 xTaskCreatePinnedToCoreWithCaps 释放 PSRAM 栈 */
 }
 
 /** 回退方案：从固定 URL 前缀下载所有 GIF */
@@ -643,9 +756,7 @@ static void download_all_from(const char *base_url)
                 ESP_LOGI(TAG, "%s 缓存无效(头部错误)，重新下载", g_gif_files[i].filename);
                 free(data_buf);
                 data_buf = NULL;
-                char path[128];
-                snprintf(path, sizeof(path), "%s/%s", EMO_CACHE_DIR, g_gif_files[i].filename);
-                remove(path);
+                remove_gif_cache_file(g_gif_files[i].filename);
             } else {
                 from_cache = true;
                 ESP_LOGI(TAG, "%s 使用本地缓存 (%d bytes)", g_gif_files[i].filename, (int)dsize);
@@ -714,9 +825,50 @@ static void download_all_from(const char *base_url)
 
 // ==================== 公开接口 ====================
 
+// 下载任务创建失败后的重试：一次性定时器，30 秒后重试（最多 10 次）。
+// 上电初期 WakeNet/音频/WiFi 已占用大量内存，8KB 任务栈可能分配失败；
+// 稍后内存释放或网络恢复后再试，避免表情永久缺失。
+static esp_timer_handle_t s_retry_timer = NULL;
+static int s_retry_count = 0;
+#define GIF_DOWNLOAD_MAX_RETRY 10
+#define GIF_DOWNLOAD_RETRY_DELAY_US (30 * 1000 * 1000)
+
+static void download_retry_cb(void *arg)
+{
+    download_gifs();
+}
+
+static void schedule_download_retry(void)
+{
+    if (s_retry_count >= GIF_DOWNLOAD_MAX_RETRY) {
+        ESP_LOGW(TAG, "表情下载重试次数已达上限，放弃（唤醒不受影响）");
+        return;
+    }
+    s_retry_count++;
+    if (!s_retry_timer) {
+        esp_timer_create_args_t args = {
+            .callback = download_retry_cb,
+            .arg = NULL,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "gif_retry",
+            .skip_unhandled_events = false,
+        };
+        if (esp_timer_create(&args, &s_retry_timer) != ESP_OK) {
+            ESP_LOGW(TAG, "创建重试定时器失败");
+            return;
+        }
+    }
+    esp_timer_start_once(s_retry_timer, GIF_DOWNLOAD_RETRY_DELAY_US);
+}
+
 void download_gifs(void)
 {
     if (s_download_done) return;
+    if (s_download_started) return;  // 已有下载任务在运行/排队，避免重复创建
+    if (ota_is_updating()) {
+        ESP_LOGW(TAG, "OTA 升级进行中，跳过表情下载");
+        return;
+    }
 
     ensure_gif_mutex();
     ESP_LOGI(TAG, "启动后台下载动图任务...");
@@ -727,23 +879,29 @@ void download_gifs(void)
     download_task_params_t *params = (download_task_params_t *)malloc(sizeof(download_task_params_t));
     if (!params) {
         ESP_LOGW(TAG, "内存分配失败，使用内置 GIF");
+        s_download_started = false;  // 复位，避免唤醒被永久禁用
         return;
     }
     params->show_ui = true;
     params->skip_wifi_wait = false;  // 上电模式：需要等待 WiFi 就绪
-    BaseType_t ret = xTaskCreatePinnedToCore(
+    BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(
         download_gifs_task,
         "gif_down",
-        8192,
+        32768,        // 字节（有 PSRAM 时栈放 PSRAM，省内部 RAM）
         params,
         1,            // 低优先级
         NULL,
-        BOARD_TASK_CORE_1  // 双核：核心 1；单核：核心 0
+        BOARD_TASK_CORE_1,  // 双核：核心 1；单核：核心 0
+        BOARD_STACK_CAPS_AUDIO
     );
 
     if (ret != pdPASS) {
-        ESP_LOGW(TAG, "创建下载任务失败，表情将无法显示（固件已无内置表情）");
+        ESP_LOGW(TAG, "创建下载任务失败（内部RAM可用=%ldB 最大块=%ldB），稍后重试",
+                 (long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         free(params);
+        s_download_started = false;  // 复位，避免唤醒被永久禁用
+        schedule_download_retry();
     }
 }
 
@@ -783,6 +941,12 @@ void refresh_gifs(void)
 {
     ESP_LOGI(TAG, "刷新表情包：释放旧数据并重新下载");
 
+    // OTA 升级进行中跳过：写 flash 与 OTA 并发会争抢内存/SPIFFS，且升级成功后立即重启
+    if (ota_is_updating()) {
+        ESP_LOGW(TAG, "OTA 升级进行中，跳过表情刷新");
+        return;
+    }
+
     // 清空 SPIFFS 缓存（服务器已切换表情包，旧缓存不可用）
     clear_gif_cache();
 
@@ -799,14 +963,15 @@ void refresh_gifs(void)
     if (params) {
         params->show_ui = true;
         params->skip_wifi_wait = true;  // 刷新模式：WiFi 已连接，跳过等待
-        BaseType_t ret = xTaskCreatePinnedToCore(
+        BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(
             download_gifs_task,
             "gif_refresh",
-            8192,
+            32768,        // 字节（有 PSRAM 时栈放 PSRAM，省内部 RAM）
             params,
             1,
             NULL,
-            BOARD_TASK_CORE_1  // 双核：核心 1；单核：核心 0
+            BOARD_TASK_CORE_1,  // 双核：核心 1；单核：核心 0
+            BOARD_STACK_CAPS_AUDIO
         );
         if (ret != pdPASS) {
             ESP_LOGW(TAG, "创建刷新下载任务失败");

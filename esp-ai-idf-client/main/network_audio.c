@@ -12,11 +12,13 @@
  */
 #include "network_audio.h"
 #include "config.h"
+#include "board_compat.h"   /* BOARD_STACK_CAPS_AUDIO / BOARD_TASK_CORE_1 */
 #include "eeui_port.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"  /* xTaskCreatePinnedToCoreWithCaps / vTaskDeleteWithCaps */
 #include <string.h>
 #include <stdlib.h>
 
@@ -220,12 +222,13 @@ cleanup:
         // 只回收自己的 URL，绝不触碰 s_playing/s_current_url/s_task_handle/UI——
         // 那些已属于新播放任务
         ESP_LOGW(TAG, "播放任务退出时代次已变（被新播放顶替），跳过共享状态清理");
+        // 本任务仍是当前播放时 s_current_url 已释放 url（两者同一块内存），
+        // 只有被顶替时 s_current_url 属于新任务，才需要在此释放自己的 url
+        free(url);
     }
 
-    free(url);
-
     ESP_LOGI(TAG, "网络音频播放任务结束%s", should_continue ? "（等待下一首）" : "");
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);  /* 配合 xTaskCreatePinnedToCoreWithCaps 释放 PSRAM 栈 */
 }
 
 esp_err_t network_audio_play(const char *url)
@@ -269,8 +272,13 @@ esp_err_t network_audio_play(const char *url)
 
     // 创建播放任务：s_task_handle 仅在新任务成功创建后由 xTaskCreate 写入，
     // 避免与旧任务退出时清空 s_task_handle 产生竞态
-    BaseType_t ret = xTaskCreate(network_audio_task, "net_audio", 8192,
-                                 params, 5, &s_task_handle);
+    // 栈放 PSRAM（本任务只做 HTTP 流式读取 + I2S 播放，无 flash 操作）：
+    // 内部 RAM 仅剩 ~9KB 时 8KB 栈任务创建会失败（日志 "创建播放任务失败"），
+    // 与 mic_task/wakenet_task 一致用 BOARD_STACK_CAPS_AUDIO 释放内部 RAM。
+    BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(
+        network_audio_task, "net_audio", 8192,
+        params, 5, &s_task_handle,
+        BOARD_TASK_CORE_1, BOARD_STACK_CAPS_AUDIO);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "创建播放任务失败");
         s_playing = false;

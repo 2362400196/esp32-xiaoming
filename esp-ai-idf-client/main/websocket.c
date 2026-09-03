@@ -1,17 +1,20 @@
 #include "config.h"
 #include "boards/board_interface.h"
+#include "board_compat.h"  /* BOARD_STACK_CAPS_AUDIO / BOARD_TASK_CORE_1 */
 #include "esp_websocket_client.h"
 #include "esp_wifi.h"
 #include "esp_timer.h"
 #include "esp_system.h"
 #include "esp_http_client.h"
 #include "freertos/semphr.h"
+#include "freertos/idf_additions.h"  /* xTaskCreatePinnedToCoreWithCaps */
 #include "esp_crt_bundle.h"
 #include "cJSON.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "commands/command_registry.h"
 #include "ota_update.h"
+#include "gif_downloader.h"
 #include "device_id.h"
 #include <time.h>
 #include <sys/time.h>  /* settimeofday（stc_time 同步系统时间，屏保时钟用） */
@@ -85,6 +88,9 @@ static bool s_is_official = false;        // 是否连接到官方服务器
 static bool s_music_streaming = false;    // 音乐推流模式(play_audio + tts_task_id="play_music")
 static char s_server_http_base[256] = {0}; // HTTP 基础 URL（用于 OTA 查询）
 static bool s_ota_checked = false;         // OTA 是否已检查过（仅首次连接检查）
+// OTA 检查任务创建失败后的重试定时器（上电初期内存紧张，8KB 任务栈可能分配失败）
+static esp_timer_handle_t s_ota_check_retry_timer = NULL;
+#define OTA_CHECK_RETRY_DELAY_US (30 * 1000 * 1000)  // 30 秒后重试
 
 // 排空完成后执行的动作类型
 typedef enum {
@@ -575,31 +581,119 @@ static void handle_audio_binary_event(const esp_websocket_event_data_t *data)
 // 在独立任务中执行，避免阻塞 WebSocket 事件处理
 static void ota_check_task(void *arg)
 {
+    ESP_LOGI(TAG, "OTA 检查任务启动");
     // 等待 WebSocket 连接稳定，让初始握手和配置同步完成
     vTaskDelay(pdMS_TO_TICKS(2000));
 
     // 会话进行中（麦克风采集/音频播放）不做 OTA：写 flash 会卡顿音频、打断会话
     if (audio_mic_is_running() || audio_spk_is_playing()) {
-        ESP_LOGW(TAG, "会话进行中，跳过本次 OTA 检查");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    if (s_server_http_base[0] == '\0') {
+        ESP_LOGW(TAG, "会话进行中（mic=%d spk=%d），跳过本次 OTA 检查",
+                 audio_mic_is_running(), audio_spk_is_playing());
+    } else if (s_server_http_base[0] == '\0') {
         ESP_LOGW(TAG, "服务器 HTTP 地址为空，跳过 OTA 检查");
-        vTaskDelete(NULL);
+    } else {
+        ESP_LOGI(TAG, "开始检查 OTA 升级: %s", s_server_http_base);
+        esp_err_t ret = ota_check_and_update(s_server_http_base);
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "OTA 检查完成，无需更新或更新成功");
+        } else {
+            ESP_LOGW(TAG, "OTA 检查失败: %s，将继续使用当前版本", esp_err_to_name(ret));
+        }
+    }
+
+    // 先版本后表情：OTA 检查完成（无论是否升级）后再启动表情下载。
+    // OTA 成功路径会 esp_restart，不会执行到这里
+    if (display_has_graphic()) {
+        if (!gif_download_is_busy()) {
+            ESP_LOGI(TAG, "OTA 检查完成，触发表情下载");
+            download_gifs();
+        } else {
+            ESP_LOGI(TAG, "表情下载已在进行中，跳过");
+        }
+    } else {
+        // headless（无图形显示，如 ESP32-C3 无屏板型）：跳过 GIF 下载，避免占用 RAM
+        ESP_LOGI(TAG, "无图形显示（headless），跳过 GIF 下载");
+    }
+
+    vTaskDeleteWithCaps(NULL);  /* 配合 xTaskCreatePinnedToCoreWithCaps 释放 PSRAM 栈 */
+}
+
+// OTA 检查任务创建失败后的重试：一次性定时器，30 秒后重试。
+// 上电初期 WakeNet/音频/WiFi 已占用大量内存，8KB 任务栈可能分配失败；
+// 稍后内存释放后再试，避免 OTA 检查与表情下载永久缺失。
+static void ota_check_retry_cb(void *arg)
+{
+    if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
+    if (s_ota_checked) {  // 已被事件回调或 main.c 兜底触发，无需重复创建
+        if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
         return;
     }
-
-    ESP_LOGI(TAG, "开始检查 OTA 升级: %s", s_server_http_base);
-    esp_err_t ret = ota_check_and_update(s_server_http_base);
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "OTA 检查完成，无需更新或更新成功");
+    // ota_check_task 必须用内部 RAM 栈：ota_confirm_current_app 内部调用
+    // esp_ota_get_state_partition → esp_partition_mmap 会冻结缓存，
+    // 栈在 PSRAM 会触发 s_task_stack_is_sane_when_cache_frozen 断言。
+    // 注意：MALLOC_CAP_8BIT 单独使用不保证内部 RAM（PSRAM 也满足该能力），
+    // 必须显式加 MALLOC_CAP_INTERNAL 强制栈落在内部 RAM。
+    // 内部 RAM 紧张，栈收紧到 6KB（HTTP 查询 + flash mmap 调用链约 3-4KB）。
+    BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(
+        ota_check_task, "ota_check", 6144, NULL, 3, NULL,
+        BOARD_TASK_CORE_1, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (ret == pdPASS) {
+        s_ota_checked = true;
+        ESP_LOGI(TAG, "OTA 检查任务重试创建成功");
     } else {
-        ESP_LOGW(TAG, "OTA 检查失败: %s，将继续使用当前版本", esp_err_to_name(ret));
+        ESP_LOGW(TAG, "OTA 检查任务重试创建失败，30 秒后再次重试");
+        if (s_ota_check_retry_timer) {
+            esp_timer_start_once(s_ota_check_retry_timer, OTA_CHECK_RETRY_DELAY_US);
+        }
     }
+    if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
+}
 
-    vTaskDelete(NULL);
+static void schedule_ota_check_retry(void)
+{
+    if (!s_ota_check_retry_timer) {
+        esp_timer_create_args_t args = {
+            .callback = ota_check_retry_cb,
+            .arg = NULL,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "ota_retry",
+            .skip_unhandled_events = false,
+        };
+        if (esp_timer_create(&args, &s_ota_check_retry_timer) != ESP_OK) {
+            ESP_LOGW(TAG, "创建 OTA 检查重试定时器失败");
+            return;
+        }
+    }
+    esp_timer_start_once(s_ota_check_retry_timer, OTA_CHECK_RETRY_DELAY_US);
+}
+
+// 触发 OTA 检查 + 表情下载（幂等，仅首次生效）。
+// WebSocket 连接事件与 main.c 兜底任务都会调用本函数，s_ota_checked 保证只创建一次；
+// 创建失败（内存不足）时不置标志，由重试定时器 30 秒后再次尝试。
+void websocket_trigger_ota_check(void)
+{
+    if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
+    if (s_ota_checked) {
+        if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
+        return;
+    }
+    // ota_check_task 必须用内部 RAM 栈：ota_confirm_current_app 内部调用
+    // esp_ota_get_state_partition → esp_partition_mmap 会冻结缓存，
+    // 栈在 PSRAM 会触发 s_task_stack_is_sane_when_cache_frozen 断言。
+    // 注意：MALLOC_CAP_8BIT 单独使用不保证内部 RAM（PSRAM 也满足该能力），
+    // 必须显式加 MALLOC_CAP_INTERNAL 强制栈落在内部 RAM。
+    // 内部 RAM 紧张，栈收紧到 6KB（HTTP 查询 + flash mmap 调用链约 3-4KB）。
+    BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(
+        ota_check_task, "ota_check", 6144, NULL, 3, NULL,
+        BOARD_TASK_CORE_1, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (ret == pdPASS) {
+        s_ota_checked = true;
+        ESP_LOGI(TAG, "已创建 OTA 检查任务");
+    } else {
+        ESP_LOGW(TAG, "创建 OTA 检查任务失败，30 秒后重试");
+        schedule_ota_check_retry();
+    }
+    if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
 }
 
 static void websocket_event_handler(void *handler_args, esp_event_base_t base,
@@ -609,7 +703,8 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
 
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
-        ESP_LOGI(TAG, "EVENT_CONNECTED");
+        ESP_LOGI(TAG, "EVENT_CONNECTED (s_ota_checked=%d, http_base=%s)",
+                 s_ota_checked, s_server_http_base);
         // 重连后服务端会重新下发缓存帧，清掉旧的唤醒提示音缓存
         websocket_cache_clear();
         // 连接成功，重置断线自愈计数与时间基线
@@ -650,10 +745,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
             esp_timer_start_periodic(s_flow_ctrl_timer, 1000000);  // 每 1s（Arduino 一致）
         }
         // 首次连接时检查 OTA 升级（与 Arduino on_ready → auto_update 一致）
-        if (!s_ota_checked) {
-            s_ota_checked = true;
-            xTaskCreate(ota_check_task, "ota_check", 8192, NULL, 3, NULL);
-        }
+        websocket_trigger_ota_check();
         break;
 
     case WEBSOCKET_EVENT_DISCONNECTED:
@@ -1594,6 +1686,15 @@ esp_err_t websocket_init(void)
         .network_timeout_ms = 15000,       // 15秒网络超时（WiFi 网络延迟可能较大）
         .skip_cert_common_name_check = true,  // 跳过证书 CN 验证（开发阶段启用，生产环境建议改为 false）
         .crt_bundle_attach = esp_crt_bundle_attach,
+        // 音频帧经 WS 大流量下发，websocket 任务必须及时处理：
+        // 默认优先级 5 + tskNO_AFFINITY 可能被调度到 core1 被 wakenet(7) 抢占，
+        // 导致音频帧处理延迟 → 流缓冲排空 → I2S 欠载（音乐卡顿）。
+        // 提到优先级 7（与 wakenet 同级）并固定 core0（与 wakenet 分离），
+        // 保证音频帧及时写入流缓冲。websocket 任务大部分时间阻塞在网络 I/O，
+        // 不会饿死低优先级任务。
+        .task_prio = 7,
+        .task_core_id_set = true,
+        .task_core_id = 0,
     };
 
     if (s_ws_mutex == NULL) {

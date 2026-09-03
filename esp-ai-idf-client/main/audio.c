@@ -1,5 +1,6 @@
 #include "config.h"
 #include "board_compat.h"
+#include "freertos/idf_additions.h"  /* xTaskCreatePinnedToCoreWithCaps / vTaskDeleteWithCaps */
 #include <stdlib.h>
 #include <math.h>
 #include "driver/i2s_std.h"
@@ -340,7 +341,7 @@ static void spk_task(void *arg)
 #if defined(AUDIO_SCHEME_ES8311)
         free(resample_buf);
 #endif
-        vTaskDelete(NULL);
+        vTaskDeleteWithCaps(NULL);  /* 配合 xTaskCreatePinnedToCoreWithCaps 释放 PSRAM 栈 */
         return;
     }
 
@@ -635,8 +636,12 @@ static void spk_task(void *arg)
                         int num_samps = out_samps / 2;
                         int max_samps = SPK_OUT_BUF_SIZE / sizeof(short);
                         if (num_samps > max_samps) num_samps = max_samps;
+                        // 立体声→单声道：取 (L+R)/2 平均，保留两声道内容。
+                        // 仅取左声道会丢失右声道信息（音乐尤其明显），平均不会削波。
                         for (int i = 0; i < num_samps; i++) {
-                            ((short*)i2s_buffer)[i] = pcm_buffer[i * 2];
+                            int32_t l = pcm_buffer[i * 2];
+                            int32_t r = pcm_buffer[i * 2 + 1];
+                            ((short*)i2s_buffer)[i] = (short)((l + r) >> 1);
                         }
                         bytes = num_samps * sizeof(short);
                     } else {
@@ -762,7 +767,7 @@ static void spk_task(void *arg)
     free(resample_buf);
 #endif
     s_spk_task_handle = NULL;
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);  /* 配合 xTaskCreatePinnedToCoreWithCaps 释放 PSRAM 栈 */
 }
 
 // 麦克风采集任务
@@ -840,7 +845,19 @@ esp_err_t audio_init(void)
     ESP_LOGI(TAG, "初始化音频系统...");
 
     // 创建音频流缓冲区（类似原版 BufferRTOS）
+    // xStreamBufferCreate 走 pvPortMalloc → MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT，
+    // 50KB 强制从内部 RAM 分配，内部 RAM 碎片化时最大块 < 50KB 会分配失败
+    // （增大 DMA 缓冲后已复现）。改用 xStreamBufferCreateWithCaps 优先 PSRAM，
+    // 释放 50KB 内部 RAM；无 PSRAM（C3）回退内部 RAM。
+#if defined(CONFIG_SPIRAM)
+    s_spk_stream = xStreamBufferCreateWithCaps(SPK_BUF_SIZE, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_spk_stream == NULL) {
+        ESP_LOGW(TAG, "PSRAM 创建音频流缓冲区失败，回退内部 RAM");
+        s_spk_stream = xStreamBufferCreate(SPK_BUF_SIZE, 1);
+    }
+#else
     s_spk_stream = xStreamBufferCreate(SPK_BUF_SIZE, 1);
+#endif
     if (s_spk_stream == NULL) {
         ESP_LOGE(TAG, "创建音频流缓冲区失败 (需 %d 字节)，剩余堆: %d bytes",
                  (int)SPK_BUF_SIZE, (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
@@ -882,19 +899,25 @@ esp_err_t audio_init(void)
     ESP_LOGI(TAG, "MP3解码器延迟分配（首次播放时申请）");
 
     // 启动播放任务
+    // 栈放 PSRAM（spk_task 只做 MP3 解码 + I2S 写入，无 flash 操作）：
+    // 内部 RAM 仅剩 ~10KB 且最大块仅 3.4KB，6144 字节内部 RAM 栈任务创建会失败，
+    // 与 wakenet_task/network_audio 一致用 BOARD_STACK_CAPS_AUDIO 释放内部 RAM。
+    // 优先级用 TASK_PRIO_SPK(8) 高于 wakenet_task(7)：播放期间不被唤醒检测抢占，
+    // 避免 I2S DMA 欠载导致音乐卡顿（spk_task 阻塞写 I2S 时会让出 CPU，唤醒不受影响）。
     s_spk_running = true;
-    BaseType_t task_ret = xTaskCreatePinnedToCore(
+    BaseType_t task_ret = xTaskCreatePinnedToCoreWithCaps(
         spk_task,
         "spk_task",
 #ifdef CONFIG_IDF_TARGET_ESP32C3
-        4096,   // C3 无 PSRAM，收紧任务栈
+        4096,   // C3 无 PSRAM，栈走内部 RAM，收紧以省堆
 #else
         6144,   // 从 8192 减到 6144，释放内部 RAM（LCD 版本内部 RAM 紧张）
 #endif
         NULL,
-        TASK_PRIO_AUDIO,
+        TASK_PRIO_SPK,
         &s_spk_task_handle,
-        BOARD_TASK_CORE_1  // 双核：核心1（与 WebSocket/网络分离）；单核：核心0
+        BOARD_TASK_CORE_1,  // 双核：核心1（与 WebSocket/网络分离）；单核：核心0
+        BOARD_STACK_CAPS_AUDIO
     );
 
     if (task_ret != pdPASS) {
@@ -998,6 +1021,7 @@ static int64_t s_last_flow_report_ms = 0;
 //     (pipeline 中 _device_buffer < client_max_buffer*0.1 时 sleep 等待)
 // 若语义错配，服务端会把空缓冲误判为"缓冲满"而不下发/节流音频
 static void send_flow_control(void) {
+    if (s_spk_stream == NULL) return;  // 流缓冲未创建时跳过，避免断言崩溃
     int available = websocket_is_official()
                         ? (int)xStreamBufferBytesAvailable(s_spk_stream)
                         : (int)xStreamBufferSpacesAvailable(s_spk_stream);
@@ -1153,7 +1177,7 @@ esp_err_t audio_spk_play(void)
     s_last_flow_report_ms = 0;
 
     // 补入待播放缓冲：play_audio（文本）晚于音频帧到达时，先到的音频在此写入播放流
-    if (s_spk_pending_buf != NULL && s_spk_pending_len > 0) {
+    if (s_spk_pending_buf != NULL && s_spk_pending_len > 0 && s_spk_stream != NULL) {
         size_t p_len = s_spk_pending_len;
         size_t w = xStreamBufferSend(s_spk_stream, s_spk_pending_buf, p_len, 0);
         if (w < p_len) {

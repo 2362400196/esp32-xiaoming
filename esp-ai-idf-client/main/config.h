@@ -100,6 +100,11 @@ extern "C" {
 #define TASK_PRIO_AUDIO      6
 #define TASK_PRIO_DISPLAY    4
 #define TASK_PRIO_WAKEUP     7
+// 播放任务优先级高于唤醒检测：wakenet_task 持续运行（每 30ms 一次 detect），
+// 若与 spk_task 同级或更低，解码/写 I2S 会被抢占 → DMA 欠载 → 音乐卡顿。
+// spk_task 大部分时间阻塞在 i2s_channel_write（DMA 满时让出 CPU），
+// 唤醒检测在播放间隙仍能运行，不影响唤醒灵敏度。
+#define TASK_PRIO_SPK        8
 
 // ==================== 事件组定义 ====================
 extern EventGroupHandle_t s_wifi_event_group;
@@ -147,6 +152,8 @@ void websocket_clear_wakeup_pending(void);
 // 播放异常终止上报（audio.c 看门狗调用；websocket.c 组装完整格式，含
 // session_id/tts_task_id，服务端才能正确配对会话）
 void websocket_notify_playback_failed(void);
+// 触发 OTA 检查 + 表情下载（幂等，仅首次生效；main.c 兜底与 WebSocket 事件共用）
+void websocket_trigger_ota_check(void);
 
 esp_err_t audio_init(void);
 esp_err_t audio_mic_start(void);

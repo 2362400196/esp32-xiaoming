@@ -270,6 +270,12 @@ esp_err_t ota_check_and_update(const char *server_base_url)
         return ESP_OK;
     }
 
+    // 每次 OTA 检查都确认当前固件有效，解除 PENDING_VERIFY 状态。
+    // 否则新固件首次启动后若服务端判定"已是最新"（不触发新 OTA），
+    // PENDING_VERIFY 永不解除，下次重启被 bootloader 回滚到旧固件，
+    // 旧固件又检测到升级 → 无限升级循环。
+    ota_confirm_current_app();
+
     s_ota_updating = false;
     s_ota_failed = false;
     s_ota_progress = 0;
@@ -402,8 +408,8 @@ esp_err_t ota_check_and_update(const char *server_base_url)
     board_extra_broadcast_event(BOARD_EVENT_OTA_START, NULL);
 
     // 停止当前会话和音频（与 Arduino otaManager.update 一致）
+    // 进度 UI 已含"正在升级"提示（圆形进度条下方），不再重复设置底部字幕
     display_show_ota_progress(0);
-    display_show_text("系统升级中...");
 
     // 执行 OTA 下载和写入
     err = perform_ota_update(bin_url);
@@ -452,8 +458,8 @@ esp_err_t ota_update_from_url(const char *firmware_url)
     ESP_LOGI(TAG, "强制升级：从 URL 下载固件: %s", firmware_url);
     s_ota_updating = true;
     board_extra_broadcast_event(BOARD_EVENT_OTA_START, NULL);
+    // 进度 UI 已含"正在升级"提示（圆形进度条下方），不再重复设置底部字幕
     display_show_ota_progress(0);
-    display_show_text("系统升级中...");
 
     esp_err_t err = perform_ota_update(firmware_url);
     if (err == ESP_OK) {

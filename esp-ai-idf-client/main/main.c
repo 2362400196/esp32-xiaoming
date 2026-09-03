@@ -5,7 +5,6 @@
 #include "provisioning.h"
 #include "commands/command_registry.h"
 #include "boards/board_interface.h"
-#include "gif_downloader.h"
 #include "eeui_port.h"
 #if defined(AUDIO_SCHEME_ES8311)
 #include "audio_codec/es8311.h"
@@ -173,6 +172,16 @@ void session_watchdog_refresh(void)
 void session_watchdog_start(void)
 {
     s_wakeup_trigger_tick = xTaskGetTickCount();
+}
+
+// OTA 检查 + 表情下载兜底任务：WebSocket 连接事件回调中创建 ota_check_task
+// 若因内存不足失败（s_ota_checked 未置位），此处延迟 20 秒后再次触发。
+// websocket_trigger_ota_check() 幂等，事件回调已触发时直接返回。
+static void ota_check_fallback_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(20000));
+    websocket_trigger_ota_check();
+    vTaskDelete(NULL);
 }
 
 void app_main(void)
@@ -393,6 +402,10 @@ void app_main(void)
     ESP_LOGI(TAG, "websocket_init 后剩余堆: %d bytes (内部)",
              (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
+    // OTA 检查 + 表情下载兜底：若 WebSocket 连接事件回调创建 ota_check_task 失败
+    //（上电初期内存紧张），20 秒后由本任务再次触发（幂等，不会重复执行）
+    xTaskCreate(ota_check_fallback_task, "ota_fb", 1024, NULL, 1, NULL);
+
     // 初始化音频（使用 wakeup 创建的共享麦克风句柄）
     ESP_LOGI(TAG, "audio_init 前剩余堆: %d bytes (内部)",
              (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
@@ -482,16 +495,9 @@ void app_main(void)
         }
     }
 
-    // 启动后台表情下载任务（从服务端 API 获取设备专属表情包）。
-    // 下载任务内部会等待 WiFi 就绪，并从 websocket 获取服务器 HTTP 地址。
+    // 表情下载改为 OTA 检查之后触发（先版本后表情），见 websocket.c ota_check_task。
     // 表情不再编译进固件（emos/*.h 已移除），所有图形板型都必须下载：
     // 首次联网后存入 SPIFFS 缓存，之后开机优先读本地缓存
-    if (display_has_graphic()) {
-        download_gifs();
-    } else {
-        // headless（无图形显示，如 ESP32-C3 无屏板型）：跳过 GIF 下载，避免占用 RAM
-        ESP_LOGI(TAG, "无图形显示（headless），跳过 GIF 下载");
-    }
 
     // 启动唤醒检测（按钮 + 语音）
     ret = wakeup_start();

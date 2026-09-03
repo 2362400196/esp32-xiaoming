@@ -13,6 +13,7 @@
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_pm.h"
+#include "esp_heap_caps.h"
 #include "driver/gpio.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -158,6 +159,19 @@ static void power_check_callback(void *arg)
     }
 
     xSemaphoreGive(s_mutex);
+
+    // 内存诊断：待机时每 30 秒打印一次内部 RAM / DMA 池余量，
+    // 用于验证 wifi:m f null（WiFi 省电 null 帧分配失败）是否因 DMA 池被缓冲占满
+    if (!s_active) {
+        static uint32_t s_diag_count = 0;
+        if (++s_diag_count >= 30) {
+            s_diag_count = 0;
+            ESP_LOGI(TAG, "内存诊断: 内部RAM可用=%ldB 最大块=%ldB DMA可用=%ldB",
+                     (long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (long)heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+        }
+    }
 }
 
 esp_err_t power_manager_init(void)
