@@ -125,7 +125,10 @@ endif()
 # 检测当前选中的板卡（CONFIG_BOARD_<NAME>=y）
 set(ACTIVE_BOARD_NAME "unknown")
 foreach(_def ${BOARD_DEF_FILES})
-    get_filename_component(_base ${_def} NAME_WE)
+    get_filename_component(_name ${_def} NAME)
+    # 只去掉末尾 .h，保留文件名内部点号（如 esp32s3_breadboard_1.54_lcd）。
+    # CMake 4.x 的 NAME_WE 会在第一个点处截断，导致与 Kconfig 符号（点→下划线）不匹配
+    string(REGEX REPLACE "\\.h$" "" _base "${_name}")
     string(TOUPPER "${_base}" _base_upper)
     string(REPLACE "." "_" _cfg "${_base_upper}")
     if(CONFIG_BOARD_${_cfg})

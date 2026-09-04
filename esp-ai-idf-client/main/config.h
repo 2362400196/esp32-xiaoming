@@ -19,8 +19,13 @@ extern "C" {
 
 // ==================== WiFi 配置 ====================
 // WiFi凭据通过配网流程保存到NVS，无需硬编码
-// 重试次数过少（如 2）在弱信号环境下极易连接失败，提高到 5 以增强鲁棒性
-#define WIFI_MAXIMUM_RETRY  5
+// 连接失败后自动重连，直到成功为止，最大重试 WIFI_MAXIMUM_RETRY 次；
+// 每次重试间隔 WIFI_RETRY_DELAY_MS，避免快速失败循环，给路由器/网络恢复时间
+#define WIFI_MAXIMUM_RETRY  10
+#define WIFI_RETRY_DELAY_MS 3000
+// 等待连接结果的总超时：重试次数 × (重试间隔 + 单次连接最长耗时) + 余量。
+// 必须大于重试总耗时，否则重试未耗尽就误入配网模式
+#define WIFI_CONNECT_WAIT_MS (WIFI_MAXIMUM_RETRY * (WIFI_RETRY_DELAY_MS + 10000) + 10000)
 
 // ==================== 服务器配置 ====================
 // 服务器地址和API Key通过配网保存到NVS，无需硬编码

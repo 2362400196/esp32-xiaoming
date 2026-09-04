@@ -75,11 +75,13 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         }
         taskEXIT_CRITICAL(&s_wifi_lock);
         if (should_retry) {
+            // 延迟后重连：避免快速失败循环，给路由器/网络恢复时间
+            vTaskDelay(pdMS_TO_TICKS(WIFI_RETRY_DELAY_MS));
             esp_wifi_connect();
-            ESP_LOGI(TAG, "重试连接WiFi...");
+            ESP_LOGI(TAG, "重试连接WiFi (%d/%d)...", s_retry_num, WIFI_MAXIMUM_RETRY);
         } else {
             xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
-            ESP_LOGE(TAG, "WiFi连接失败");
+            ESP_LOGE(TAG, "WiFi连接失败，进入配网模式");
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
@@ -236,11 +238,11 @@ esp_err_t wifi_init(void)
 
             ESP_LOGI(TAG, "WiFi初始化完成，正在连接 %s...", ssid);
 
-            // DHCP 响应可能较慢（尤其在信号弱或路由器繁忙时），等待 30 秒
-            // 之前 15 秒导致部分设备关联成功但未获取到 IP 就超时进入配网模式
+            // DHCP 响应可能较慢（尤其在信号弱或路由器繁忙时），等待连接结果。
+            // 超时需覆盖全部重试耗时（WIFI_CONNECT_WAIT_MS），否则重试未耗尽就误入配网模式
             EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
                     WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                    pdFALSE, pdFALSE, pdMS_TO_TICKS(30000));
+                    pdFALSE, pdFALSE, pdMS_TO_TICKS(WIFI_CONNECT_WAIT_MS));
 
             if (bits & WIFI_CONNECTED_BIT) {
                 ESP_LOGI(TAG, "WiFi连接成功");
