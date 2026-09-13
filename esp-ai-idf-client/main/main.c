@@ -11,6 +11,7 @@
 #endif
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "esp_ota_ops.h"
 #include "esp_spiffs.h"
 
 static const char *TAG = "main";
@@ -190,6 +191,20 @@ void app_main(void)
 #ifndef CONFIG_LOG_LEVEL_DEBUG
     esp_log_level_set("*", ESP_LOG_WARN);
 #endif
+
+    // OTA 自确认：带 rollback 的分区表下，OTA 重启后的新固件处于
+    // PENDING_VERIFY 状态——运行到这里说明启动成功，立即确认有效。
+    // 否则下次 esp_ota_begin 会因 ESP_ERR_OTA_ROLLBACK_INVALID_STATE 拒绝升级，
+    // 且设备一旦重启会被 bootloader 回滚到旧固件。
+    {
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        esp_ota_img_states_t state;
+        if (running && esp_ota_get_state_partition(running, &state) == ESP_OK
+            && state == ESP_OTA_IMG_PENDING_VERIFY) {
+            esp_ota_mark_app_valid_cancel_rollback();
+            ESP_LOGW(TAG, "OTA 新固件启动成功，已确认有效（解除待验证状态）");
+        }
+    }
 
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "ESP-AI IDF Client v%s", FIRMWARE_VERSION);

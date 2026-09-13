@@ -103,6 +103,7 @@ class UserResp(BaseModel):
     role: str
     max_devices: int
     created_at: float
+    wallet_balance: float = 0.0
 
 
 # ==================== 路由 ====================
@@ -127,12 +128,14 @@ async def register(req: RegisterReq):
             user_count = await session.execute(select(func.count()).select_from(UserModel))
             is_first_user = _ALLOW_FIRST_USER_ADMIN and (user_count.scalar_one() or 0) == 0
 
+            from src.infrastructure.config import get_settings
             user = UserModel(
                 id=str(uuid.uuid4()),
                 email=req.email,
                 password_hash=hash_password(req.password),
                 nickname=req.nickname or req.email.split("@")[0],
                 role="admin" if is_first_user else "user",
+                wallet_balance=float(get_settings().wallet_initial_balance),
             )
             session.add(user)
             await session.flush()
@@ -170,6 +173,7 @@ async def login(req: LoginReq):
             "nickname": user.nickname,
               "role": user.role,
               "max_devices": user.max_devices,
+              "wallet_balance": round(user.wallet_balance, 2),
         },
     }
 
@@ -221,6 +225,7 @@ async def get_me(user: UserModel = Depends(get_current_user)):
             role=user.role,
             max_devices=user.max_devices,
             created_at=user.created_at,
+            wallet_balance=round(user.wallet_balance, 2),
         ),
     }
 

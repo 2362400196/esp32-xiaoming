@@ -554,3 +554,24 @@ class TestAdminFirmwares:
             assert "bin_id 不同" in data["reason"]
         finally:
             settings.ota.bin_url, settings.ota.version, settings.ota.bin_id = saved
+
+
+class TestAdminWallet:
+    @pytest.mark.asyncio
+    async def test_balance_adjust_endpoint(self, client):
+        """管理员调整余额：充值/扣减/404"""
+        tc, _factory = client
+        res = tc.post("/api/v1/admin/users/u1/balance", json={"delta": 10})
+        assert res.status_code == 200
+        assert res.json()["data"]["wallet_balance"] == 15.0
+        res = tc.post("/api/v1/admin/users/u1/balance", json={"delta": -3.5})
+        assert res.json()["data"]["wallet_balance"] == 11.5
+        res = tc.post("/api/v1/admin/users/ghost/balance", json={"delta": 1})
+        assert res.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_users_list_includes_balance(self, client):
+        tc, _factory = client
+        res = tc.get("/api/v1/admin/users")
+        users = res.json()["data"]["users"]
+        assert any(u["user_id"] == "u1" and u["wallet_balance"] == 5.0 for u in users)

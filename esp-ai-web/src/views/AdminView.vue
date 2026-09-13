@@ -210,6 +210,7 @@
                     <th>用户</th>
                     <th>角色</th>
                     <th>设备数 / 上限</th>
+                    <th>余额（元）</th>
                     <th>状态</th>
                     <th>开发者</th>
                     <th>注册时间</th>
@@ -241,6 +242,12 @@
                       </template>
                       <template v-else>{{ u.device_count }} / {{ u.max_devices }}</template>
                     </td>
+                    <td data-label="余额">
+                      <template v-if="editingUser === u.user_id">
+                        <input v-model.number="editForm.wallet_delta" type="number" step="0.01" class="input input-sm num-input" placeholder="充值金额" />
+                      </template>
+                      <span v-else :style="{ color: u.wallet_balance <= 0 ? 'var(--danger)' : 'inherit', fontWeight: 600 }">{{ (u.wallet_balance ?? 0).toFixed(2) }}</span>
+                    </td>
                     <td data-label="状态">
                       <label v-if="editingUser === u.user_id" class="switch-label">
                         <input v-model="editForm.is_active" type="checkbox" class="switch-input" />
@@ -261,6 +268,7 @@
                         </template>
                         <button class="btn btn-ghost btn-xs" :disabled="savingUser" @click="viewUserDevices(u)">设备</button>
                         <button class="btn btn-ghost btn-xs" :disabled="savingUser" @click="openResetPassword(u)">重置密码</button>
+                        <button class="btn btn-ghost btn-xs" :disabled="savingUser" @click="adjustBalance(u)">充值</button>
                         <button class="btn btn-ghost btn-xs" :disabled="savingUser" @click="toggleDeveloper(u)">{{ u.is_developer ? '关闭开发者' : '开通开发者' }}</button>
                         <button class="btn btn-danger btn-xs" :disabled="savingUser || u.user_id === currentUserId" @click="deleteUser(u)">删除</button>
                       </div>
@@ -1487,6 +1495,28 @@
       </div>
     </div>
 
+    <!-- 余额调整弹窗 -->
+    <div v-if="balanceModalVisible" class="modal-mask" @click.self="balanceModalVisible = false">
+      <div class="modal-card">
+        <div class="modal-head">
+          <span class="modal-title">调整余额</span>
+          <button class="modal-close" @click="balanceModalVisible = false">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-tip">为「{{ balanceModalUser?.nickname || balanceModalUser?.email }}」调整余额（当前 {{ (balanceModalUser?.wallet_balance ?? 0).toFixed(2) }} 元）</p>
+          <input v-model="balanceInput" type="number" step="0.01" class="input" placeholder="充值输入正数，扣减输入负数（如 10 或 -5）" @keyup.enter="submitAdjustBalance" />
+          <div class="balance-quick">
+            <button v-for="v in [5, 10, 20, 50]" :key="v" class="btn btn-ghost btn-xs" @click="balanceInput = String((parseFloat(balanceInput) || 0) + v)">+{{ v }}</button>
+            <button class="btn btn-ghost btn-xs" style="color:var(--danger)" @click="balanceInput = String((parseFloat(balanceInput) || 0) - 5)">-5</button>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-ghost" :disabled="balanceSaving" @click="balanceModalVisible = false">取消</button>
+          <button class="btn btn-mint" :disabled="balanceSaving" @click="submitAdjustBalance">{{ balanceSaving ? '提交中…' : '确认调整' }}</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 重置密码弹窗 -->
     <div v-if="passwordModalVisible" class="modal-mask" @click.self="passwordModalVisible = false">
       <div class="modal-card">
@@ -1760,6 +1790,10 @@ async function openTaskDetail() {
 const deviceModalVisible = ref(false)
 const deviceModalTitle = ref('')
 const deviceModalList = ref([])
+const balanceModalVisible = ref(false)
+const balanceModalUser = ref(null)
+const balanceInput = ref('')
+const balanceSaving = ref(false)
 const passwordModalVisible = ref(false)
 const passwordModalUser = ref(null)
 const passwordInput = ref('')
@@ -2113,14 +2147,45 @@ async function loadDevices() {
 
 function loadAll() { loadStats(); loadMetrics(); loadDailyCost(); loadUsers(); loadDevices() }
 
-function startEditUser(u) { editingUser.value = u.user_id; editForm.value = { role: u.role, max_devices: u.max_devices, is_active: u.is_active, nickname: u.nickname } }
+function startEditUser(u) { editingUser.value = u.user_id; editForm.value = { role: u.role, max_devices: u.max_devices, is_active: u.is_active, nickname: u.nickname, wallet_delta: null } }
+
+// 余额快捷调整（正数充值/负数扣减）
+function adjustBalance(u) {
+  balanceModalUser.value = u
+  balanceInput.value = ''
+  balanceModalVisible.value = true
+}
+
+async function submitAdjustBalance() {
+  const u = balanceModalUser.value
+  if (!u) return
+  const delta = parseFloat(balanceInput.value)
+  if (isNaN(delta) || delta === 0) { emit('toast', '请输入有效的金额'); return }
+  balanceSaving.value = true
+  try {
+    const res = await api.adminAdjustBalance(u.user_id, delta)
+    if (res.status === 200 && res.data?.code === 0) {
+      emit('toast', `余额已调整，当前 ${res.data.data.wallet_balance.toFixed(2)} 元`)
+      balanceModalVisible.value = false
+      balanceModalUser.value = null
+      loadUsers()
+    } else emit('toast', res.data?.message || '调整失败')
+  } catch { emit('toast', '调整失败') }
+  balanceSaving.value = false
+}
 function cancelEditUser() { editingUser.value = ''; editForm.value = {} }
 
 async function saveUser(u) {
   savingUser.value = true
   try {
+    const delta = editForm.value.wallet_delta
     const res = await api.adminUpdateUser(u.user_id, editForm.value)
-    if (res.status === 200 && res.data?.code === 0) { emit('toast', '用户已更新'); cancelEditUser(); loadUsers(); loadStats(); loadMetrics() }
+    if (res.status === 200 && res.data?.code === 0) {
+      if (typeof delta === 'number' && delta !== 0) {
+        await api.adminAdjustBalance(u.user_id, delta)
+      }
+      emit('toast', '用户已更新'); cancelEditUser(); loadUsers(); loadStats(); loadMetrics()
+    }
     else emit('toast', res.data?.message || res.data?.detail || '保存失败')
   } catch { emit('toast', '保存失败') }
   savingUser.value = false
@@ -3155,6 +3220,7 @@ tbody tr:hover { background: var(--mint-softer); }
   border-top: 1px solid var(--glass-border-soft);
   background: var(--glass-bg-strong);
 }
+.balance-quick { display: flex; gap: 6px; margin-top: 10px; }
 .device-modal-list { display: flex; flex-direction: column; gap: 8px; }
 .device-modal-item {
   display: flex; align-items: center; gap: 10px;

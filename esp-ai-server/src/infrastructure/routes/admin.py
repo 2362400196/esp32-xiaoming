@@ -57,6 +57,11 @@ class UserUpdateReq(BaseModel):
     is_active: Optional[bool] = None
 
 
+class BalanceAdjustReq(BaseModel):
+    delta: float = Field(..., description="调整金额（元），充值正数/扣减负数")
+    reason: str = Field(default="", max_length=128)
+
+
 class DeviceUpdateReq(BaseModel):
     name: Optional[str] = Field(default=None, max_length=64)
 
@@ -104,6 +109,7 @@ def _serialize_user(user: UserModel, device_count: int = 0) -> dict:
         "last_login": user.last_login,
         "is_developer": bool(user.developer_api_key),
         "device_count": device_count,
+        "wallet_balance": round(getattr(user, "wallet_balance", 0.0) or 0.0, 2),
     }
 
 
@@ -921,6 +927,19 @@ async def admin_user_devices(user_id: str, _: UserModel = Depends(require_admin)
             "bound_at": d.bound_at,
         })
     return {"code": 0, "message": "ok", "data": {"devices": items}}
+
+
+@router.post("/users/{user_id}/balance")
+async def admin_adjust_balance(user_id: str, req: BalanceAdjustReq, admin: UserModel = Depends(require_admin)):
+    """调整用户钱包余额（充值传正数、扣减传负数）"""
+    from src.use_cases.wallet import adjust_user_balance
+    new_balance = await adjust_user_balance(user_id, req.delta, reason=req.reason or "")
+    if new_balance is None:
+        raise HTTPException(404, "User not found")
+    _add_oplog(admin.email, "adjust_balance",
+               f"用户 {user_id} 余额调整 {req.delta:+.2f} 元 -> {new_balance:.2f} 元"
+               + (f"（{req.reason}）" if req.reason else ""))
+    return {"code": 0, "message": "ok", "data": {"wallet_balance": new_balance}}
 
 
 @router.post("/users/{user_id}/reset-password")
@@ -1767,6 +1786,7 @@ SETTING_GROUPS = [
     {"id": "ota", "label": "固件 OTA"},
     {"id": "emotion", "label": "表情"},
     {"id": "perf", "label": "性能与限流"},
+    {"id": "wallet", "label": "钱包"},
 ]
 
 # 可编辑设置项定义。
@@ -1888,6 +1908,13 @@ SETTING_DEFS: list[dict[str, Any]] = [
      "restart": True, "desc": ""},
     {"key": "PERF_SEND_QUEUE_MAX_SIZE", "group": "perf", "label": "发送队列上限", "type": "int",
      "restart": True, "desc": ""},
+    # ---- 钱包（即时生效）----
+    {"key": "WALLET_ENABLED", "group": "wallet", "label": "启用钱包", "type": "bool",
+     "restart": False, "desc": "关闭后所有对话不再检查余额与扣费"},
+    {"key": "WALLET_INITIAL_BALANCE", "group": "wallet", "label": "注册初始余额（元）", "type": "float",
+     "restart": False, "desc": "新用户注册时赠送的余额（已有用户不受影响）"},
+    {"key": "WALLET_COST_PER_ROUND", "group": "wallet", "label": "每轮对话扣费（元）", "type": "float",
+     "restart": False, "desc": "每完成一轮对话从设备归属用户余额中扣除"},
 ]
 
 _SETTINGS_BY_KEY = {d["key"]: d for d in SETTING_DEFS}

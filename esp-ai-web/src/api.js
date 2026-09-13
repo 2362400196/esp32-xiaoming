@@ -197,6 +197,7 @@ getActiveEmoPack: (deviceId) => request('/api/v1/emos/active/' + encodeURICompon
     adminBatchSpeak: (text) => request('/api/v1/admin/devices/batch/speak', 'POST', { text }),
     adminUserDevices: (userId) => request('/api/v1/admin/users/' + encodeURIComponent(userId) + '/devices'),
     adminResetPassword: (userId, newPassword) => request('/api/v1/admin/users/' + encodeURIComponent(userId) + '/reset-password', 'POST', { new_password: newPassword }),
+    adminAdjustBalance: (userId, delta, reason = '') => request('/api/v1/admin/users/' + encodeURIComponent(userId) + '/balance', 'POST', { delta, reason }),
     adminToggleDeveloper: (userId) => request('/api/v1/admin/users/' + encodeURIComponent(userId) + '/toggle-developer', 'POST'),
     adminSystemInfo: () => request('/api/v1/admin/system/info'),
     adminLogs: (lines = 200) => request('/api/v1/admin/logs?lines=' + lines),

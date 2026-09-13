@@ -76,6 +76,11 @@ async def init_db() -> None:
             "ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0",
             users_cols)
 
+        # wallet_balance：用户钱包余额（元），旧库用户统一补发 5 元初始余额
+        await _ensure_column(conn, "users", "wallet_balance",
+            "ALTER TABLE users ADD COLUMN wallet_balance FLOAT NOT NULL DEFAULT 5.0",
+            users_cols)
+
         await _ensure_column(conn, "devices", "management_api_key",
             "ALTER TABLE devices ADD COLUMN management_api_key VARCHAR(256) NOT NULL DEFAULT ''",
             devices_cols)

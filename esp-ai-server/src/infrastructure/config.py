@@ -395,6 +395,13 @@ class Settings(BaseSettings):
     # 默认300秒（5分钟），设置为0则立即触发
     growth_cooldown_seconds: int = Field(default=300)
 
+    # ============================================================
+    # 钱包配置
+    # ============================================================
+    wallet_enabled: bool = Field(default=True, description="钱包功能开关")
+    wallet_initial_balance: float = Field(default=5.0, description="注册赠送初始余额（元）")
+    wallet_cost_per_round: float = Field(default=0.1, description="每轮对话扣费（元）")
+
     # Performance configuration (environment variables)
     perf_global_max_concurrent_sessions: int = Field(default=0)
     perf_enable_global_concurrency_limit: bool = Field(default=True)

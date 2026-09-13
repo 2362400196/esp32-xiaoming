@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Integer, String
+from sqlalchemy import Boolean, Float, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.infrastructure.db.base import Base, TimestampMixin
@@ -29,3 +29,5 @@ class UserModel(Base, TimestampMixin):
     # 开发者字段（复用用户体系，无需单独注册）
     developer_api_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True, index=True)
     developer_bio: Mapped[str] = mapped_column(String(256), default="", nullable=False)
+    # 钱包余额（元）：注册时发放初始余额，每轮对话扣费，不足时拒绝对话
+    wallet_balance: Mapped[float] = mapped_column(Float, default=5.0, nullable=False)

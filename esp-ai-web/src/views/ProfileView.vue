@@ -36,6 +36,7 @@
         <div class="user-info">
           <p class="user-name">{{ user?.nickname || '用户' }}</p>
           <p class="user-email">{{ user?.email }}</p>
+          <p class="user-wallet">钱包余额：<strong :style="{ color: (user?.wallet_balance ?? 0) <= 0 ? 'var(--danger)' : 'var(--mint-deep)' }">{{ (user?.wallet_balance ?? 0).toFixed(2) }} 元</strong></p>
         </div>
         <span v-if="user?.role === 'admin'" class="admin-badge">管理员</span>
         <span v-else class="user-badge">普通用户</span>
@@ -138,6 +139,7 @@ async function syncProfile() {
         email: u.email || '',
         nickname: u.nickname || '',
         role: u.role || 'user',
+        wallet_balance: u.wallet_balance ?? 0,
       })
         refreshUser()
     }
@@ -290,6 +292,7 @@ function logout() {
 }
 .user-info { flex: 1; position: relative; min-width: 0; }
 .user-name { font-size: 18px; font-weight: 700; letter-spacing: -0.2px; }
+.user-wallet { font-size: 13px; color: var(--text-sub); margin-top: 4px; }
 .user-email { margin-top: 4px; font-size: 12px; color: var(--text-sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .admin-badge {
   font-size: 11px; padding: 4px 12px; border-radius: 999px;

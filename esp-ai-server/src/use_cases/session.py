@@ -19,6 +19,7 @@ from src.infrastructure.logging import get_logger, trace_id_var
 from src.infrastructure.monitoring import get_metrics
 from src.use_cases.auxiliary_services import AudioProcessor, ConversationMemory
 from src.use_cases.billing import BillingAccumulator
+from src.use_cases import wallet as wallet_svc
 from src.use_cases.pipeline import ConversationPipeline, PipelineConfig
 from src.use_cases.session_fsm import SessionFSM, WSChannel
 from src.use_cases.voice_generator import VoiceGenerator
@@ -899,6 +900,29 @@ class Session:
             if qsize >= 10:
                 logger.debug(f"[Session:{self.session_id}] 音频积压: 队列长度: {qsize}")
 
+    async def _speak_and_end(self, text: str) -> None:
+        """单次 TTS 播报一段提示文本并结束会话（余额不足等场景，不走 LLM）。
+
+        用 TTS 网关直接合成，按设备音频帧协议下发（会话ID+状态码+音频），
+        最后发 "03" 结束帧让设备回到待机。
+        """
+        import time as _time
+        from src.use_cases.voice_generator import VoiceGenerator
+        vg = VoiceGenerator()
+        sid = "0001"
+        try:
+            await self.channel.send_json({"type": "session_status", "status": "tts_chunk_start"})
+            gen = self.tts_processor.synthesize_audio(text, cancel_event=self.cancel_event)
+            async for audio in gen:
+                if not audio or self.cancel_event.is_set():
+                    break
+                await self.channel.send_bytes(vg.make_tts_frame(sid, audio, status="01"))
+            await self.channel.send_bytes(vg.make_end_frame(sid, status="03"))
+            await self.channel.send_json({"type": "session_status", "status": "session_end"})
+        except Exception as e:
+            logger.warning(f"[Session:{self.session_id}] 播报提示失败: {e}")
+            await self.send_session_end()
+
     async def run_pipeline(self, iat_text: str):
         """运行完整Pipeline"""
         self.cancel_event.clear()
@@ -1015,12 +1039,24 @@ class Session:
                 await self.send_session_end()
                 return
 
+            # 钱包：余额不足时拒绝对话，播报充值提示
+            if not await wallet_svc.device_can_chat(self.device_id):
+                logger.info(f"[Session:{self.session_id}] 设备 {self.device_id} 归属用户余额不足，拒绝对话")
+                await self._speak_and_end("余额不足，请联系管理员充值后再使用")
+                return
+
             try:
                 await self.channel.send_json({"type": "instruct", "command_id": "on_iat_cb", "data": text})
             except Exception as e:
                 logger.debug(f"[Session:{self.session_id}] 发送 on_iat_cb 失败: {e}")
 
             result = await self.run_pipeline(text)
+
+            # 钱包：本轮对话完成，按单次费用扣减归属用户余额
+            from src.infrastructure.config import get_settings as _gs
+            _cost = float(_gs().wallet_cost_per_round)
+            if _cost > 0:
+                await wallet_svc.deduct_for_device(self.device_id, _cost, "对话扣费")
 
             if self._closed or self.cancel_event.is_set():
                 self.cancel_event.clear()
