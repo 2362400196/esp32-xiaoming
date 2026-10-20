@@ -84,7 +84,6 @@ void websocket_force_reconnect(void)
     ESP_LOGW(TAG, "配置已更新,强制重连 WebSocket 使新配置生效");
     xTaskCreate(reconnect_task, "ws_recon", 2048, NULL, 3, NULL);
 }
-static bool s_is_official = false;        // 是否连接到官方服务器
 static bool s_music_streaming = false;    // 音乐推流模式(play_audio + tts_task_id="play_music")
 static char s_server_http_base[256] = {0}; // HTTP 基础 URL（用于 OTA 查询）
 static bool s_ota_checked = false;         // OTA 是否已检查过（仅首次连接检查）
@@ -106,7 +105,6 @@ static bool s_audio_over_sent = false;  // 防止重复发送 client_out_audio_o
 char s_current_session_id[5] = "0001";
 char s_current_tts_task_id[16] = "";
 static esp_timer_handle_t s_drain_check_timer = NULL;
-static esp_timer_handle_t s_flow_ctrl_timer = NULL;  // 官方服务器流控上报定时器
 static int64_t s_last_keepalive_ms = 0;  // 上次收到 keepalive 的时间
 // 唤醒响应超时检测：发送 start 后若超过阈值未收到服务端任何数据，判定连接半开并主动重连
 static volatile bool s_wakeup_pending = false;
@@ -171,27 +169,6 @@ static void drain_check_timer_cb(void *arg)
     } else {
         send_audio_over();
     }
-}
-
-// 流控上报定时器回调：官方服务器模式下，定期上报缓冲区剩余空间
-// Arduino 的 play_audio.cpp:play_audio_task_static 每 ~1s 发送 client_available_audio
-// 使用非阻塞发送（短超时），避免在 ASR 二进制音频帧发送时抢锁
-static void flow_ctrl_timer_cb(void *arg)
-{
-    if (!s_is_connected || !s_is_official) {
-        return;
-    }
-    // 麦克风录音时不要抢锁发文本（流控数据对 ASR 阶段无意义）
-    if (audio_mic_is_running()) {
-        return;
-    }
-
-    size_t available = audio_spk_buffer_available();
-    char msg[96];
-    snprintf(msg, sizeof(msg),
-             "{\"type\":\"client_available_audio\",\"session_id\":\"%s\",\"value\":%u}",
-             s_current_session_id, (unsigned)available);
-    websocket_send_text_nb(msg);
 }
 
 
@@ -391,9 +368,7 @@ static void handle_audio_binary_message(const uint8_t *payload, size_t len)
              len > 4 ? payload[4] : 0, len > 5 ? payload[5] : 0);
 
     // 所有服务器统一使用 6 字节头部格式（与 Arduino 客户端完全一致）
-    // Arduino 客户端不区分官方/自定义服务器，始终按 6 字节头部解析：
     //   session_id(4 bytes) + status(2 bytes) + audio_data
-    // 官方服务器(node.espai.fun)和自定义服务器使用相同的二进制音频帧格式
     if (len < 6) {
         return;
     }
@@ -728,22 +703,6 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
             snprintf(info_msg, sizeof(info_msg), "{\"type\":\"device_info\",\"data\":%s}", board_get_info_json());
             websocket_send_text(info_msg);
         }
-        if (s_is_official) {
-            websocket_send_text("{\"type\":\"play_audio_ws_conntceed\"}");
-            // 启动流控上报定时器（官方服务器需要周期性 client_available_audio）
-            if (s_flow_ctrl_timer == NULL) {
-                esp_timer_create_args_t args = {
-                    .callback = flow_ctrl_timer_cb,
-                    .name = "flow_ctrl"
-                };
-                esp_err_t tr = esp_timer_create(&args, &s_flow_ctrl_timer);
-                if (tr != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to create flow_ctrl timer: %s", esp_err_to_name(tr));
-                    break;
-                }
-            }
-            esp_timer_start_periodic(s_flow_ctrl_timer, 1000000);  // 每 1s（Arduino 一致）
-        }
         // 首次连接时检查 OTA 升级（与 Arduino on_ready → auto_update 一致）
         websocket_trigger_ota_check();
         break;
@@ -784,9 +743,6 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
         if (s_drain_check_timer) {
             esp_timer_stop(s_drain_check_timer);
         }
-        if (s_flow_ctrl_timer) {
-            esp_timer_stop(s_flow_ctrl_timer);
-        }
         audio_mic_stop();
         audio_spk_stop();
         // 恢复语音唤醒，断线期间仍可检测唤醒词
@@ -813,9 +769,6 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
         // 不再手动 stop+start（与库重连状态机竞态会导致客户端停摆 "Client was not started"）
         if (s_drain_check_timer) {
             esp_timer_stop(s_drain_check_timer);
-        }
-        if (s_flow_ctrl_timer) {
-            esp_timer_stop(s_flow_ctrl_timer);
         }
         audio_mic_stop();
         audio_spk_stop();
@@ -1266,282 +1219,23 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
     }
 }
 
-// ==================== 官方 API 服务器查询（Arduino get_server_config）====================
-// 当 ext1(api_key) 存在但 ext4/ext5/ext6 为空时，向官方平台查询服务节点地址
-// 接口: http://api.espai.fun/sdk/get_server_info_by_api_key?api_key=xxx
-// 返回: {"success":true,"data":{"ip":"...","port":...,"protocol":"...","path":"..."}}
-// 成功时填充 server_url（如 "ws://node.espai.fun:80"），返回 ESP_OK
-// 失败时使用默认地址，返回 ESP_FAIL
-static esp_err_t query_official_server(const char *api_key, char *server_url, size_t url_size)
-{
-    if (api_key == NULL || api_key[0] == '\0') {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    char query_url[256];
-    snprintf(query_url, sizeof(query_url),
-             "http://api.espai.fun/sdk/get_server_info_by_api_key?api_key=%s", api_key);
-    ESP_LOGI(TAG, "查询官方服务器: (API Key 已隐藏)");
-
-    esp_http_client_config_t http_cfg = {
-        .url = query_url,
-        .timeout_ms = 10000,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-    if (!client) {
-        ESP_LOGE(TAG, "HTTP client init failed");
-        return ESP_FAIL;
-    }
-
-    esp_err_t err = esp_http_client_open(client, 0);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "HTTP open failed: %s", esp_err_to_name(err));
-        esp_http_client_cleanup(client);
-        return ESP_FAIL;
-    }
-
-    int content_length = esp_http_client_fetch_headers(client);
-    if (content_length <= 0) {
-        ESP_LOGW(TAG, "HTTP response empty");
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return ESP_FAIL;
-    }
-
-    // 上限检查：响应体不应超过 64KB，防止异常大响应耗尽内存
-    if (content_length > 64 * 1024) {
-        ESP_LOGE(TAG, "HTTP response too large: %d bytes (max 64KB)", content_length);
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return ESP_FAIL;
-    }
-
-    char *buf = malloc(content_length + 1);
-    if (!buf) {
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return ESP_ERR_NO_MEM;
-    }
-
-    int read_len = esp_http_client_read_response(client, buf, content_length);
-    buf[read_len > 0 ? read_len : 0] = '\0';
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-
-    ESP_LOGD(TAG, "官方服务器响应: %s", buf);
-
-    // 解析 JSON
-    cJSON *root = cJSON_Parse(buf);
-    free(buf);
-    if (!root) {
-        ESP_LOGW(TAG, "JSON parse failed");
-        return ESP_FAIL;
-    }
-
-    cJSON *success = cJSON_GetObjectItem(root, "success");
-    if (!success || !cJSON_IsTrue(success)) {
-        ESP_LOGW(TAG, "API query returned success=false");
-        cJSON_Delete(root);
-        return ESP_FAIL;
-    }
-
-    cJSON *data = cJSON_GetObjectItem(root, "data");
-    if (!data) {
-        ESP_LOGW(TAG, "No data in response");
-        cJSON_Delete(root);
-        return ESP_FAIL;
-    }
-
-    cJSON *ip = cJSON_GetObjectItem(data, "ip");
-    // port/protocol 由官方服务端返回，但客户端统一强制 ws://ip:80（见下），不使用
-    (void)data;
-
-    const char *ip_str = (ip && cJSON_IsString(ip)) ? ip->valuestring : "node.espai.fun";
-
-    /* 去除 ip 尾部可能带的 / (如 "node.espai2.fun/") */
-    char ip_clean[128];
-    strlcpy(ip_clean, ip_str, sizeof(ip_clean));
-    size_t clean_len = strlen(ip_clean);
-    if (clean_len > 0 && ip_clean[clean_len - 1] == '/') {
-        ip_clean[clean_len - 1] = '\0';
-    }
-
-    /* 官方服务器统一使用 ws:// 无 TLS（同 Arduino 行为），
-       避免 node.espai2.fun 证书不在 ESP-IDF CA bundle 中的验证失败问题。
-       端口统一用 80（Arduino 使用 node.espai.fun:80 无 TLS），
-       如果返回的是 443 端口也强制降级为 80。 */
-    snprintf(server_url, url_size, "ws://%s:80", ip_clean);
-
-    ESP_LOGI(TAG, "官方服务器地址: %s", server_url);
-    cJSON_Delete(root);
-    return ESP_OK;
-}
-
-// ==================== 设备注册（Arduino on_bind_device）====================
-// 首次连接官方服务器前，向平台注册设备。
-// 接口: HTTP POST http://api.espai.fun/devices/add
-// 参数: {version, device_id, api_key, wifi_ssid, wifi_pwd}
-// 已注册过的设备(api_key 不变)会跳过，不会重复绑定
-static esp_err_t register_device(const char *api_key, const char *device_id)
-{
-    // 从 NVS 获取 wifi 信息
-    char wifi_ssid[64] = {0}, wifi_pwd[64] = {0};
-    {
-        nvs_handle_t h;
-        if (nvs_open("esp-ai-kv", NVS_READONLY, &h) == ESP_OK) {
-            size_t l = sizeof(wifi_ssid);
-            nvs_get_str(h, "wifi_name", wifi_ssid, &l);
-            l = sizeof(wifi_pwd);
-            nvs_get_str(h, "wifi_pwd", wifi_pwd, &l);
-            nvs_close(h);
-        }
-    }
-
-    char post_url[128];
-    snprintf(post_url, sizeof(post_url), "http://api.espai.fun/devices/add");
-    ESP_LOGI(TAG, "注册设备: %s", post_url);
-
-    // 构造 JSON body
-    cJSON *body = cJSON_CreateObject();
-    cJSON_AddStringToObject(body, "version", FIRMWARE_VERSION);
-    cJSON_AddStringToObject(body, "bin_id", board_get_config()->bin_id);
-    cJSON_AddStringToObject(body, "device_id", device_id);
-    cJSON_AddStringToObject(body, "api_key", api_key);
-    cJSON_AddStringToObject(body, "wifi_ssid", wifi_ssid);
-    cJSON_AddStringToObject(body, "wifi_pwd", wifi_pwd);
-    char *body_str = cJSON_PrintUnformatted(body);
-    cJSON_Delete(body);
-    if (!body_str) {
-        ESP_LOGE(TAG, "cJSON_PrintUnformatted failed (out of memory)");
-        return ESP_ERR_NO_MEM;
-    }
-
-    ESP_LOGI(TAG, "注册请求: (已隐藏敏感信息)");
-
-    esp_http_client_config_t http_cfg = {
-        .url = post_url,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = 15000,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-    if (!client) {
-        ESP_LOGE(TAG, "HTTP client init failed");
-        free(body_str);
-        return ESP_FAIL;
-    }
-
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-
-    // 手动 open/write/fetch_headers/read 流程（与 query_official_server 一致）
-    esp_err_t err = esp_http_client_open(client, strlen(body_str));
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "HTTP open failed: %s", esp_err_to_name(err));
-        esp_http_client_cleanup(client);
-        free(body_str);
-        return ESP_FAIL;
-    }
-
-    int wlen = esp_http_client_write(client, body_str, strlen(body_str));
-    if (wlen < 0) {
-        ESP_LOGW(TAG, "HTTP write failed");
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        free(body_str);
-        return ESP_FAIL;
-    }
-
-    int content_length = esp_http_client_fetch_headers(client);
-    int status = esp_http_client_get_status_code(client);
-    ESP_LOGI(TAG, "注册响应: HTTP %d, content_length=%d", status, content_length);
-
-    if (content_length > 0) {
-        char *resp_buf = malloc(content_length + 1);
-        if (resp_buf) {
-            int rlen = esp_http_client_read_response(client, resp_buf, content_length);
-            resp_buf[rlen > 0 ? rlen : 0] = '\0';
-            ESP_LOGI(TAG, "注册响应 body: %s", resp_buf);
-            free(resp_buf);
-        }
-    } else {
-        ESP_LOGI(TAG, "注册响应 body: (empty)");
-    }
-
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-    free(body_str);
-
-    // 检查 HTTP 状态码，非 2xx 视为失败
-    if (status < 200 || status >= 300) {
-        ESP_LOGE(TAG, "设备注册失败: HTTP %d", status);
-        return ESP_FAIL;
-    }
-
-    return ESP_OK;
-}
-
-// 板型默认服务器：official_service 板（如 1.54 寸 LCD 官方板）默认连 ESP-AI 官方节点，
-// 其余板型保持连本地默认地址
-static const char *default_server_url(void)
-{
-    const board_config_t *bcfg = board_get_config();
-    if (bcfg && bcfg->official_service) {
-        return SERVER_URL_OFFICIAL;
-    }
-    return SERVER_URL_DEFAULT;
-}
-
-// query 参数百分号编码：api_key/扩展字段可能含 &,=,%,空格 等特殊字符，
-// 不编码会破坏 URL 或注入额外参数
-static void url_query_encode(const char *in, char *out, size_t out_size)
-{
-    static const char hex[] = "0123456789ABCDEF";
-    size_t o = 0;
-    if (out_size == 0) return;
-    for (const char *p = in ? in : ""; *p && o + 4 < out_size; p++) {
-        unsigned char c = (unsigned char)*p;
-        bool safe = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                    (c >= '0' && c <= '9') || c == '-' || c == '.' ||
-                    c == '_' || c == '~';
-        if (safe) {
-            out[o++] = (char)c;
-        } else {
-            out[o++] = '%';
-            out[o++] = hex[c >> 4];
-            out[o++] = hex[c & 0x0F];
-        }
-    }
-    out[o] = '\0';
-}
-
 esp_err_t websocket_init(void)
 {
     ESP_LOGI(TAG, "初始化WebSocket...");
 
     // 获取设备MAC地址（DEVICE_ID 可能是 32 字符的 UUID，缓冲区需足够大）
     char device_mac[64];
-    char ws_key_diy[128] = {0};  // 从 diyServerParams 提取的 key
     device_id_get(device_mac, sizeof(device_mac));
 
     // 从 NVS 读取服务器配置（配网时保存）
+    // 配网数据字段: ext4=协议(http/https), ext5=地址, ext6=端口
     char server_url[128] = {0};
-    char api_key_from_nvs[128] = {0};
-    char ext1_val[128] = {0};
 
     nvs_handle_t nvs_handle;
     if (nvs_open("esp-ai-kv", NVS_READONLY, &nvs_handle) == ESP_OK) {
-        // 读取 ext1 (api_key，开放平台配网时 App 通常存 ext1)
-        size_t len = sizeof(ext1_val);
-        nvs_get_str(nvs_handle, "ext1", ext1_val, &len);
-
-        // 读取 api_key (独立字段，兼容旧配网 App 直接存 api_key 键)
-        len = sizeof(api_key_from_nvs);
-        if (nvs_get_str(nvs_handle, "api_key", api_key_from_nvs, &len) != ESP_OK) {
-            strlcpy(api_key_from_nvs, API_KEY_DEFAULT, sizeof(api_key_from_nvs));
-        }
-
-        // 优先从 ext4/ext5/ext6 组合构建服务器地址
+        // 从 ext4/ext5/ext6 组合构建服务器地址
         char ext4[8] = {0}, ext5[64] = {0}, ext6[8] = {0};
-        len = sizeof(ext4);
+        size_t len = sizeof(ext4);
         bool has_ext4 = (nvs_get_str(nvs_handle, "ext4", ext4, &len) == ESP_OK);
         len = sizeof(ext5);
         bool has_ext5 = (nvs_get_str(nvs_handle, "ext5", ext5, &len) == ESP_OK);
@@ -1554,41 +1248,15 @@ esp_err_t websocket_init(void)
                      strcmp(ext4, "https") == 0 ? "wss" : "ws", ext5, ext6);
             ESP_LOGI(TAG, "使用自定义服务器: %s", server_url);
         } else {
-            // 官方模式：ext1 或 api_key 任一有值即查询官方节点（与 Arduino get_server_config 一致）
-            const char *query_key = ext1_val[0] ? ext1_val : api_key_from_nvs;
-            if (query_key[0] != '\0') {
-                ESP_LOGI(TAG, "检测到 API Key，查询官方服务器...");
-                if (query_official_server(query_key, server_url, sizeof(server_url)) != ESP_OK) {
-                    ESP_LOGW(TAG, "官方服务器查询失败，使用默认地址");
-                    strlcpy(server_url, default_server_url(), sizeof(server_url));
-                }
-            } else {
-                // 无任何配置，使用默认服务器地址（官方板默认连 node.espai.fun）
-                strlcpy(server_url, default_server_url(), sizeof(server_url));
-            }
-        }
-
-        // 读取 diyServerParams (自定义参数，可能包含 key=xxx)
-        char diy_key[128] = {0};
-
-        size_t len2 = sizeof(diy_key);
-        esp_err_t diy_err = nvs_get_str(nvs_handle, "diyServerParams", diy_key, &len2);
-        ESP_LOGD(TAG, "NVS diyServerParams: %d '%s'", diy_err, (diy_err == ESP_OK) ? diy_key : "(not found)");
-        if (diy_err == ESP_OK) {
-            char *kp = strstr(diy_key, "key=");
-            if (kp) {
-                kp += 4;
-                char *end = strchr(kp, '&');
-                if (end) *end = 0;
-                strlcpy(ws_key_diy, kp, sizeof(ws_key_diy));
-            }
+            // 无完整服务器配置，使用本地默认地址
+            ESP_LOGW(TAG, "NVS 无完整服务器配置，使用默认地址: %s", SERVER_URL_DEFAULT);
+            strlcpy(server_url, SERVER_URL_DEFAULT, sizeof(server_url));
         }
 
         nvs_close(nvs_handle);
     } else {
-        // NVS 打开失败，使用默认值（官方板默认连 node.espai.fun）
-        strlcpy(server_url, default_server_url(), sizeof(server_url));
-        strlcpy(api_key_from_nvs, API_KEY_DEFAULT, sizeof(api_key_from_nvs));
+        // NVS 打开失败，使用默认值
+        strlcpy(server_url, SERVER_URL_DEFAULT, sizeof(server_url));
     }
 
     ESP_LOGD(TAG, "服务器地址: %s", server_url);
@@ -1603,73 +1271,22 @@ esp_err_t websocket_init(void)
     }
     ESP_LOGD(TAG, "OTA HTTP 基础地址: %s", s_server_http_base);
 
-    // key 优先级: ext1(APP填的APIKey) > diyServerParams(key=xxx) > api_key
-    const char *ws_key = ext1_val[0] ? ext1_val : (ws_key_diy[0] ? ws_key_diy : api_key_from_nvs);
-
-    // 判断是否为官方服务器（含有 node.espai 域名）
-    bool is_official = (strstr(server_url, "node.espai") != NULL);
-    s_is_official = is_official;
+    // 自定义服务器：只传 mac 作为设备标识
+    // 设备绑定时服务端会返回 bind_code，用户在 App 输入后完成绑定
+    // has_display=0/1：上报屏幕能力，服务端据此对设备级插件做能力适配
+    // （无屏设备自动隐藏 screen 等 requires=display 插件的工具）
     char url[1024];
-    if (is_official) {
-        // 连接官方服务器前注册设备（Arduino 的 on_bind_device 流程）
-        ESP_LOGI(TAG, "官方模式，尝试注册设备...");
-        register_device(ws_key, device_mac);
+    snprintf(url, sizeof(url),
+             "%s%s?mac=%s&v=%s&AUDIO_BUFFER_SIZE=%d"
+             "&spk_sample_rate=%d&spk_channels=%d&spk_format=mp3&spk_bitrate=%d"
+             "&has_display=%d&bin_id=%s",
+             server_url, SERVER_PATH,
+             device_mac, FIRMWARE_VERSION,
+             SPK_STREAM_BUF_SIZE, SPK_SAMPLE_RATE, AUDIO_CHANNELS, 64,
+             display_has_graphic() ? 1 : 0,
+             board_get_config()->bin_id);
 
-        // 获取音量 ext2
-        char ext2_val[16] = {0};
-        {
-            nvs_handle_t h;
-            if (nvs_open("esp-ai-kv", NVS_READONLY, &h) == ESP_OK) {
-                size_t l = sizeof(ext2_val);
-                nvs_get_str(h, "ext2", ext2_val, &l);
-                nvs_close(h);
-            }
-        }
-
-        // 官方服务器路径为 /，与 Arduino connect_ws.cpp 完全一致的参数
-        // 注意：不要添加 spk_sample_rate/spk_channels/spk_format 等参数，
-        // Arduino 官方客户端（esp-ai-client）不传这些参数，官方服务端按默认
-        // MP3 下发；加 spk_* 参数可能导致官方服务端音频路径不一致（设备无声）
-        // key_enc 256：api_key 实际为短字符串（≤64 字符），百分号编码后最多 3 倍；
-        // 与 url[1024] 配合可保证 snprintf 不发生截断（-Wformat-truncation 要求可证）
-        char key_enc[256] = {0};
-        char ext2_enc[48] = {0};
-        url_query_encode(ws_key, key_enc, sizeof(key_enc));
-        url_query_encode(ext2_val, ext2_enc, sizeof(ext2_enc));
-        snprintf(url, sizeof(url),
-                 "%s/?v=%s&device_id=%s&api_key=%s&ext1=%s&ext2=%s"
-                 "&AUDIO_BUFFER_SIZE=%d&bitrate=%d",
-                 server_url, FIRMWARE_VERSION, device_mac, key_enc, key_enc, ext2_enc,
-                 SPK_STREAM_BUF_SIZE, 64);
-    } else {
-        // 自定义服务器：去掉 api_key，只传 mac 作为设备标识
-        // 设备绑定时服务端会返回 bind_code，用户在 App 输入后完成绑定
-        // has_display=0/1：上报屏幕能力，服务端据此对设备级插件做能力适配
-        // （无屏设备自动隐藏 screen 等 requires=display 插件的工具）
-        snprintf(url, sizeof(url),
-                 "%s%s?mac=%s&v=%s&AUDIO_BUFFER_SIZE=%d"
-                 "&spk_sample_rate=%d&spk_channels=%d&spk_format=mp3&spk_bitrate=%d"
-                 "&has_display=%d&bin_id=%s",
-                 server_url, SERVER_PATH,
-                 device_mac, FIRMWARE_VERSION,
-                 SPK_STREAM_BUF_SIZE, SPK_SAMPLE_RATE, AUDIO_CHANNELS, 64,
-                 display_has_graphic() ? 1 : 0,
-                 board_get_config()->bin_id);
-    }
-
-    // 遮蔽 API Key
-    char url_safe[1024];
-    strlcpy(url_safe, url, sizeof(url_safe));
-    char *key_start = strstr(url_safe, "api_key=");
-    if (key_start) {
-        char *key_end = strchr(key_start + 8, '&');
-        if (key_end) {
-            memset(key_start + 8, '*', key_end - key_start - 8);
-        } else {
-            memset(key_start + 8, '*', strlen(key_start + 8));
-        }
-    }
-    ESP_LOGI(TAG, "WebSocket URL: %s", url_safe);
+    ESP_LOGI(TAG, "WebSocket URL: %s", url);
 
     esp_websocket_client_config_t websocket_cfg = {
         .uri = url,
@@ -1774,14 +1391,6 @@ esp_err_t websocket_send_binary(const uint8_t *data, size_t len)
 bool websocket_is_connected(void)
 {
     return s_is_connected;
-}
-
-// 是否连接到官方服务器（node.espai*.fun）
-// 流控上报语义区分用：官方服务端按"已缓冲字节数"理解 client_available_audio，
-// 本地 esp-ai-server(自定义服务器)按"剩余空间"理解
-bool websocket_is_official(void)
-{
-    return s_is_official;
 }
 
 // 是否处于音乐推流模式（play_audio + tts_task_id="play_music"）

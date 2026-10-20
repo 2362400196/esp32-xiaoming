@@ -22,7 +22,6 @@ extern void register_lyric_commands(void);
 extern void register_lua_commands(void);
 extern void register_bind_commands(void);
 extern void register_config_commands(void);
-extern void register_official_commands(void);
 extern void register_ota_commands(void);
 
 // 会话看门狗：记录唤醒时间，防止 wakenet 永久暂停
@@ -305,9 +304,6 @@ void app_main(void)
         return;
     }
 
-    // 官方服务版专用指令（依赖 board_get_config，须在 board_init 之后注册；
-    // 后注册头插覆盖同名 play_music，普通板内部跳过、行为不受影响）
-    register_official_commands();
     // OTA 升级指令（服务端 ota_update 强制升级下发，所有板型通用）
     register_ota_commands();
     commands_list();  // 打印已注册指令列表，确认所有指令已加载

@@ -203,16 +203,9 @@
 				</view>
 				<view class="ble-fg-section"><text class="ble-fg-title">服务配置</text>
 					<view class="ble-fg-card">
-						<view class="ble-radio-row">
-							<view class="ble-radio" :class="{ on: bleSvcType === 'official' }" @click="bleSvcType = 'official'"><view class="ble-radio-dot"><view class="ble-radio-in" v-if="bleSvcType === 'official'"></view></view><text class="ble-radio-label">开放平台</text></view>
-							<view class="ble-radio" :class="{ on: bleSvcType === 'custom' }" @click="bleSvcType = 'custom'"><view class="ble-radio-dot"><view class="ble-radio-in" v-if="bleSvcType === 'custom'"></view></view><text class="ble-radio-label">自定义服务</text></view>
-						</view>
-						<template v-if="bleSvcType === 'official'"><view class="ble-fg-row"><view class="ble-fg-label">API Key</view><input class="ble-fg-input" type="text" placeholder="请输入开放平台 API Key" v-model="bleSvcApiKey" /></view><view class="ble-fg-note" style="font-size:24rpx;color:#888;">在 ESP-AI 开放平台创建超体后获取，设备连接官方服务鉴权用</view></template>
-						<template v-if="bleSvcType === 'custom'">
-							<view class="ble-fg-row"><view class="ble-fg-label">服务协议</view><view class="ble-fg-picker" @click="showBlePicker(['http','https'], (i) => bleSvcProtocolIdx = i)"><text class="ble-fg-pick-text">{{ ['http','https'][bleSvcProtocolIdx] }}</text><view class="ble-pick-arrow"></view></view></view>
-							<view class="ble-fg-row"><view class="ble-fg-label">服务地址</view><input class="ble-fg-input" type="text" placeholder="IP 或域名" v-model="bleSvcHost" /></view>
-							<view class="ble-fg-row"><view class="ble-fg-label">服务端口</view><input class="ble-fg-input" type="text" inputmode="numeric" placeholder="如 8088" v-model="bleSvcPort" /></view>
-						</template>
+						<view class="ble-fg-row"><view class="ble-fg-label">服务协议</view><view class="ble-fg-picker" @click="showBlePicker(['http','https'], (i) => bleSvcProtocolIdx = i)"><text class="ble-fg-pick-text">{{ ['http','https'][bleSvcProtocolIdx] }}</text><view class="ble-pick-arrow"></view></view></view>
+						<view class="ble-fg-row"><view class="ble-fg-label">服务地址</view><input class="ble-fg-input" type="text" placeholder="IP 或域名" v-model="bleSvcHost" /></view>
+						<view class="ble-fg-row"><view class="ble-fg-label">服务端口</view><input class="ble-fg-input" type="text" inputmode="numeric" placeholder="如 8088" v-model="bleSvcPort" /></view>
 					</view>
 				</view>
 				<view class="ble-fg-section"><text class="ble-fg-title">唤醒/对话方式</text>
@@ -1609,11 +1602,9 @@
 	const bleWifiSsid = ref('')
 	const bleWifiPwd = ref('')
 	const bleWakeIdx = ref(0)
-	const bleSvcType = ref('official')
 	const bleSvcProtocolIdx = ref(0)
 	const bleSvcHost = ref('')
 	const bleSvcPort = ref('8088')
-	const bleSvcApiKey = ref('') // 开放平台 API Key（设备连接官方服务鉴权用）
 	const bleKwhEn = ref(true)
 	const bleVolEn = ref(false)
 	const bleVolPin = ref('7')
@@ -1738,16 +1729,9 @@
 				speaker_bck: bleSpkBck.value || '16', speaker_ws: bleSpkWs.value || '17', speaker_data: bleSpkData.value || '15',
 				lights_data: bleLightsData.value || '18', oled_sck: bleOledSck.value || '38', oled_sda: bleOledSda.value || '39'
 			}
-			if (bleSvcType.value === 'official') {
-				const key = bleSvcApiKey.value.trim()
-				if (!key) { uni.hideLoading(); bleConnecting.value = false; uni.showToast({ title: '请输入开放平台密钥', icon: 'none' }); return }
-				payload.api_key = key
-				payload.ext1 = key // 兼容以 ext1 读取的固件
-			} else if (bleSvcType.value === 'custom') {
-				payload.ext4 = ['http','https'][bleSvcProtocolIdx.value]
-				payload.ext5 = bleSvcHost.value.trim()
-				payload.ext6 = bleSvcPort.value.trim() || '8088'
-			}
+			payload.ext4 = ['http','https'][bleSvcProtocolIdx.value]
+			payload.ext5 = bleSvcHost.value.trim()
+			payload.ext6 = bleSvcPort.value.trim() || '8088'
 			const data = bleStr2ab(encodeURIComponent(JSON.stringify(payload)))
 			const cs = 20, tc = Math.ceil(data.byteLength / cs)
 			for (let i = 0; i < tc; i++) {
@@ -1758,7 +1742,7 @@
 			await bleDelay(100)
 			await bleWrite(did, svc.uuid, ch.uuid, bleStr2ab('--END--'))
 			uni.hideLoading(); bleConnecting.value = false
-			const deviceIp = bleSvcType.value === 'custom' ? bleSvcHost.value.trim() : ''
+			const deviceIp = bleSvcHost.value.trim()
 			// 配网后不自动添加设备到列表，设备连上服务器后会生成绑定码
 			// 用户输入绑定码绑定成功后设备才会出现
 			uni.showToast({ title: '配网成功！请查看设备屏幕上的绑定码，在「设备管理」中输入完成绑定', icon: 'success', duration: 3000 })

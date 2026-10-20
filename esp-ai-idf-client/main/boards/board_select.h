@@ -27,11 +27,6 @@
 #define ACTIVE_BOARD_CONFIG (&BOARD_CONFIG)
 #endif
 
-#ifdef CONFIG_BOARD_ESP32S3_BREADBOARD_1_54_LCD_OFFICIAL
-#include "boards/defs/esp32s3_breadboard_1.54_lcd_official.h"
-#define ACTIVE_BOARD_CONFIG (&BOARD_CONFIG)
-#endif
-
 #ifndef ACTIVE_BOARD_CONFIG
 #error "未选择板型，请在 menuconfig → 选择开发板型号 中设置"
 #endif

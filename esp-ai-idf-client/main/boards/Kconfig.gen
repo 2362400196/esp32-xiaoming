@@ -21,8 +21,4 @@ choice BOARD_TYPE
         bool "[ESP32S3] esp32s3_breadboard_1.54_lcd - ESP32-S3 面包板 (1.54寸 LCD)"
         depends on IDF_TARGET_ESP32S3
 
-    config BOARD_ESP32S3_BREADBOARD_1_54_LCD_OFFICIAL
-        bool "[ESP32S3] esp32s3_breadboard_1.54_lcd_official - ESP32-S3 面包板 (1.54寸 LCD, 官方服务版)"
-        depends on IDF_TARGET_ESP32S3
-
 endchoice

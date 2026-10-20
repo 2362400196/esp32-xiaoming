@@ -18,7 +18,6 @@ main/boards/
 │   ├── board_templates.h  # 板型配置模板宏（BASE/AUDIO/DISPLAY/SERVICE/EXTRAS）
 │   ├── esp32s3_breadboard.h            # 面包板无屏幕
 │   ├── esp32s3_breadboard_1.54_lcd.h   # 面包板 1.54寸 LCD
-│   ├── esp32s3_breadboard_1.54_lcd_official.h  # 官方服务版
 │   └── your_board.h            # ← 你的板型定义（新建）
 ├── extras/                # ★ 板级扩展组件（LED/传感器等，见「板级扩展组件（Extras）」）
 │   └── extras_led.c/.h         # 示例组件：状态 LED
@@ -191,8 +190,7 @@ static const board_config_t BOARD_CONFIG = {
 
 | 宏 | 说明 |
 |----|------|
-| `BOARD_SERVICE_SELF_HOSTED()` | 自托管服务（默认请求自己的服务端） |
-| `BOARD_SERVICE_OFFICIAL()` | ESP-AI 官方服务（node.espai.fun）+ 表情只用内置资源 |
+| `BOARD_SERVICE_SELF_HOSTED()` | 自托管服务（连接自建 esp-ai-server） |
 
 ### 扩展组件
 

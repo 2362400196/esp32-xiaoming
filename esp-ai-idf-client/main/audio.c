@@ -1040,17 +1040,11 @@ bool audio_mic_is_running(void)
 static int64_t s_last_flow_report_ms = 0;
 
 // 发送流控消息的内部函数
-// value 语义按连接模式区分：
-//   - 官方服务器(node.espai*.fun)：上报"已缓冲待播放字节数"，与 Arduino
-//     esp_ai_spk_queue.available() 一致；空缓冲上报 0 表示"可以立即发送"
-//   - 本地 esp-ai-server(自定义服务器)：上报"剩余空间"，配合其缓冲满保护逻辑
-//     (pipeline 中 _device_buffer < client_max_buffer*0.1 时 sleep 等待)
-// 若语义错配，服务端会把空缓冲误判为"缓冲满"而不下发/节流音频
+// value 语义：上报"剩余空间"，配合 esp-ai-server 缓冲满保护逻辑
+// (pipeline 中 _device_buffer < client_max_buffer*0.1 时 sleep 等待)
 static void send_flow_control(void) {
     if (s_spk_stream == NULL) return;  // 流缓冲未创建时跳过，避免断言崩溃
-    int available = websocket_is_official()
-                        ? (int)xStreamBufferBytesAvailable(s_spk_stream)
-                        : (int)xStreamBufferSpacesAvailable(s_spk_stream);
+    int available = (int)xStreamBufferSpacesAvailable(s_spk_stream);
     char msg[64];
     snprintf(msg, sizeof(msg), "{\"type\":\"client_available_audio\",\"value\":%d}", available);
     websocket_send_text_nb(msg);
@@ -1313,18 +1307,6 @@ bool audio_spk_check_drain_done(void)
     }
     if (s_audio_mutex) xSemaphoreGive(s_audio_mutex);
     return done;
-}
-
-// 获取音频缓冲区流控上报值（按连接模式区分语义，详见 send_flow_control 注释）
-size_t audio_spk_buffer_available(void)
-{
-    if (s_spk_stream == NULL) return 0;
-    if (websocket_is_official()) {
-        // 官方服务端语义：已缓冲待播放字节数（与 Arduino esp_ai_spk_queue.available() 一致）
-        return xStreamBufferBytesAvailable(s_spk_stream);
-    }
-    // 本地 esp-ai-server 语义：剩余空间
-    return xStreamBufferSpacesAvailable(s_spk_stream);
 }
 
 // ==================== 音量控制（移植自 Arduino esp-ai 客户端）====================

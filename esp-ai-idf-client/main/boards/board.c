@@ -114,9 +114,6 @@ esp_err_t board_init(void)
     }
 
     // 3. 服务模式
-    if (cfg->official_service) {
-        ESP_LOGI(TAG, "  服务: ESP-AI 官方服务 (node.espai.fun)");
-    }
     // emotion_builtin_only 已废弃：表情统一从服务器下载（固件不再内置对话表情）
 
     // 4. 初始化扩展组件（如有）

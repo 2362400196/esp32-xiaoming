@@ -246,36 +246,25 @@ const char provisioning_html[] = R"rawliteral(
         <div class='block'>
             <div id='title'>服务配置</div>
             <div class='inputs-container'>
-                <div class='input_wrap'>
-                    <input type='radio' name='server-type' value='esp-ai-server' id='esp-ai-server' checked onchange='useEspAIServer()'>
-                    <label for='esp-ai-server'>使用开放平台服务</label>
-                    <input type='radio' name='server-type' value='diy-server' id='diy-server' onchange='useDiyServer()'>
-                    <label for='diy-server'>使用自定义服务</label>
-                </div>
-                <div class='input_wrap' style='display:none;' id='ext4_wrap'>
+                <div class='input_wrap' id='ext4_wrap'>
                     <label class='label'><span style='color:red;'>*</span>服务协议</label>
                     <select id='ext4' name='ext4' style='background:#fff;padding-right:20px;' class='input'>
                         <option value='http'>http</option>
                         <option value='https'>https</option>
                     </select>
                 </div>
-                <div class='input_wrap' style='display:none;' id='ext5_wrap'>
+                <div class='input_wrap' id='ext5_wrap'>
                     <label class='label'><span style='color:red;'>*</span>服务地址</label>
                     <input id='ext5' name='ext5' type='text' placeholder='服务地址(IP或者域名)...' class='input'>
                 </div>
-                <div class='input_wrap' style='display:none;' id='ext6_wrap'>
+                <div class='input_wrap' id='ext6_wrap'>
                     <label class='label'><span style='color:red;'>*</span>服务端口</label>
                     <input id='ext6' name='ext6' type='text' placeholder='服务端口' type='number' class='input'>
                 </div>
-                <div class='input_wrap' style='display:none;' id='ext8_wrap'>
+                <div class='input_wrap' id='ext8_wrap'>
                     <label class='label'>请求参数</label>
                     <input id='ext8' name='ext8' type='text' placeholder='[可选]服务参数' class='input'>
                 </div>
-                <div class='input_wrap' id='api_key_wrap'>
-                    <label class='label'><span style='color:red;'>*</span>api_key</label>
-                    <input id='api_key' name='api_key' type='text' placeholder='开放平台秘钥' class='input'>
-                </div>
-                <div class='desc'>秘钥位于：开放平台 -> 超体页面 -> 左下角</div>
             </div>
         </div>
 
@@ -283,10 +272,9 @@ const char provisioning_html[] = R"rawliteral(
             <button id='submit-btn' style='width:100%;box-sizing:border-box;border-radius:8px;padding:12px 0px;border:none;color:#fff;background:linear-gradient(45deg,#40cea5,#09aba2);box-shadow:0px 0px 3px #ccc;letter-spacing:2px;'>保存</button>
         </div>
         <div style='width:100%;padding-left:24px;padding-top:12px;font-size:12px;color:#777;text-align:left;line-height:22px;'>
-            密钥获取方式：<br/>
-            1. 打开开放平台网址<br/>
-            2. 创建超体并配置好各项服务<br/>
-            3. 找到超体页面左下角 api key 内容，点击复制即可
+            服务配置说明：<br/>
+            1. 填写自建 esp-ai-server 的协议、地址和端口<br/>
+            2. 默认端口 8088，与服务器部署配置保持一致
         </div>
         <div style='font-size:13px;color:#929292;padding-top:24px;text-align:center;padding-bottom:100px;'>
             设备编码：<span id='device_id'>-</span>
@@ -343,11 +331,6 @@ const char provisioning_html[] = R"rawliteral(
                     var data = res.data;
                     if (data.wifi_name) document.querySelector('#ssid').value = data.wifi_name;
                     if (data.wifi_pwd) document.querySelector('#password').value = data.wifi_pwd;
-                    if (data.ext1) {
-                        document.querySelector('#api_key').value = data.ext1;
-                    } else if (data.ext4 === 'http' && data.ext5) {
-                        document.querySelector('#diy-server').click();
-                    }
                     if (data.device_id) document.querySelector('#device_id').innerHTML = data.device_id;
                     if (data.ext4) document.querySelector('#ext4').value = data.ext4;
                     if (data.ext5) document.querySelector('#ext5').value = data.ext5;
@@ -392,7 +375,6 @@ const char provisioning_html[] = R"rawliteral(
             if (loading) return;
             var wifi_name = document.querySelector('#ssid').value;
             var wifi_pwd = document.querySelector('#password').value;
-            var api_key = document.querySelector('#api_key').value;
             var ext4 = document.querySelector('#ext4').value || '';
             var ext5 = document.querySelector('#ext5').value || '';
             var ext6 = document.querySelector('#ext6').value;
@@ -401,12 +383,8 @@ const char provisioning_html[] = R"rawliteral(
 
             if (!wifi_name) { msg('请输入WIFI账号哦~'); return; }
             if (!wifi_pwd) { msg('请输入WIFI密码哦~'); return; }
-            if (document.querySelector('#api_key_wrap').style.display === 'none') {
-                if (!ext5) { msg('请输入服务地址哦~'); return; }
-                if (!ext6) { msg('请输入服务端口哦~'); return; }
-            } else {
-                if (!api_key) { msg('请输入密钥哦~'); return; }
-            }
+            if (!ext5) { msg('请输入服务地址哦~'); return; }
+            if (!ext6) { msg('请输入服务端口哦~'); return; }
 
             loading = true;
             document.querySelector('#submit-btn').innerHTML = '配网中...';
@@ -419,7 +397,6 @@ const char provisioning_html[] = R"rawliteral(
             myFetch('/set_config', {
                 wifi_name: wifi_name,
                 wifi_pwd: wifi_pwd,
-                ext1: api_key,
                 ext4: ext4,
                 ext5: ext5,
                 ext6: ext6,
@@ -435,30 +412,6 @@ const char provisioning_html[] = R"rawliteral(
                     msg(res.message);
                 }
             }, 'POST');
-        }
-
-        function useDiyServer() {
-            document.querySelector('#api_key_wrap').style.display = 'none';
-            document.querySelector('#api_key').value = '';
-            document.querySelector('#ext4').value = 'http';
-            document.querySelector('#ext5').value = '';
-            document.querySelector('#ext6').value = '8088';
-            document.querySelector('#ext4_wrap').style.display = 'block';
-            document.querySelector('#ext5_wrap').style.display = 'block';
-            document.querySelector('#ext6_wrap').style.display = 'block';
-            document.querySelector('#ext8_wrap').style.display = 'block';
-        }
-
-        function useEspAIServer() {
-            document.querySelector('#ext4_wrap').style.display = 'none';
-            document.querySelector('#ext5_wrap').style.display = 'none';
-            document.querySelector('#ext6_wrap').style.display = 'none';
-            document.querySelector('#ext8_wrap').style.display = 'none';
-            document.querySelector('#ext4').value = '';
-            document.querySelector('#ext5').value = '';
-            document.querySelector('#ext6').value = '';
-            document.querySelector('#ext8').value = '';
-            document.querySelector('#api_key_wrap').style.display = 'block';
         }
 
         window.onload = function () {

@@ -97,52 +97,25 @@
 			<view class="cfg-section">
 				<text class="section-title">服务配置</text>
 				<view class="cfg-card">
-					<view class="cfg-radio-row">
-						<view class="cfg-radio" :class="{ active: configType === 'official' }" @click="configType = 'official'">
-							<view class="radio-dot">
-								<view class="radio-inner" v-if="configType === 'official'"></view>
-							</view>
-							<text class="radio-label">使用开放平台服务</text>
-						</view>
-						<view class="cfg-radio" :class="{ active: configType === 'custom' }" @click="switchToCustom">
-							<view class="radio-dot">
-								<view class="radio-inner" v-if="configType === 'custom'"></view>
-							</view>
-							<text class="radio-label">使用自定义服务</text>
-						</view>
+					<view class="cfg-row">
+						<text class="cfg-label">服务协议 *</text>
+						<picker class="cfg-picker" :value="customProtocolIndex" :range="['http', 'https']" @change="onProtocolChange">
+							<text class="cfg-picker-text">{{ ['http', 'https'][customProtocolIndex] }}</text>
+							<view class="picker-arrow"></view>
+						</picker>
 					</view>
-
-					<!-- 开放平台 -->
-					<template v-if="configType === 'official'">
-						<view class="cfg-row">
-							<text class="cfg-label">开放平台密钥 *</text>
-							<input class="cfg-input" type="text" placeholder="请输入开放平台 API Key" v-model="officialApiKey" />
-						</view>
-						<view class="cfg-desc">在 ESP-AI 开放平台（dev.espai.fun）创建超体后获取，设备连接官方服务需鉴权</view>
-					</template>
-
-					<!-- 自定义服务 -->
-					<template v-if="configType === 'custom'">
-						<view class="cfg-row">
-							<text class="cfg-label">服务协议 *</text>
-							<picker class="cfg-picker" :value="customProtocolIndex" :range="['http', 'https']" @change="onProtocolChange">
-								<text class="cfg-picker-text">{{ ['http', 'https'][customProtocolIndex] }}</text>
-								<view class="picker-arrow"></view>
-							</picker>
-						</view>
-						<view class="cfg-row">
-							<text class="cfg-label">服务地址 *</text>
-							<input class="cfg-input" type="text" placeholder="IP 或域名" v-model="customHost" />
-						</view>
-						<view class="cfg-row">
-							<text class="cfg-label">服务端口 *</text>
-							<input class="cfg-input" type="text" inputmode="numeric" placeholder="如 8088" v-model="customPort" />
-						</view>
-						<view class="cfg-row">
+					<view class="cfg-row">
+						<text class="cfg-label">服务地址 *</text>
+						<input class="cfg-input" type="text" placeholder="IP 或域名" v-model="customHost" />
+					</view>
+					<view class="cfg-row">
+						<text class="cfg-label">服务端口 *</text>
+						<input class="cfg-input" type="text" inputmode="numeric" placeholder="如 8088" v-model="customPort" />
+					</view>
+					<view class="cfg-row">
 						<text class="cfg-label">请求参数</text>
 						<input class="cfg-input" type="text" placeholder="可选，如 api_key=xxx" v-model="customParams" />
 					</view>
-					</template>
 				</view>
 			</view>
 
@@ -306,18 +279,12 @@ const wakeupTypeIndex = ref(4) // 默认 boot
 const onWakeupChange = (e) => { wakeupTypeIndex.value = e.detail.value }
 
 // ===== ③ 服务配置 =====
-const configType = ref('official') // 'official' | 'custom'
-const officialApiKey = ref('')     // 开放平台 API Key（设备连接官方服务鉴权用）
 const customProtocolIndex = ref(0)
 const customHost = ref('')
 const customPort = ref('8088')
 const customParams = ref('')
 
 const onProtocolChange = (e) => { customProtocolIndex.value = e.detail.value }
-const switchToCustom = () => {
-	configType.value = 'custom'
-	if (!customHost.value) customHost.value = ''
-}
 
 // ===== ④ 电量检测 =====
 const kwhEnable = ref(true)
@@ -520,17 +487,10 @@ const sendWifiConfig = async () => {
 			oled_sck: oledSck.value.trim() || '38',
 			oled_sda: oledSda.value.trim() || '39'
 		}
-		if (configType.value === 'official') {
-			const key = officialApiKey.value.trim()
-			if (!key) { uni.hideLoading(); connecting.value = false; toast('请输入开放平台密钥'); return }
-			payload.api_key = key
-			payload.ext1 = key // 兼容以 ext1 读取的固件
-		} else if (configType.value === 'custom') {
-			payload.ext4 = ['http', 'https'][customProtocolIndex.value]
-			payload.ext5 = customHost.value.trim()
-			payload.ext6 = customPort.value.trim() || '8088'
-			payload.diyServerParams = customParams.value.trim() || ''
-		}
+		payload.ext4 = ['http', 'https'][customProtocolIndex.value]
+		payload.ext5 = customHost.value.trim()
+		payload.ext6 = customPort.value.trim() || '8088'
+		payload.diyServerParams = customParams.value.trim() || ''
 
 		const reqData = str2ab(encodeURIComponent(JSON.stringify(payload)))
 

@@ -28,13 +28,10 @@ extern "C" {
 #define WIFI_CONNECT_WAIT_MS (WIFI_MAXIMUM_RETRY * (WIFI_RETRY_DELAY_MS + 10000) + 10000)
 
 // ==================== 服务器配置 ====================
-// 服务器地址和API Key通过配网保存到NVS，无需硬编码
-// 配网数据字段: ext1=api_key, ext4=协议(http/https), ext5=地址, ext6=端口
+// 服务器地址通过配网保存到NVS，无需硬编码
+// 配网数据字段: ext4=协议(http/https), ext5=地址, ext6=端口
 // 若NVS中无配置则使用以下默认值
 #define SERVER_URL_DEFAULT  "ws://192.168.31.176:8088"
-// ESP-AI 官方服务节点（official_service 板型在无配网配置时默认连接此地址）
-#define SERVER_URL_OFFICIAL "ws://node.espai.fun:80"
-#define API_KEY_DEFAULT     ""
 #define SERVER_PATH         "/connect_espai_node"
 
 // ==================== 音频参数 ====================
@@ -141,7 +138,6 @@ esp_err_t websocket_send_text(const char *text);
 esp_err_t websocket_send_text_nb(const char *text);
 esp_err_t websocket_send_binary(const uint8_t *data, size_t len);
 bool websocket_is_connected(void);
-bool websocket_is_official(void);
 bool websocket_is_music_streaming(void);
 void websocket_cache_clear(void);
 bool websocket_cache_get_tone(const uint8_t **data, size_t *len);
@@ -172,7 +168,6 @@ esp_err_t audio_spk_stop(void);
 esp_err_t audio_spk_hard_stop(void);
 esp_err_t audio_spk_wait_drain(void);
 bool audio_spk_check_drain_done(void);
-size_t audio_spk_buffer_available(void);
 // 音量控制（移植自 Arduino esp_ai.setVolume）
 esp_err_t audio_set_volume(float volume);
 float audio_get_volume(void);

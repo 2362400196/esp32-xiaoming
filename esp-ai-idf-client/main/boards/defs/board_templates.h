@@ -189,15 +189,9 @@ static const es8311_config_t ES8311_CFG = {
 
 // ==================== 服务模式宏 ====================
 
-/** 自托管服务（默认请求用户自己的服务端） */
+/** 自托管服务（连接用户自己的 esp-ai-server） */
 #define BOARD_SERVICE_SELF_HOSTED() \
-    .official_service    = false, \
     .emotion_builtin_only = false
-
-/** ESP-AI 官方服务（node.espai.fun + 内置表情） */
-#define BOARD_SERVICE_OFFICIAL() \
-    .official_service    = true, \
-    .emotion_builtin_only = true
 
 // ==================== 扩展组件宏 ====================
 
