@@ -960,6 +960,29 @@ class TestStreamSignalConstants:
         from src.use_cases.pipeline import LLM_ERROR_PREFIX
         assert LLM_ERROR_PREFIX == "LLM error"
 
+    def test_llm_stream_error_token_402_text(self):
+        from src.use_cases.pipeline import LLM_INSUFFICIENT_BALANCE_REPLY, llm_stream_error_token
+        err = 'HTTP 402: {"error":{"message":"Insufficient Balance","code":"invalid_request_error"}}'
+        assert llm_stream_error_token(err) == LLM_INSUFFICIENT_BALANCE_REPLY
+
+    def test_llm_stream_error_token_status_code_attr(self):
+        from src.use_cases.pipeline import LLM_INSUFFICIENT_BALANCE_REPLY, llm_stream_error_token
+
+        class FakeAPIError(Exception):
+            status_code = 402
+
+        assert llm_stream_error_token(FakeAPIError("boom")) == LLM_INSUFFICIENT_BALANCE_REPLY
+
+    def test_llm_stream_error_token_chinese_balance(self):
+        from src.use_cases.pipeline import LLM_INSUFFICIENT_BALANCE_REPLY, llm_stream_error_token
+        assert llm_stream_error_token("Arrearage：账户欠费，请充值") == LLM_INSUFFICIENT_BALANCE_REPLY
+
+    def test_llm_stream_error_token_generic_gets_prefix(self):
+        from src.use_cases.pipeline import LLM_ERROR_PREFIX, llm_stream_error_token
+        token = llm_stream_error_token("connection timeout")
+        assert token.startswith(LLM_ERROR_PREFIX)
+        assert "connection timeout" in token
+
     async def test_run_stop_pipeline_uses_constant(self):
         # LLM 产出常量信号 token 时触发 StopPipeline
         from src.use_cases.pipeline import STOP_PIPELINE_SENTINEL

@@ -11,8 +11,6 @@ dependencies = [
     "websocket-client==1.9.0",
     "gtts==2.5.4",
     "numpy==2.2.6",
-    "torch==2.11.0",
-    "torchaudio==2.11.0",
     "openai==2.32.0",
     "colorama==0.4.6",
     "mcp==1.27.0",

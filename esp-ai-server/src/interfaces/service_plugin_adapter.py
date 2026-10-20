@@ -29,6 +29,8 @@ import inspect
 import json
 from typing import Any, AsyncIterator
 
+from src.use_cases.pipeline import LLM_ERROR_PREFIX, llm_stream_error_token
+
 from src.infrastructure.logging import get_logger
 from src.infrastructure.plugin_loader import (
     get_service_plugin,
@@ -180,7 +182,7 @@ async def call_llm_chat(
     """
     plugin_name = get_service_plugin("llm", provider)
     if not plugin_name:
-        yield "[LLM not configured: no LLM service plugin installed]"
+        yield f"{LLM_ERROR_PREFIX}: LLM not configured (no LLM service plugin installed)"
         return
 
     # 工具检索：根据用户查询预筛选相关工具，传给插件加入请求
@@ -207,24 +209,24 @@ async def call_llm_chat(
             tool_manager,
         )
         if result is None:
-            yield "[LLM not configured: plugin not loaded]"
+            yield f"{LLM_ERROR_PREFIX}: LLM not configured (plugin not loaded)"
             return
         try:
             parsed = json.loads(result) if isinstance(result, str) else result
         except (json.JSONDecodeError, TypeError):
             parsed = {}
         if isinstance(parsed, dict) and parsed.get("error"):
-            yield f"[LLM error: {parsed['error']}]"
+            yield llm_stream_error_token(parsed["error"])
             return
         # 如果 result 是字符串但非 JSON（如沙箱崩溃错误），记录真实错误
         if isinstance(result, str) and not isinstance(parsed, dict):
             logger.error(f"[PluginLLM] LLM 插件返回非 JSON 错误: {result[:200]}")
-            yield f"[LLM error: {result[:200]}]"
+            yield llm_stream_error_token(result[:200])
             return
         chat_id = parsed.get("chat_id") if isinstance(parsed, dict) else None
         if not chat_id:
             logger.error(f"[PluginLLM] LLM 插件返回空 chat_id，原始结果: {str(result)[:200]}")
-            yield "[LLM error: no chat_id returned]"
+            yield f"{LLM_ERROR_PREFIX}: no chat_id returned"
             return
 
         full_text = ""
@@ -243,7 +245,7 @@ async def call_llm_chat(
                     chunk_parsed = {}
                 if isinstance(chunk_parsed, dict):
                     if chunk_parsed.get("error"):
-                        yield f"[LLM error: {chunk_parsed['error']}]"
+                        yield llm_stream_error_token(chunk_parsed["error"])
                         break
                     token = chunk_parsed.get("token", "")
                     if token:

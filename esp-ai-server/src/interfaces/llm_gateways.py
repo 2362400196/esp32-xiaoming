@@ -13,6 +13,7 @@ from src.infrastructure.monitoring import (
     get_metrics,
 )
 from src.use_cases.tools_system import StopPipeline
+from src.use_cases.pipeline import llm_stream_error_token
 
 logger = get_logger(__name__)
 
@@ -525,7 +526,7 @@ class OpenAILLMGateway:
         except Exception as e:
             _llm_track_status = "error"
             logger.error(f"[OpenAI LLM] Streaming request exception (after {LLM_MAX_RETRIES} retries): {e}")
-            yield f"LLM error: {str(e)}"
+            yield llm_stream_error_token(e)
         finally:
             # 计费：暴露本轮累计 tokens，供 pipeline 读取
             self.last_completion_tokens = total_tokens

@@ -28,6 +28,7 @@ from src.interfaces.service_plugin_adapter import (
     has_asr_plugin,
 )
 from src.interfaces.tts_gateways import TTSSynthEvent
+from src.use_cases.pipeline import LLM_ERROR_PREFIX, llm_stream_error_token
 
 logger = get_logger(__name__)
 
@@ -79,19 +80,17 @@ class PluginLLMGateway:
 
         try:
             async for token in call_llm_chat(messages, config, self.tool_manager, usage_sink=_usage_sink):
-                if token.startswith("[LLM"):
-                    if "error" in token:
-                        _status = "error"
-                        logger.warning(f"[PluginLLM] {token}")
+                if token.startswith(LLM_ERROR_PREFIX):
+                    # 流内错误信号：记指标并终止（402 已由 llm_stream_error_token 转为友好播报文本）
+                    _status = "error"
+                    logger.warning(f"[PluginLLM] {token}")
                     yield token
-                    if "not configured" in token:
-                        return
-                else:
-                    yield token
+                    return
+                yield token
         except Exception as e:
             _status = "error"
             logger.error(f"[PluginLLM] stream_chat 异常: {e}")
-            yield f"LLM error: {str(e)}"
+            yield llm_stream_error_token(e)
         finally:
             try:
                 get_metrics().track_llm_request("plugin", _status, time.time() - _start)
