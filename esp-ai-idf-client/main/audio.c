@@ -32,10 +32,17 @@
 
 // 麦克风采集目标间隔
 #define MIC_TARGET_INTERVAL_US 20000
+// 打断预缓冲回灌间隔：1KB/帧，比实时快 3.2 倍。1.5 秒的话头要在半秒内补完，
+// 否则用户后半句还没到、服务端就先超时了；但仍保持小帧，不重犯"大二进制帧
+// 撑爆 TCP 缓冲区导致 WebSocket 断开"。
+#define MIC_PREROLL_INTERVAL_MS 10
 
 // 看门狗超时阈值（每5ms一次检查）
 #define SPK_WATCHDOG_TIMEOUT_NORMAL 2000   // 10秒
 #define SPK_WATCHDOG_TIMEOUT_FIRST  6000   // 30秒（首帧更宽容）
+// WS 在线时对服务端断流的宽限上限：TTS 慢于播放时继续等（服务端会话超时会兜底），
+// 超过这个时长才认定流死了。旧版 10s 把合成慢的长故事掐断（见 spk_task 看门狗注释）。
+#define SPK_STARVE_GIVEUP_MS        60000
 
 // 预缓冲：播放开始后等待流缓冲积累足够音频再开始解码，
 // 吸收 TTS 首帧后生成间隙（"卡顿一下"）。64kbps 下 4KB ≈ 500ms。
@@ -60,6 +67,35 @@ static const char *TAG = "audio";
 static i2s_chan_handle_t s_mic_handle = NULL;
 static i2s_chan_handle_t s_spk_handle = NULL;
 static bool s_mic_running = false;
+
+// TX 队列代际号。i2s_channel_disable() 对 TX 通道做 xQueueReset + curr_ptr/rw_pos 归零，
+// 也就是把"已写入但还没发出"的样本整段丢弃（队列最多 24×480=720ms）。AEC 参考靠
+// "第 N 个写入的样本 = 第 N 个发出的样本"这条账本对齐，队列一被冲掉账本就作废，
+// 必须让 wakeup.c 重新起账，否则参考会长期错位几百 ms 且互相关搜不回来。
+static volatile uint32_t s_spk_tx_epoch = 0;
+
+static esp_err_t spk_tx_on(void)
+{
+    esp_err_t err = i2s_channel_enable((i2s_chan_handle_t)s_spk_handle);
+    s_spk_tx_epoch++;
+    return err;
+}
+
+uint32_t audio_spk_tx_epoch(void)
+{
+    return s_spk_tx_epoch;
+}
+
+#if defined(AUDIO_SCHEME_ES8311)
+// 起播灌队列（AEC 对齐的前提）：TX DMA 队列 12×240=2880 样本 = 180ms（见 wakeup.c chan_cfg）。
+// auto_clear 下队列空时第一笔写入"即写即发"（发出延迟≈0），随后随队列填满漂到 180ms——
+// 同一条声学路径每条流的发出延迟都不同（serial25：沿用上一条流的抽头四连败）。
+// 每条流第一次真实写入前先把队列灌满静音，之后 spk_task 阻塞写维持队列全满，
+// 发出延迟恒等于队列深度，AEC 的参考抽头才可能是常数。代价：每条流起播晚 180ms。
+#define SPK_DMA_PRIME_SAMPLES (12 * 240)
+#define SPK_DMA_PRIME_PIECE   240
+static bool s_spk_dma_primed = false;
+#endif
 
 // MP3 解码器（使用原始 helix 解码，支持 MPEG 2.5）
 static mp3_decoder_handle_t s_mp3_dec = NULL;
@@ -185,7 +221,7 @@ static esp_err_t init_spk(void)
     };
 
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_spk_handle, &std_cfg));
-    ESP_ERROR_CHECK(i2s_channel_enable(s_spk_handle));
+    ESP_ERROR_CHECK(spk_tx_on());
 
     ESP_LOGI(TAG, "I2S喇叭初始化完成");
     return ESP_OK;
@@ -260,7 +296,7 @@ static esp_err_t spk_switch_es8311_clock(int rate)
     }
     i2s_channel_disable(s_spk_handle);
     esp_err_t err = i2s_channel_reconfig_std_clock(s_spk_handle, &clk_cfg);
-    i2s_channel_enable(s_spk_handle);   // 先使能，让 MCLK 输出新频率
+    spk_tx_on();   // 先使能，让 MCLK 输出新频率
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "I2S时钟重配失败: %s", esp_err_to_name(err));
         return err;
@@ -335,6 +371,7 @@ static void spk_task(void *arg)
     int residual_len = 0;
     int i2s_rate = 0;
     int no_data_count = 0;  // 连续无数据计数（每次 20ms），用于看门狗超时
+    int64_t s_spk_starve_ms = 0;  // 看门狗触发期间的累计断流时长（WS 在线时宽限的上限）
     int64_t total_written = 0;  // 本次播放累计写入 I2S 的字节数（诊断用）
 
     if (!pcm_buffer || !i2s_buffer || !read_buf || !residual_buf
@@ -365,6 +402,10 @@ static void spk_task(void *arg)
             s_spk_reset_decoder_flag = false;
             s_last_i2s_write_us = 0;   // 重置 I2S 写入计时
             no_data_count = 0;         // 重置看门狗计数，新播放会话不应继承旧计数
+            s_spk_starve_ms = 0;       // 同上：断流累计计时也归零
+#if defined(AUDIO_SCHEME_ES8311)
+            s_spk_dma_primed = false;  // 新流起播前重新灌满 DMA 队列（AEC 发出延迟恒定）
+#endif
             // 诊断：打印本次播放实际写入 I2S 的数据量，用于区分"数据没进 I2S"还是"功放/喇叭无声"
             if (total_written > 0) {
                 ESP_LOGD(TAG, "本次播放结束: 解码 %d 帧, 共写入 I2S %lld bytes (约 %.0f ms)",
@@ -380,7 +421,7 @@ static void spk_task(void *arg)
             // 清空后立即 enable，新的 audio_spk_play() 写入时 DMA 已空。
             if (!s_spk_ing) {
                 i2s_channel_disable(s_spk_handle);
-                i2s_channel_enable(s_spk_handle);
+                spk_tx_on();
                 ESP_LOGD(TAG, "I2S DMA 已清空（打断场景）");
             }
             // 不再 xStreamBufferReset：audio_spk_play() 已清过，这里再清会丢失期间到达的数据
@@ -429,26 +470,38 @@ static void spk_task(void *arg)
         // 从 StreamBuffer 读一块数据（5ms 超时，减少 DMA 欠载风险）
         size_t got = xStreamBufferReceive(s_spk_stream, read_buf, SPK_READ_BUF_SIZE, pdMS_TO_TICKS(5));
 
-        // 看门狗：如果长时间没收到数据且不在等待 drain，强制停止播放
-        // 防止服务端异常断连导致 spk_task 永远卡在 continue 循环
-        // 首帧解码前用更长超时（30s），容忍 TTS 生成延迟；首帧后用 10s 超时
+        // 看门狗：长时间没收到数据且不在等待 drain。分两种情况处理：
+        // - WebSocket 已断 / 累计断流超上限：强制停止播放并通知服务端（防永远卡死）。
+        // - WebSocket 还在：多半是服务端 TTS 合成慢于播放（长故事合成仅 ~0.5x 实时率），
+        //   继续保持播放状态等下一包。旧版 10s 直接掐掉并上报完成，服务端收到
+        //   client_out_audio_over 时 pipeline 还在跑，把故事整条取消（2026-10-24 20:57
+        //   事故：讲到一半停了 + "5s 无有效语音"结束会话）。服务端有自己的会话超时兜底，
+        //   设备端不会和服务端互相永远等。
         if (got > 0 || residual_len > 0) {
             no_data_count = 0;
+            s_spk_starve_ms = 0;
         } else {
             no_data_count++;
             int timeout_threshold = (s_spk_frame_count > 0) ? SPK_WATCHDOG_TIMEOUT_NORMAL : SPK_WATCHDOG_TIMEOUT_FIRST;  // 10s 或 30s
             if (!s_spk_wait_drain && no_data_count > timeout_threshold) {
-                ESP_LOGW(TAG, "看门狗超时：%d秒无数据(帧#%d)，强制停止播放",
-                         timeout_threshold * 5 / 1000, s_spk_frame_count);
-                s_spk_ing = false;
-                s_spk_drain_done = true;  // 防止 drain 定时器继续等待
-                i2s_rate = 0;
-                residual_len = 0;
                 no_data_count = 0;
-                // 通知服务端音频播放异常终止（websocket.c 组装完整格式，
-                // 含 session_id/tts_task_id，服务端才能正确配对会话）
-                websocket_notify_playback_failed();
-                continue;
+                s_spk_starve_ms += timeout_threshold * 5;
+                if (websocket_is_connected() && s_spk_starve_ms < SPK_STARVE_GIVEUP_MS) {
+                    ESP_LOGW(TAG, "播放断流 %lldms（WS 在线，等服务端继续推流，帧#%d）",
+                             (long long)s_spk_starve_ms, s_spk_frame_count);
+                } else {
+                    ESP_LOGW(TAG, "看门狗超时：%d秒无数据(帧#%d)，强制停止播放",
+                             timeout_threshold * 5 / 1000, s_spk_frame_count);
+                    s_spk_ing = false;
+                    s_spk_drain_done = true;  // 防止 drain 定时器继续等待
+                    i2s_rate = 0;
+                    residual_len = 0;
+                    s_spk_starve_ms = 0;
+                    // 通知服务端音频播放异常终止（websocket.c 组装完整格式，
+                    // 含 session_id/tts_task_id，服务端才能正确配对会话）
+                    websocket_notify_playback_failed();
+                    continue;
+                }
             }
         }
 
@@ -512,7 +565,28 @@ static void spk_task(void *arg)
             continue;
         }
 
-        if (got == 0 && residual_len == 0) continue;
+        // 【断流补静音：AEC 对齐的生命线】服务端 TTS 合成慢于播放时（长故事实测
+        // ~0.5x 实时率），流缓冲会周期性抽干。旧行为是空转 continue，让 TX DMA
+        // 队列排空（实测队列掉到 0~100ms，正常 124~160ms）——发出延迟随队列深度
+        // 漂移、发出账本失准、参考帧全灭（诊断"有效0帧"）、滞后锁不稳、本底学不到，
+        // VAD 打断整链瘫痪（实测用户喊了 5 秒才触发，正常音量完全无响应）。
+        // 改为向 DMA 补写静音：队列保持全满，"发出位置 = 写入位置 - 队列深度"恒
+        // 成立，参考与扬声器实际出声（TTS 突发 + 静音间隙）逐样本一致。
+        // 静音同样推进参考环账本；no_data_count 已在上方看门狗处累计，语义不变。
+        if (got == 0 && residual_len == 0) {
+#if defined(AUDIO_SCHEME_ES8311)
+            if (!s_spk_wait_drain) {
+                static int16_t silence_fill[SPK_DMA_PRIME_PIECE];   // BSS 清零 = 数字静音
+                size_t w = 0;
+                if (i2s_channel_write(s_spk_handle, silence_fill, sizeof(silence_fill),
+                                      &w, pdMS_TO_TICKS(20)) == ESP_OK) {
+                    wakeup_spk_ref_push(silence_fill, SPK_DMA_PRIME_PIECE);
+                    s_spk_dma_primed = true;   // 队列已被静音维持全满，起播灌注无需再做
+                }
+            }
+#endif
+            continue;
+        }
 
         // 在拼接数据前检查重置标志，避免旧 residual 被解码产生杂音
         // 注意：只重置解码器和残留数据，不能清 I2S DMA！
@@ -617,10 +691,10 @@ static void spk_task(void *arg)
                     i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(i2s_rate);
                     esp_err_t err = i2s_channel_reconfig_std_clock(s_spk_handle, &clk_cfg);
                     if (err == ESP_OK) {
-                        i2s_channel_enable(s_spk_handle);
+                        spk_tx_on();
                         ESP_LOGD(TAG, "I2S时钟重配成功: %dHz", i2s_rate);
                     } else {
-                        i2s_channel_enable(s_spk_handle);
+                        spk_tx_on();
                         ESP_LOGW(TAG, "I2S时钟重配失败: %s", esp_err_to_name(err));
                     }
 #endif
@@ -642,11 +716,11 @@ static void spk_task(void *arg)
                         i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(info.sample_rate);
                         esp_err_t err = i2s_channel_reconfig_std_clock(s_spk_handle, &clk_cfg);
                         if (err == ESP_OK) {
-                            i2s_channel_enable(s_spk_handle);
+                            spk_tx_on();
                             i2s_rate = info.sample_rate;
                             ESP_LOGD(TAG, "I2S时钟重配成功: %dHz", i2s_rate);
                         } else {
-                            i2s_channel_enable(s_spk_handle);
+                            spk_tx_on();
                             ESP_LOGW(TAG, "I2S时钟重配失败: %s", esp_err_to_name(err));
                         }
                     } else {
@@ -740,8 +814,29 @@ static void spk_task(void *arg)
                         }
                     }
 
+#if defined(AUDIO_SCHEME_ES8311)
+                    // 起播灌满 TX DMA 队列：发出延迟从"随起播相位漂移"变成常数 180ms
+                    // （见 SPK_DMA_PRIME_SAMPLES 定义处）。静音同样推进参考环，
+                    // 发出账本 W/E 的口径与真实写入完全一致。
+                    if (!s_spk_dma_primed) {
+                        static int16_t prime_zeros[SPK_DMA_PRIME_PIECE];   // BSS 清零 = 数字静音
+                        s_spk_dma_primed = true;
+                        for (int i = 0; i < SPK_DMA_PRIME_SAMPLES / SPK_DMA_PRIME_PIECE; i++) {
+                            size_t w = 0;
+                            if (i2s_channel_write(s_spk_handle, prime_zeros, sizeof(prime_zeros),
+                                                  &w, pdMS_TO_TICKS(100)) != ESP_OK) {
+                                ESP_LOGW(TAG, "起播灌 DMA 队列失败，本条流 AEC 发出延迟可能漂移");
+                                break;
+                            }
+                            wakeup_spk_ref_push(prime_zeros, SPK_DMA_PRIME_PIECE);
+                        }
+                    }
+#endif
                     // 阻塞写入 I2S：等 DMA 有空间再写，自然限速
-                    // DMA 缓冲区 480ms，足够吸收解码抖动
+                    // 【AEC 对齐要求】TX DMA 队列 12×240=180ms（见 wakeup.c chan_cfg），
+                    // 必须按 ≤768 字节（384 样本 = 24ms）分片写入，写一片推一片参考信号。
+                    // 若整块写入（MP3 帧 1152 样本 / 网络帧 3KB+），块首样本的参考要等
+                    // 整块写完才入队，参考-回声错位近百 ms，超出 AEC 滤波窗（32ms）。
                     size_t written = 0;
                     // 诊断：检测 I2S 写入间隔，超过 30ms 说明 DMA 可能欠载
                     int64_t now_us = esp_timer_get_time();
@@ -751,16 +846,37 @@ static void spk_task(void *arg)
                             ESP_LOGW(TAG, "I2S 写入间隔: %lldms (帧#%d, 可能欠载)", gap_ms, s_spk_frame_count);
                         }
                     }
-                    esp_err_t wr = i2s_channel_write(s_spk_handle, i2s_buffer, bytes, &written, pdMS_TO_TICKS(2000));
-                    if (wr != ESP_OK) {
-                        ESP_LOGW(TAG, "I2S write timeout/error: %s", esp_err_to_name(wr));
+                    size_t piece_off = 0;
+                    int64_t frame_written = 0;
+                    bool wr_failed = false;
+                    while (piece_off < bytes) {
+                        size_t piece = bytes - piece_off;
+                        if (piece > 768) piece = 768;
+                        esp_err_t wr = i2s_channel_write(s_spk_handle, i2s_buffer + piece_off, piece,
+                                                         &written, pdMS_TO_TICKS(2000));
+                        if (wr != ESP_OK) {
+                            ESP_LOGW(TAG, "I2S write timeout/error: %s", esp_err_to_name(wr));
+                            wr_failed = true;
+                            break;
+                        }
+#if defined(AUDIO_SCHEME_ES8311) && !defined(CONFIG_IDF_TARGET_ESP32C3)
+                        // AEC 参考信号：把最终写入扬声器的 16kHz 单声道数据喂给唤醒模块
+                        // （ES8311 方案硬件固定 16kHz，含重采样后的 24k TTS/音乐；
+                        //   AEC 用它消除麦克风信号中设备自己的声音 → TTS 播放中实时打断）
+                        wakeup_spk_ref_push((const int16_t *)(i2s_buffer + piece_off),
+                                            (int)(written / sizeof(int16_t)));
+#endif
+                        piece_off += written;
+                        frame_written += (int64_t)written;
+                    }
+                    if (wr_failed) {
                         // 仍推进解码位置，避免重复解码同一帧导致死循环
                         ptr = dec_ptr;
                         bytes_left = dec_left;
                         continue;
                     }
                     s_last_i2s_write_us = esp_timer_get_time();
-                    total_written += (int64_t)written;
+                    total_written += frame_written;
                     // 功耗管理：刷新输出活动时间戳，防止空闲超时关闭 PA
                     power_manager_notify_output();
                 }
@@ -827,11 +943,47 @@ static void mic_task(void *arg)
 
     size_t bytes_read = 0;
     int fail_count = 0;
+    // 采集统计：iat_start 后服务端"无有效语音"时，靠这行判断是"没人说话"
+    // 还是"麦克风没数据/发送失败"（两种情况的修法完全不同）
+    int sent_frames = 0, loud_frames = 0, mic_peak = 0;
     // 动态节流：匹配音频实时采样率，避免突发发送填满 TCP 缓冲区
     // 1024 bytes @ 16kHz 16bit mono = 32ms 音频
     // 目标间隔 40ms（80% 实时率），给 WiFi 半双工留出接收 ACK 的时间窗口
     int64_t cycle_start = esp_timer_get_time();
     const int64_t target_interval_us = MIC_TARGET_INTERVAL_US;  // 40ms
+
+    // ── 打断预缓冲回灌 ──
+    // 打断触发到开麦之间差了 0.4~0.5 秒，而用户那句话早就在说了：判据本身要攒满
+    // 一个能量窗才敢确认"这不是自家回声"。不把这 1.5 秒补发出去，服务端收到的
+    // 就只是打断之后的静音（实测采集统计"人声帧 0"→"5s 无有效语音"）。
+    // 只有 VAD 实时打断会话取得到内容，正常唤醒/普通采集一律返回 0。
+    {
+        int preroll_samples = 0;
+        while (s_mic_running && websocket_is_connected()) {
+            int n = wakeup_preroll_take((int16_t *)buffer, MIC_CHUNK_SIZE / (int)sizeof(int16_t));
+            if (n <= 0) break;
+            bytes_read = (size_t)(n * sizeof(int16_t));
+            if (websocket_send_binary(buffer, bytes_read) != ESP_OK) {
+                ESP_LOGW(TAG, "麦克风: 预缓冲回灌发送失败，剩余部分丢弃");
+                break;
+            }
+            preroll_samples += n;
+            sent_frames++;
+            // 预缓冲也要进统计，否则"人声帧 0"会一直误导下一轮判断
+            const int16_t *pcm = (const int16_t *)buffer;
+            int peak = 0;
+            for (int i = 0; i < n; i++) {
+                int v = pcm[i] < 0 ? -pcm[i] : pcm[i];
+                if (v > peak) peak = v;
+            }
+            if (peak > mic_peak) mic_peak = peak;
+            if (peak >= 2000) loud_frames++;
+            vTaskDelay(pdMS_TO_TICKS(MIC_PREROLL_INTERVAL_MS));  // 3.2× 实时：别把 TCP 灌爆
+        }
+        if (preroll_samples > 0) {
+            ESP_LOGI(TAG, "打断预缓冲已回灌: %d 样本(约 %dms)", preroll_samples, preroll_samples / 16);
+        }
+    }
 
     while (s_mic_running) {
         esp_err_t ret = i2s_channel_read(s_mic_handle, buffer, MIC_CHUNK_SIZE, &bytes_read, pdMS_TO_TICKS(100));
@@ -850,6 +1002,16 @@ static void mic_task(void *arg)
                 }
             } else {
                 fail_count = 0;  // 成功则重置计数
+                sent_frames++;
+                const int16_t *pcm = (const int16_t *)buffer;
+                int n = (int)(bytes_read / sizeof(int16_t));
+                int peak = 0;
+                for (int i = 0; i < n; i++) {
+                    int v = pcm[i] < 0 ? -pcm[i] : pcm[i];
+                    if (v > peak) peak = v;
+                }
+                if (peak > mic_peak) mic_peak = peak;
+                if (peak >= 2000) loud_frames++;   // 约 -34dBFS，算"有人声"的一帧
             }
             // 动态节流：确保发送间隔 >= 40ms，给 WiFi 留出接收 TCP ACK 的窗口
             int64_t elapsed_us = esp_timer_get_time() - cycle_start;
@@ -860,6 +1022,8 @@ static void mic_task(void *arg)
         }
     }
 
+    ESP_LOGI(TAG, "采集统计: 已发 %d 帧(约 %dms 音频), 人声帧 %d, 峰值 %d, 发送失败 %d",
+             sent_frames, sent_frames * 32, loud_frames, mic_peak, fail_count);
     free(buffer);
     s_mic_running = false;  // 任务退出前必须清除，否则下一轮 iat_start 误判"已在运行"导致 ASR 无声
     s_mic_task_handle = NULL;
@@ -994,6 +1158,9 @@ esp_err_t audio_mic_start(void)
     s_mic_running = false;
 
     ESP_LOGI(TAG, "启动麦克风采集...");
+    // 重新持有 I2S 互斥锁保护 ASR 阶段（上一轮 ASR 结束时已放锁开启 TTS 打断窗口，
+    // afe_task 可能在窗口内读 RX 打断检测——先等它当前帧读完，≤35ms）
+    wakeup_i2s_mutex_reacquire();
     s_mic_running = true;
 
     BaseType_t ret = xTaskCreatePinnedToCore(
@@ -1028,6 +1195,23 @@ esp_err_t audio_mic_stop(void)
     ESP_LOGI(TAG, "停止麦克风采集...");
     s_mic_running = false;
 
+    // 【竞态修复】同步等待 mic_task 真正退出：
+    // mic_task 与唤醒 afe_task 共用同一个 I2S RX 通道，wakeup_resume 后 afe_task
+    // 会立刻开始读 RX。若 mic_task 还在最后一轮 i2s_channel_read（100ms 超时）中
+    // 未退出，两任务并发读同一通道会打坏 RX 的 DMA 描述符状态——实测表现为该轮
+    // 会话结束后 ASR 收不到声音、待机后 WakeNet 永远检不出唤醒词（且无错误日志），
+    // 只有复位才恢复（每轮对话后必复现）。
+    int wait_ms = 0;
+    while (s_mic_task_handle != NULL && wait_ms < 500) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        wait_ms += 20;
+    }
+    if (s_mic_task_handle != NULL) {
+        ESP_LOGW(TAG, "麦克风任务退出超时(%dms)，resume 后可能存在 RX 竞争", wait_ms);
+    }
+    // ASR 结束：释放 wakeup_pause 代持的 I2S 互斥锁，开启"TTS 打断窗口"
+    // （afe_task 此时开始读 RX 检测说话即打断/唤醒词打断，TTS 播放结束前无人再读）
+    wakeup_i2s_mutex_release();
     return ESP_OK;
 }
 

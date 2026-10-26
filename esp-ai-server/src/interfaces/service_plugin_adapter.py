@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import time
 from typing import Any, AsyncIterator
 
 from src.use_cases.pipeline import LLM_ERROR_PREFIX, llm_stream_error_token
@@ -44,6 +45,17 @@ logger = get_logger(__name__)
 
 # 工具调用最大轮数（执行工具后回传 LLM 继续生成）
 MAX_TOOL_ROUNDS = 10
+
+# TTS 插件合成超时（2026-10-26 "打断后卡住" 事故的直接防线）：
+# 打断会取消旧 pipeline，把它正在用的 TTS WS 连接归还连接池；若火山此时已静默
+# 关闭了那条连接，新的合成会拿到"不发数据也不报错"的死连接——插件 get_audio 每次
+# 只返回 done=False，轮询 while True 永不结束，pipeline 不产出也不收尾，设备就
+# 一直停在"播放中"等音频，服务端等 client_out_audio_over，两边互等到超时。
+# 这里给每条合成加硬上限：宁可直接放弃这一句（上层会跳过并收尾），也不能挂死会话。
+TTS_START_TIMEOUT_S = 8.0     # start_synthesis（建连 + 发送请求）上限
+TTS_CALL_TIMEOUT_S = 4.0      # 单次 get_audio RPC 上限
+TTS_IDLE_TIMEOUT_S = 6.0      # 连续这么久拿不到任何音频/字幕事件 → 判定死连接
+TTS_TOTAL_TIMEOUT_S = 45.0    # 单句合成硬上限（防慢速滴流把一轮对话拖死）
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -399,11 +411,20 @@ async def call_tts_synthesize(
     import base64
 
     # 1. 开始合成（支持沙箱和内置两种模式）
-    result = await _call_plugin_tool(
-        plugin_name, "start_synthesis",
-        {"text": text, "config": config or {}},
-        tool_manager,
-    )
+    try:
+        result = await asyncio.wait_for(
+            _call_plugin_tool(
+                plugin_name, "start_synthesis",
+                {"text": text, "config": config or {}},
+                tool_manager,
+            ),
+            timeout=TTS_START_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            f"[TTS Plugin] start_synthesis 超时 {TTS_START_TIMEOUT_S}s，放弃本句: {text[:30]}"
+        )
+        return
     if result is None:
         return
     try:
@@ -417,14 +438,37 @@ async def call_tts_synthesize(
     if not syn_id:
         return
 
-    # 2. 轮询获取音频/字幕事件
+    # 2. 轮询获取音频/字幕事件（带硬上限，见文件头 TTS_* 超时常量）
     try:
+        _deadline = time.monotonic() + TTS_TOTAL_TIMEOUT_S
+        _last_event = time.monotonic()
         while True:
-            chunk = await _call_plugin_tool(
-                plugin_name, "get_audio",
-                {"syn_id": syn_id},
-                tool_manager,
-            )
+            _now = time.monotonic()
+            if _now >= _deadline:
+                logger.error(
+                    f"[TTS Plugin] 合成超过 {TTS_TOTAL_TIMEOUT_S}s 硬上限，放弃本句: {text[:30]}"
+                )
+                break
+            if _now - _last_event > TTS_IDLE_TIMEOUT_S:
+                logger.error(
+                    f"[TTS Plugin] {TTS_IDLE_TIMEOUT_S}s 无任何合成事件"
+                    f"（连接疑似被服务端静默关闭），放弃本句: {text[:30]}"
+                )
+                break
+            try:
+                chunk = await asyncio.wait_for(
+                    _call_plugin_tool(
+                        plugin_name, "get_audio",
+                        {"syn_id": syn_id},
+                        tool_manager,
+                    ),
+                    timeout=TTS_CALL_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"[TTS Plugin] get_audio 超时 {TTS_CALL_TIMEOUT_S}s，放弃本句: {text[:30]}"
+                )
+                break
             try:
                 chunk_parsed = json.loads(chunk) if isinstance(chunk, str) else chunk
             except (json.JSONDecodeError, TypeError):
@@ -434,11 +478,16 @@ async def call_tts_synthesize(
                     break
                 subtitle = chunk_parsed.get("subtitle")
                 if subtitle:
+                    _last_event = time.monotonic()
                     yield TTSSynthEvent("subtitle", {"words": subtitle})
                     continue
                 audio_b64 = chunk_parsed.get("audio_base64", "")
                 if audio_b64:
+                    _last_event = time.monotonic()
                     yield TTSSynthEvent("audio", base64.b64decode(audio_b64))
+                else:
+                    # 空包（插件侧 recv 超时返回）——不计入"有进展"
+                    continue
             else:
                 break
     finally:

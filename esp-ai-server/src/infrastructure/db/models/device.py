@@ -93,6 +93,12 @@ class DeviceModel(Base, TimestampMixin):
     screensaver_enabled: Mapped[str] = mapped_column(String(8), default="true")
     screensaver_timeout: Mapped[str] = mapped_column(String(8), default="30")
 
+    # 唤醒灵敏度（WakeNet DET 阈值，字符串存储，0.4~0.9，越低越灵敏）
+    wake_sensitivity: Mapped[str] = mapped_column(String(8), default="0.55")
+
+    # 实时打断开关（"true"/"false"）：false = TTS 播放中说话不打断，仅唤醒词打断
+    vad_barge_in_enabled: Mapped[str] = mapped_column(String(8), default="true")
+
     # 运行时状态
     is_online: Mapped[bool] = mapped_column(Boolean, default=False)
     last_seen: Mapped[float] = mapped_column(Float, default=0.0)

@@ -1,4 +1,4 @@
-﻿#include "config.h"
+#include "config.h"
 #include "provisioning.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -341,6 +341,16 @@ void wifi_set_power_save(bool enable)
 /* 强制重建 WiFi 连接：清陈旧状态位 -> 断开 -> 重连（供 websocket 断线自愈调用） */
 void wifi_force_reconnect(void)
 {
+    // 配网模式下严禁触碰 STA 连接状态：esp_wifi_connect() 会把 STA 置为 connecting
+    // 中间态，导致配网页 /get_ssids 的 esp_wifi_scan_start 报 ESP_ERR_WIFI_STATE（页面转圈）
+    bool prov_mode;
+    taskENTER_CRITICAL(&s_wifi_lock);
+    prov_mode = s_provisioning_mode;
+    taskEXIT_CRITICAL(&s_wifi_lock);
+    if (prov_mode) {
+        ESP_LOGI(TAG, "配网模式中，跳过 force reconnect");
+        return;
+    }
     ESP_LOGW(TAG, "WiFi force reconnect (self-heal)");
     xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     esp_wifi_disconnect();

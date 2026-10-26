@@ -90,6 +90,11 @@ def build_env() -> dict:
     env["IDF_TOOLS_PATH"] = str(IDF6_ROOT)
     env["IDF_PYTHON_ENV_PATH"] = str(IDF6_VENV)
     env["IDF_CCACHE_ENABLE"] = "0"
+    # 关键：idf.py 6.0.2 检测到 MSYSTEM（Git Bash/MSYS 环境必有）时只打印
+    # "MSys/Mingw is no longer supported ... continue at your own risk" 警告，
+    # 然后什么都不做、以退出码 0 结束——build 步骤静默空转，打包的是旧产物。
+    # 从 PowerShell/cmd 构建不受影响；这里直接把该变量从子进程环境里去掉。
+    env.pop("MSYSTEM", None)
 
     clean = [p for p in env.get("PATH", "").split(";") if p and not _PATH_BLOCK_RE.search(p)]
     env["PATH"] = ";".join(
@@ -125,6 +130,16 @@ def detect_target() -> str:
     raise RuntimeError("无法从 sdkconfig 识别目标芯片，请用 --target 指定")
 
 
+def detect_prov_tag() -> str:
+    """从 sdkconfig 读取配网类型：AP(WiFi) 配网返回 'wifi'，BLE 返回 ''（产物名无标识）。"""
+    sdkconfig = PROJECT_DIR / "sdkconfig"
+    if sdkconfig.exists():
+        for line in sdkconfig.read_text(encoding="utf-8").splitlines():
+            if line.strip() == "CONFIG_PROV_TYPE_AP=y":
+                return "wifi"
+    return ""
+
+
 # ──────────────────────────────────────────────
 # 构建
 # ──────────────────────────────────────────────
@@ -154,10 +169,14 @@ def package(target: str, name: str, out_dir: Path, env: dict) -> tuple[Path, Pat
               f"{OTA_PARTITION_MAX / 1024 / 1024:.0f}MB，OTA 升级可能写失败！")
 
     commit = git_short_commit()
+    prov_tag = detect_prov_tag()
+    # WiFi(AP) 配网版产物名带 -wifi 标识：esp32s3-xiaoming-wifi-{commit}.bin
+    # BLE 版保持原名：esp32s3-xiaoming-{commit}.bin
+    name_with_tag = f"{name}-{prov_tag}" if prov_tag else name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) OTA 固件：纯 app 二进制
-    ota_path = out_dir / f"{target}-{name}-{commit}.bin"
+    ota_path = out_dir / f"{target}-{name_with_tag}-{commit}.bin"
     shutil.copy2(app_bin, ota_path)
     print(f"[ota ] {ota_path}  ({app_size / 1024 / 1024:.2f}MB)")
 
@@ -166,7 +185,7 @@ def package(target: str, name: str, out_dir: Path, env: dict) -> tuple[Path, Pat
     if layout is None:
         raise ValueError(f"不支持的芯片: {target}，可用: {list(MERGE_LAYOUT)}")
 
-    full_path = out_dir / f"{target}-{name}-{commit}-flash-all.bin"
+    full_path = out_dir / f"{target}-{name_with_tag}-{commit}-flash-all.bin"
     python_exe = IDF6_VENV / "Scripts" / "python.exe"
     cmd = [str(python_exe), "-m", "esptool", "--chip", target, "merge-bin", "-o", str(full_path)]
     missing = []
@@ -215,6 +234,7 @@ def main() -> int:
     print("=" * 60)
     print(f"  目标芯片 : {target}")
     print(f"  固件名称 : {args.name}")
+    print(f"  配网类型 : {detect_prov_tag() or 'ble'}")
     print(f"  输出目录 : {out_dir}")
     print("=" * 60)
 

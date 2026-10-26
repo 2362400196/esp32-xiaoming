@@ -704,6 +704,8 @@ class TestDictCompat:
             "management_api_key", "enabled_plugins", "plugin_configs",
             "has_display", "robot_mode",
             "screensaver_enabled", "screensaver_timeout",
+            "wake_sensitivity",
+            "vad_barge_in_enabled",
         }
         assert set(cfg.keys()) == expected_keys, (
             f"字段不一致: 多出 {set(cfg.keys()) - expected_keys}, "

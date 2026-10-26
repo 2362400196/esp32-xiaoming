@@ -20,6 +20,7 @@ from __future__ import annotations
 import time
 import asyncio
 import json
+import re
 import struct
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
@@ -1288,14 +1289,75 @@ def save_firmware_meta(meta: dict) -> None:
     )
 
 
-def get_active_firmware() -> Optional[dict]:
+def firmware_type_from_filename(filename: str) -> str:
+    """从固件文件名识别配网类型：build_firmware.py 对 WiFi(AP) 版输出 -wifi- 标识。
+
+    esp32s3-xiaoming-wifi-<commit>.bin → "wifi"；其余 → "ble"。
+    仅作为固件内嵌签名缺失时的兜底（老固件 / 手动改名文件）。
+    """
+    return "wifi" if "-wifi-" in filename else "ble"
+
+
+# 固件内嵌结构化签名（编译期由 CMake 注入固件 rodata，__attribute__((used)) 保证不被裁剪）：
+#   "esp-ai-fw:prov=wifi;board=esp32s3_breadboard_1.54_lcd;display=st7789_240;ver=062438e-dirty"
+# 服务端扫描上传的 bin 自动提取，不依赖文件名——用户用 idf.py 自己编译的产物也能正确识别。
+# 可扩展：固件侧追加 ;key=value 新标识即可，未知键原样保留，向后兼容。
+_FW_SIG_RE = re.compile(rb"esp-ai-fw:([\x20-\x7e]{10,200})")
+
+
+def extract_fw_signature(content: bytes) -> dict:
+    """扫描固件二进制提取结构化签名，返回 {prov, board, display, ver, ...}；提取不到返回空 dict。"""
+    m = _FW_SIG_RE.search(content[: 2 * 1024 * 1024])  # 签名在 app bin rodata 前部，扫前 2MB 足够
+    if not m:
+        return {}
+    sig: dict = {}
+    for part in m.group(1).decode("ascii", "ignore").split(";"):
+        if "=" not in part:
+            continue
+        k, _, v = part.partition("=")
+        k = k.strip()
+        v = v.strip()
+        if k and v:
+            sig[k] = v
+    return sig
+
+
+def firmware_type_from_signature_or_filename(sig: dict, filename: str) -> str:
+    """配网类型识别：优先固件内嵌签名的 prov 键，回退文件名 -wifi- 标识。"""
+    prov = sig.get("prov", "")
+    if prov in ("wifi", "ble"):
+        return prov
+    return firmware_type_from_filename(filename)
+
+
+def pick_active_slot_for_bin(device_bin_id: str) -> Optional[str]:
+    """根据设备上报的 bin_id 推断其固件类型槽位（ble/wifi）。
+
+    设备 bin_id 与某固件登记的 bin_id 一致 → 返回该固件类型（同类型旧版本也算命中）；
+    匹配不到（bin_id 为空 / 新编译未登记的固件）→ 返回 None，调用方按需兜底。
+    """
+    if not device_bin_id:
+        return None
+    meta = load_firmware_meta()
+    for filename, m in meta.items():
+        if m.get("bin_id") and m.get("bin_id") == device_bin_id:
+            return m.get("fw_type", firmware_type_from_filename(filename))
+    return None
+
+
+def get_active_firmware(fw_type: Optional[str] = None) -> Optional[dict]:
     """获取"启用中"的固件（OTA 无显式配置时的回退目标）。
 
-    返回 {filename, bin_id, version, download_url, size}，无启用固件返回 None。
+    fw_type="wifi"/"ble" 时只返回该配网类型的激活固件（BLE/WiFi 版固件分槽激活，互不干扰）；
+    fw_type=None 保持旧行为：返回任意激活固件（管理员强制升级等场景）。
+
+    返回 {filename, bin_id, version, download_url, size, fw_type}，无启用固件返回 None。
     """
     meta = load_firmware_meta()
     for filename, m in meta.items():
         if not m.get("active"):
+            continue
+        if fw_type and m.get("fw_type", "ble") != fw_type:
             continue
         info = get_firmware_info(filename)
         if not info:
@@ -1306,18 +1368,24 @@ def get_active_firmware() -> Optional[dict]:
             "version": m.get("version", ""),
             "download_url": info.download_url,
             "size": info.size,
+            "fw_type": m.get("fw_type", "ble"),
         }
     return None
 
 
 def set_active_firmware(filename: str) -> bool:
-    """设置启用中的固件（单选，其余取消启用）。文件不存在返回 False。"""
+    """设置启用中的固件（按配网类型分槽单选：激活 wifi 固件只取消其他 wifi 固件的激活，
+    ble 槽不受影响）。文件不存在返回 False。"""
     if not (FIRMWARE_DIR / filename).exists():
         return False
     meta = load_firmware_meta()
-    meta.setdefault(filename, {})
+    fw_type = firmware_type_from_filename(filename)
+    meta.setdefault(filename, {})["fw_type"] = fw_type
     for name, m in meta.items():
-        m["active"] = (name == filename)
+        # 只取消同类型固件的激活，另一类型槽位保持
+        if m.get("active") and m.get("fw_type", firmware_type_from_filename(name)) == fw_type:
+            m["active"] = False
+    meta[filename]["active"] = True
     save_firmware_meta(meta)
     return True
 
@@ -1359,6 +1427,11 @@ async def upload_firmware(
         info = get_firmware_info(safe_filename)
         if info and version:
             info.version = version
+
+        # 记录固件配网类型（从文件名识别，build_firmware.py 对 WiFi 版输出 -wifi- 标识）
+        meta = load_firmware_meta()
+        meta.setdefault(safe_filename, {})["fw_type"] = firmware_type_from_filename(safe_filename)
+        save_firmware_meta(meta)
 
         logger.info(f"[Firmware] Uploaded: {safe_filename}, size: {info.size if info else 0} bytes")
         return FirmwareListResponse(
@@ -2151,13 +2224,18 @@ async def sdk_query_new_ota(
     bin_id: str = Query(""),
     is_official: str = Query("0"),
     mac: str = Query(""),
+    prov_type: str = Query(""),
 ):
     """
     设备 OTA 更新查询接口
 
     ESP 客户端 auto_update() 调用此接口检查是否有新固件。
-    请求: GET /sdk/query_new_ota?version=1.0.0&bin_id=xxx&is_official=0&mac=xx:xx:xx:xx
+    请求: GET /sdk/query_new_ota?version=1.0.0&bin_id=xxx&is_official=0&mac=xx:xx:xx:xx&prov_type=ble
     响应: {"success": true, "data": {"latest": false, "bin_url": "http://..."}}
+
+    prov_type: 设备固件的配网类型（ble=蓝牙配网版 / wifi=AP热点配网版）。
+    服务端固件按类型分槽激活，BLE 版设备只匹配 BLE 槽激活固件，WiFi 版只匹配 WiFi 槽，
+    两种固件的升级检测互不干扰。旧固件不上报此参数时保持旧行为。
 
     判断优先级（从高到低）：
       1. 设备级 ota_bin_id（数据库中每设备独立）与客户端 bin_id 比对
@@ -2219,12 +2297,16 @@ async def sdk_query_new_ota(
     if not device_ota_enabled:
         return {"success": True, "data": {"latest": True, "bin_url": ""}}
 
-    # ── 2. 合并配置：设备级 → 固件管理"启用中"固件 → 全局环境变量 ──
+    # ── 2. 合并配置：设备级 → 固件管理"启用中"固件（按配网类型分槽） → 全局环境变量 ──
     global_bin_id = getattr(ota, 'bin_id', '') if ota else ''
     global_bin_url = getattr(ota, 'bin_url', '') if ota else ''
     global_version = getattr(ota, 'version', '') if ota else ''
 
-    active = get_active_firmware()
+    # 设备上报了配网类型（ble/wifi）→ 只匹配该类型的激活固件；
+    # 旧固件未上报 → fw_type=None，保持旧行为（任意激活固件）
+    prov_norm = prov_type.strip().lower()
+    matched_fw_type = prov_norm if prov_norm in ("ble", "wifi") else None
+    active = get_active_firmware(matched_fw_type)
     active_bin_id = (active or {}).get("bin_id", "")
     active_bin_url = (active or {}).get("download_url", "")
     active_version = (active or {}).get("version", "")
@@ -2239,8 +2321,12 @@ async def sdk_query_new_ota(
                     f"version='{effective_version}', url='{effective_bin_url}'")
 
     # 最终兜底：三者都为空时使用最新上传的固件文件
+    # 已知设备固件类型时只兜底同类型固件，避免把 BLE 版推给 WiFi 版设备（反之亦然）
     if not effective_bin_url:
         firmwares = list_firmwares()
+        if matched_fw_type:
+            firmwares = [f for f in firmwares
+                         if firmware_type_from_filename(f.filename) == matched_fw_type]
         if firmwares:
             effective_bin_url = firmwares[0].download_url
             logger.info(f"[SDK OTA] 使用本地固件: {firmwares[0].filename} -> {effective_bin_url}")

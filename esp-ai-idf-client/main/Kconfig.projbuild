@@ -1,7 +1,7 @@
 # ==================== 配网方式选择 ====================
 choice PROV_TYPE
     prompt "配网方式"
-    default PROV_TYPE_BLE
+    default PROV_TYPE_AP
 
     config PROV_TYPE_BLE
         bool "BLE 蓝牙配网 (NimBLE)"

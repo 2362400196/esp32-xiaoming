@@ -1,0 +1,161 @@
+[20:56:14.319] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [ToolManager] 可选插件「skill_system」未安装，隐藏工具 create_new_skill
+[20:56:14.319] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [ToolManager] 可选插件「skill_system」未安装，隐藏工具 delete_existing_skill
+[20:56:14.319] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [ToolManager] 可选插件「weather」未安装，隐藏工具 get_weather
+[20:56:14.320] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [ToolManager] 可选插件「weather」未安装，隐藏工具 test_weather_query
+[20:56:14.320] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [ToolManager] 可选插件「weather」未安装，隐藏工具 save_config
+[20:56:14.320] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [ToolManager] 可选插件「wechat_bot」未安装，隐藏工具 send_wechat_message
+[20:56:14.320] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [ToolManager] 可选插件「wechat_bot」未安装，隐藏工具 send_wechat_image
+[20:56:14.320] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [ToolManager] 可选插件「wechat_bot」未安装，隐藏工具 get_wechat_binding_status
+[20:56:14.320] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [ToolManager] 可选插件「wechat_bot」未安装，隐藏工具 list_wechat_bindings
+[20:56:14.321] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [ToolManager] 可选插件「wechat_bot」未安装，隐藏工具 get_wechat_qr_login_status
+[20:56:14.323] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [ToolRetriever] 索引已重建: 40 个工具, 核心工具白名单 5 个
+[20:56:14.323] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [ToolRetriever] 非核心强匹配仅 2 个 (< 3)，弱信号查询回退全部工具 (query: 换一个故事)
+[20:56:14.325] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] 4-Worker 已启动
+[20:56:14.346] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'on_iat_cb', 'data': '换一个故事'}
+[20:56:14.601] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:18.681] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS 合成 #0: 镇上中段，...
+[20:56:18.681] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #0 5字(中4英0), 估 1170ms
+[20:56:18.763] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'on_llm_cb', 'data': '{"text": "镇上中段，", "duration_ms": 1170, "seq": 0}'}
+[20:56:18.817] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:18.920] [INFO] [-|-|-] [插件沙箱] 插件 tts_volcengine 获取 WebSocket 连接: ws_tts_volcengine_246（连接池复用）
+[20:56:19.345] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'play_audio', 'tts_task_id': '0010'}
+[20:56:19.371] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] 发送 play_audio + tts_chunk_start，device_buffer=51200
+[20:56:19.649] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #0 字幕 4 字, 流基准 0ms
+[20:56:19.657] [INFO] [-|-|-] [插件沙箱] 插件 tts_volcengine 归还 WebSocket 到连接池: ws_tts_volcengine_246
+[20:56:19.658] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #0 实际时长: 1170ms → 1260ms, 累计 1260.0ms
+[20:56:19.658] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS 合成 #1: 邮电所斜对面，有个修伞的，姓赵。...
+[20:56:19.658] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #1 16字(中13英0), 估 3890ms
+[20:56:19.666] [INFO] [-|-|-] [插件沙箱] 插件 tts_volcengine 获取 WebSocket 连接: ws_tts_volcengine_247
+[20:56:19.720] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'tts_subtitle', 'data': '{"seq": 0, "words": [{"word": "镇", "start_ms": 0, "end_ms": 185}, {"word": "上", "start_ms": 185, "end_ms": 365}, {"word": "中", "start_ms": 3
+[20:56:19.720] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'tts_duration', 'data': '{"seq": 0, "duration_ms": 1260}'}
+[20:56:19.720] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'on_llm_cb', 'data': '{"text": "邮电所斜对面，有个修伞的，姓赵。", "duration_ms": 3890, "seq": 1}'}
+[20:56:19.739] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:19.783] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:19.783] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:20.897] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #1 字幕 13 字, 流基准 1260ms
+[20:56:20.907] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'tts_subtitle', 'data': '{"seq": 1, "words": [{"word": "邮", "start_ms": 1345, "end_ms": 1525}, {"word": "电", "start_ms": 1525, "end_ms": 1795}, {"word": "所", "start_
+[20:56:20.915] [INFO] [-|-|-] [插件沙箱] 插件 tts_volcengine 归还 WebSocket 到连接池: ws_tts_volcengine_247
+[20:56:20.917] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #1 实际时长: 3890ms → 3672ms, 累计 4932.0ms
+[20:56:20.918] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS 合成 #4: 他不摆摊，就靠着自己家门框坐着，屋檐底下搁一条板凳，凳上放着钳子、细铁丝、一小罐桐油。...
+[20:56:20.918] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #4 43字(中37英0), 估 9660ms
+[20:56:20.932] [INFO] [-|-|-] [插件沙箱] 插件 tts_volcengine 获取 WebSocket 连接: ws_tts_volcengine_248
+[20:56:20.969] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:21.002] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'tts_duration', 'data': '{"seq": 1, "duration_ms": 3672}'}
+[20:56:21.002] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'on_llm_cb', 'data': '{"text": "他不摆摊，就靠着自己家门框坐着，屋檐底下搁一条板凳，凳上放着钳子、细铁丝、一小罐桐油。", "duration_ms": 9660, "seq": 4}'}
+[20:56:21.011] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:21.021] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:22.162] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #4 字幕 14 字, 流基准 4932ms
+[20:56:22.174] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'tts_subtitle', 'data': '{"seq": 4, "words": [{"word": "他", "start_ms": 4932, "end_ms": 5087}, {"word": "不", "start_ms": 5087, "end_ms": 5227}, {"word": "摆", "start_
+[20:56:22.269] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:22.449] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #4 字幕 9 字, 流基准 4932ms
+[20:56:22.456] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'tts_subtitle', 'data': '{"seq": 4, "words": [{"word": "屋", "start_ms": 8437, "end_ms": 8467}, {"word": "檐", "start_ms": 8467, "end_ms": 8587}, {"word": "底", "start_
+[20:56:22.530] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:22.989] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #4 字幕 14 字, 流基准 4932ms
+[20:56:23.005] [INFO] [-|-|-] [插件沙箱] 插件 tts_volcengine 归还 WebSocket 到连接池: ws_tts_volcengine_248
+[20:56:23.008] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #4 实际时长: 9660ms → 9108ms, 累计 14040.0ms
+[20:56:23.008] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS 合成 #10: 没有招牌，只在门板上用粉笔写了一行：雨天坏的我修，晴天的我不看。...
+[20:56:23.008] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #10 32字(中28英0), 估 7340ms
+[20:56:23.017] [INFO] [-|-|-] [插件沙箱] 插件 tts_volcengine 获取 WebSocket 连接: ws_tts_volcengine_249
+[20:56:23.079] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'tts_subtitle', 'data': '{"seq": 4, "words": [{"word": "凳", "start_ms": 10312, "end_ms": 10387}, {"word": "上", "start_ms": 10387, "end_ms": 10577}, {"word": "放", "st
+[20:56:23.079] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'tts_duration', 'data': '{"seq": 4, "duration_ms": 9108}'}
+[20:56:23.080] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'on_llm_cb', 'data': '{"text": "没有招牌，只在门板上用粉笔写了一行：雨天坏的我修，晴天的我不看。", "duration_ms": 7340, "seq": 10}'}
+[20:56:23.107] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:23.156] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:23.156] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:24.818] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #10 字幕 28 字, 流基准 14040ms
+[20:56:24.827] [INFO] [-|-|-] [插件沙箱] 插件 tts_volcengine 归还 WebSocket 到连接池: ws_tts_volcengine_249
+[20:56:24.829] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #10 实际时长: 7340ms → 6480ms, 累计 20520.0ms
+[20:56:24.829] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS 合成 #14: 有人头一回见，就问，伞不就是雨天坏的？...
+[20:56:24.829] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #14 19字(中16英0), 估 4580ms
+[20:56:24.837] [INFO] [-|-|-] [插件沙箱] 插件 tts_volcengine 获取 WebSocket 连接: ws_tts_volcengine_250
+[20:56:24.908] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'tts_subtitle', 'data': '{"seq": 10, "words": [{"word": "没", "start_ms": 14085, "end_ms": 14305}, {"word": "有", "start_ms": 14305, "end_ms": 14355}, {"word": "招", "s
+[20:56:24.909] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'tts_duration', 'data': '{"seq": 10, "duration_ms": 6480}'}
+[20:56:24.909] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'on_llm_cb', 'data': '{"text": "有人头一回见，就问，伞不就是雨天坏的？", "duration_ms": 4580, "seq": 14}'}
+[20:56:24.993] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:24.993] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:24.994] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:25.486] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] Received start command
+[20:56:25.486] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] Cancelling old pipeline on new start
+[20:56:25.488] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] Barge-in start: 跳过唤醒问候语，立刻开麦
+[20:56:25.489] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] 被取消
+[20:56:25.490] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] cancel_event 已设置，跳过 end_frame/tts_real_end
+[20:56:25.490] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] 总音频时长: 20520.0ms (20.5s)
+[20:56:25.490] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] 插件 ASR 流式识别已启动
+[20:56:25.493] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] Pipeline cancelled externally
+[20:56:25.494] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] Pipeline 无音频输出 (cancelled=True), 跳过 TTS 播放等待
+[20:56:25.494] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] 
+════════════════════════════════════════════════════════════════
+[Perf] 对话性能报告  session=7c4ec2da  device=bound_6b393bc9e3  ⚠️ 本轮被中断（无完整 result，部分指标缺失）
+  用户输入 : ""
+  LLM 生成 : n/a   (首token n/a, 输出 0字/0句)
+  TTS 合成 : n/a   (0块, 共0ms音频)
+  Prompt组装: 1ms  (system 2746字/含历史 6075字)
+  Pipeline : n/a   (总耗时)
+  端到端   : 4ms   (ASR开始→播放完成)
+  回复     : ""
+════════════════════════════════════════════════════════════════
+[20:56:25.494] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Growth] 已启动成长任务冷却定时器（300秒）: bound_6b393bc9e3
+[20:56:25.505] [INFO] [-|-|-] [插件沙箱] 插件 tts_volcengine 归还 WebSocket 到连接池: ws_tts_volcengine_250
+[20:56:25.511] [INFO] [-|-|-] [插件沙箱] 插件 asr_volcengine 获取 WebSocket 连接: ws_asr_volcengine_70（连接池复用）
+[20:56:25.513] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] LLM 结束，共 153 句，full_text=1059字符
+[20:56:25.519] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] 插件 ASR 会话已就绪，开始监听
+[20:56:25.524] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Billing] 会话 7c4ec2da 计费: ASR 0.1分钟/0.001057元, LLM 输入0(缓存命中0)/输出0tokens/0.0元（谷时）, TTS 115字/0.0575元, 合计 0.058557元
+[20:56:25.525] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] Already in ASR state, skip
+[20:56:25.647] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] iat_start sent (no wake audio)
+[20:56:25.650] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'session_start', 'session_id': '0001'}
+[20:56:26.079] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Keepalive] bound_6b: 1120 times
+[20:56:26.178] [INFO] [-|-|-] [插件沙箱] 插件 asr_volcengine 预热 2 个 WebSocket 连接
+[20:56:26.253] [INFO] [-|-|-] [插件沙箱] 插件 asr_volcengine 预热 1 个 WebSocket 连接
+[20:56:26.255] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [PluginASR] 设备连接预热 1 个 ASR 连接
+[20:56:26.539] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [PluginASR] 识别: 他
+[20:56:26.619] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'on_iat_cb', 'data': '他'}
+[20:56:26.677] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:26.711] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [PluginASR] 识别: 他不摆摊
+[20:56:26.827] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'on_iat_cb', 'data': '他不摆摊'}
+[20:56:26.889] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:26.917] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [PluginASR] 识别完成
+[20:56:26.921] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [VAD] ASR final text: 他不摆摊
+[20:56:27.013] [INFO] [-|-|-] [插件沙箱] 插件 asr_volcengine 关闭 WebSocket 连接: ws_asr_volcengine_70
+[20:56:27.014] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [PluginASR] 关闭会话，补取最终文本: 他不摆摊
+[20:56:27.045] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] run() 被调用, iat_text='他不摆摊', ltm=有
+[20:56:27.046] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] Waiting for pipeline to complete...
+[20:56:27.046] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [ToolRetriever] 非核心强匹配仅 1 个 (< 2)，弱信号查询回退全部工具 (query: 他不摆摊)
+[20:56:27.047] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] 自动注入 41 条相关记忆
+[20:56:27.047] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] prompt 组装完成: 2ms（含 skill/记忆/画像目录）
+[20:56:27.047] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Memory] 构建消息: system(1) + history(20, 过滤0条后有效20) + user(1) = 22 条
+[20:56:27.047] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [ToolRetriever] 非核心强匹配仅 0 个 (< 3)，弱信号查询回退全部工具 (query: 他不摆摊)
+[20:56:27.049] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] 4-Worker 已启动
+[20:56:27.097] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'on_iat_cb', 'data': '他不摆摊'}
+[20:56:27.157] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:28.496] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS 合成 #0: 是说陈师傅不摆摊的时候？...
+[20:56:28.497] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #0 12字(中11英0), 估 2930ms
+[20:56:28.503] [INFO] [-|-|-] [插件沙箱] 插件 tts_volcengine 获取 WebSocket 连接: ws_tts_volcengine_251
+[20:56:28.519] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'on_llm_cb', 'data': '{"text": "是说陈师傅不摆摊的时候？", "duration_ms": 2930, "seq": 0}'}
+[20:56:28.520] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'play_audio', 'tts_task_id': '0010'}
+[20:56:28.532] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:28.544] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #0 字幕 16 字, 流基准 0ms
+[20:56:28.550] [INFO] [-|-|-] [插件沙箱] 插件 tts_volcengine 归还 WebSocket 到连接池: ws_tts_volcengine_251
+[20:56:28.553] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #0 实际时长: 2930ms → 3865ms, 累计 3865.0ms
+[20:56:28.565] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] 发送 play_audio + tts_chunk_start，device_buffer=51200
+[20:56:28.566] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'tts_subtitle', 'data': '{"seq": 0, "words": [{"word": "有", "start_ms": 0, "end_ms": 115}, {"word": "人", "start_ms": 115, "end_ms": 245}, {"word": "头", "start_ms": 2
+[20:56:28.566] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'tts_duration', 'data': '{"seq": 0, "duration_ms": 3865}'}
+[20:56:28.635] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS 合成 #1: 故事里没写，大概就是修修鞋、发发呆吧。...
+[20:56:28.635] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #1 19字(中16英0), 估 4330ms
+[20:56:28.639] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:28.639] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:28.642] [INFO] [-|-|-] [插件沙箱] 插件 tts_volcengine 获取 WebSocket 连接: ws_tts_volcengine_252
+[20:56:28.649] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] LLM 结束，共 4 句，full_text=31字符
+[20:56:28.649] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] 记忆检查: mem_enabled=True full_text_len=31 conv_mem=True _msgs=20 repo=True
+[20:56:28.649] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] 记忆: messages共22条, user_msg_len=4
+[20:56:28.649] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Memory] 已保存 user 消息，当前共 21 条
+[20:56:28.650] [WARNING] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Memory] 历史消息超限(20)，移除最早: role=user
+[20:56:28.650] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Memory] 已保存 assistant 消息，当前共 21 条
+[20:56:28.650] [WARNING] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Memory] 历史消息超限(20)，移除最早: role=assistant
+[20:56:28.661] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'on_llm_cb', 'data': '{"text": "故事里没写，大概就是修修鞋、发发呆吧。", "duration_ms": 4330, "seq": 1}'}
+[20:56:28.697] [INFO] [-|-|-] [插件沙箱] 插件 tts_volcengine 归还 WebSocket 到连接池: ws_tts_volcengine_252
+[20:56:28.856] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:28.947] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] Sender 结束，5帧/11067B
+[20:56:29.010] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] 已发送 end_frame + tts_real_end
+[20:56:29.011] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] 总音频时长: 8195.0ms (8.2s)
+[20:56:29.011] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] Pipeline completed, audio_duration=8.2s, dynamic_timeout=42.3s, waiting for TTS playback done
+[20:56:29.012] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Growth] 已启动成长任务冷却定时器（300秒）: bound_6b393bc9e3

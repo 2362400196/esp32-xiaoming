@@ -111,6 +111,10 @@ def _dict_to_model_fields(device_id: str, config: dict) -> dict:
         "robot_mode": config.get("robot_mode", "false"),
         "screensaver_enabled": config.get("screensaver_enabled", "true"),
         "screensaver_timeout": config.get("screensaver_timeout", "30"),
+        # 唤醒灵敏度
+        "wake_sensitivity": config.get("wake_sensitivity", "0.55"),
+        # 实时打断开关（"true"/"false"，false = 仅唤醒词打断）
+        "vad_barge_in_enabled": config.get("vad_barge_in_enabled", "true"),
         # 限流技能列表
         "skills": config.get("skills") or [],
         # 表情包 / 运行时状态
@@ -174,6 +178,10 @@ def _model_to_dict(model: DeviceModel) -> dict:
         "robot_mode": model.robot_mode or "false",
         "screensaver_enabled": model.screensaver_enabled or "true",
         "screensaver_timeout": model.screensaver_timeout or "30",
+        # 唤醒灵敏度
+        "wake_sensitivity": model.wake_sensitivity or "0.55",
+        # 实时打断开关（"true"/"false"，false = 仅唤醒词打断）
+        "vad_barge_in_enabled": model.vad_barge_in_enabled or "true",
         # 技能
         "skills": list(model.skills or []),
     }

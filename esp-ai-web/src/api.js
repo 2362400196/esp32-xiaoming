@@ -178,6 +178,8 @@ getActiveEmoPack: (deviceId) => request('/api/v1/emos/active/' + encodeURICompon
     request('/api/v1/devices/' + encodeURIComponent(id) + '/action', 'POST', { action, text }),
   setRobotMode: (mac, enabled) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/robot_mode', 'POST', { enabled }),
   setDisplayConfig: (mac, config) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/display_config', 'POST', config),
+  setWakeSensitivity: (mac, value) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/wake_sensitivity', 'POST', { value }),
+  setVadBargeIn: (mac, enabled) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/vad_barge_in_enabled', 'POST', { enabled }),
     // 管理员后台
     adminStats: () => request('/api/v1/admin/stats'),
     adminUsers: () => request('/api/v1/admin/users'),

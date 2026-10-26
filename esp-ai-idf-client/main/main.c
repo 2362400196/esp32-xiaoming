@@ -122,9 +122,13 @@ static void handle_wakeup(void)
     // 不在此处启动麦克风！与 Arduino 一致：
     // Arduino wakeUp 只 open_mic()（硬件切换），不设 esp_ai_start_send_audio
     // 麦克风采集在 iat_start 时启动
-    esp_err_t ret = websocket_send_text("{\"type\":\"start\"}");
+    // VAD 实时打断必须带上 source：服务端收到后要跳过唤醒问候语直接开麦，
+    // 否则"我在呢"这 1.4~2.1 秒里用户说的话全被丢掉
+    bool barge_in = wakeup_take_barge_in();
+    esp_err_t ret = websocket_send_text(barge_in ? "{\"type\":\"start\",\"source\":\"vad_barge_in\"}"
+                                                 : "{\"type\":\"start\"}");
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "已发送唤醒消息到服务器");
+        ESP_LOGI(TAG, "已发送唤醒消息到服务器%s", barge_in ? "（VAD 实时打断）" : "");
         s_wakeup_trigger_tick = xTaskGetTickCount();
         // 启动唤醒响应超时检测：若 10 秒未收到服务端任何数据(半开连接)，自动重连
         websocket_mark_wakeup_sent();
@@ -221,6 +225,7 @@ void app_main(void)
     // 服务端消息内容（含用户语音识别文本）的模块只在显式 DEBUG 构建中放开，
     // 生产模式保持 esp_log_level_set("*", ESP_LOG_WARN) 的全局设置
     esp_log_level_set("wifi", ESP_LOG_INFO);     // WiFi 连接过程（重试、断开原因）
+    esp_log_level_set("provisioning", ESP_LOG_INFO);  // 配网流程（AP 配网后台扫描、HTTP 请求）
     // 初始化阶段的内存诊断（各阶段剩余堆），生产模式也保持 INFO 可见
     esp_log_level_set("main", ESP_LOG_INFO);
     esp_log_level_set("audio", ESP_LOG_INFO);
@@ -381,7 +386,7 @@ void app_main(void)
                      esp_err_to_name(es_err));
             display_show_status("音频初始化中...");
         } else {
-            es8311_set_mic_gain(36);   // 麦克风增益 36dB（从 24dB 提升，进一步改善唤醒灵敏度；最高 42dB）
+            es8311_set_mic_gain(MIC_GAIN_DB);   // 麦克风增益：见 config.h MIC_GAIN_DB（削顶/AEC 取舍说明）
         }
     }
 #endif

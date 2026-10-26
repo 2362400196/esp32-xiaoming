@@ -1,0 +1,11 @@
+{
+  "esp32s3-1.2.0.bin": {
+    "bin_id": "bin-newer",
+    "version": "1.2.0",
+    "fw_type": "ble",
+    "fw_sig": {},
+    "uploaded_by": "admin@test.local",
+    "uploaded_at": 1793020744.3219223,
+    "active": false
+  }
+}

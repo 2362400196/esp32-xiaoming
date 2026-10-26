@@ -727,6 +727,79 @@ async def api_set_robot_mode(mac: str, body: dict = Body(...), user: UserModel =
     return {"code": 0, "message": "ok", "data": {"robot_mode": enabled}}
 
 
+@router.post("/devices/{mac}/wake_sensitivity")
+async def api_set_wake_sensitivity(mac: str, body: dict = Body(...), user: UserModel = Depends(get_current_user)):
+    """设置设备唤醒灵敏度（WakeNet DET 阈值 0.4~0.9，越低越灵敏、误唤醒率越高）"""
+    if not await _check_device_owner(mac, user):
+        raise HTTPException(403, "Device not bound to you")
+
+    try:
+        value = float(body.get("value", 0.55))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "value must be a number")
+    # 合法范围与固件 wakeup.c 约定一致：0.4~0.9
+    value = max(0.4, min(0.9, value))
+    value_str = f"{value:.2f}"
+
+    from src.infrastructure.db.repositories.device_repository import DeviceRepository
+    repo = DeviceRepository()
+    result = await repo.update_device_partial(mac, {"wake_sensitivity": value_str})
+    if result is None:
+        logger.warning(f"[API] wake_sensitivity 设置失败，设备 {mac} 未找到")
+        return {"code": 1, "message": "Device not found", "data": None}
+
+    # 通过 WebSocket 下发 update_config 指令，设备立即生效（无需重启）
+    try:
+        registry = get_device_registry()
+        if registry:
+            d = registry.resolve(mac)
+            if not d:
+                d = registry.get_by_mac(mac)
+            if d:
+                tool_mgr = d.get("tool_manager")
+                if tool_mgr:
+                    from src.use_cases._plugin_helpers import send_device_command
+                    await send_device_command(tool_mgr, "update_config", {"wake_sensitivity": value_str})
+    except Exception as e:
+        logger.warning(f"[API] 下发 wake_sensitivity 指令失败: {e}")
+
+    return {"code": 0, "message": "ok", "data": {"wake_sensitivity": value_str}}
+
+
+@router.post("/devices/{mac}/vad_barge_in_enabled")
+async def api_set_vad_barge_in_enabled(mac: str, body: dict = Body(...), user: UserModel = Depends(get_current_user)):
+    """设置设备实时打断开关（false = TTS 播放中说话不打断，仅唤醒词打断）"""
+    if not await _check_device_owner(mac, user):
+        raise HTTPException(403, "Device not bound to you")
+
+    enabled = bool(body.get("enabled", True))
+    enabled_str = "true" if enabled else "false"
+
+    from src.infrastructure.db.repositories.device_repository import DeviceRepository
+    repo = DeviceRepository()
+    result = await repo.update_device_partial(mac, {"vad_barge_in_enabled": enabled_str})
+    if result is None:
+        logger.warning(f"[API] vad_barge_in_enabled 设置失败，设备 {mac} 未找到")
+        return {"code": 1, "message": "Device not found", "data": None}
+
+    # 通过 WebSocket 下发 update_config 指令，设备立即生效（无需重启）
+    try:
+        registry = get_device_registry()
+        if registry:
+            d = registry.resolve(mac)
+            if not d:
+                d = registry.get_by_mac(mac)
+            if d:
+                tool_mgr = d.get("tool_manager")
+                if tool_mgr:
+                    from src.use_cases._plugin_helpers import send_device_command
+                    await send_device_command(tool_mgr, "update_config", {"vad_barge_in_enabled": enabled_str})
+    except Exception as e:
+        logger.warning(f"[API] 下发 vad_barge_in_enabled 指令失败: {e}")
+
+    return {"code": 0, "message": "ok", "data": {"vad_barge_in_enabled": enabled}}
+
+
 # ============================================================
 #  设备显示配置 API（机器人模式 + 屏保）
 # ============================================================

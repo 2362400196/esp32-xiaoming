@@ -381,11 +381,17 @@ async def tts_volcengine_get_audio(syn_id: str, tool_manager=None) -> dict:
 
 @tool(cache=False)
 async def tts_volcengine_end_synthesis(syn_id: str, tool_manager=None) -> dict:
-    """清理 TTS 合成会话，将连接归还框架连接池供后续句子复用。"""
+    """清理 TTS 合成会话。
+
+    正常收完（收到 SessionFinished 等结束事件）才把连接归还池里复用；
+    中途被打断（用户 barge-in 取消旧 pipeline）或超时放弃创建的会话，
+    连接上还有未读完的音频帧/对端可能已静默关闭，复用它会拿到
+    "收不到数据也不报错"的死连接，所以这类连接直接丢弃、真正关闭。
+    """
     session = _sessions.pop(syn_id, None)
     if session:
         try:
-            await ws_close(session["ws_id"])
+            await ws_close(session["ws_id"], discard=not session.get("done", False))
         except Exception:
             pass
     return {}

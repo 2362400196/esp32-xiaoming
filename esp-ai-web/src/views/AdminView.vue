@@ -1,4 +1,4 @@
-﻿<template>
+﻿﻿﻿﻿<template>
   <div class="admin-layout">
     <!-- 左侧边栏 -->
     <aside class="admin-sidebar">
@@ -350,6 +350,10 @@
                         <p class="cell-title">{{ d.owner_nickname || d.owner_email }}</p>
                         <p class="cell-sub">{{ d.owner_nickname ? d.owner_email : '' }}</p>
                       </template>
+                      <template v-else-if="d.bind_code && d.bind_code !== 'BOUND' && d.bind_code_expires * 1000 > Date.now()">
+                        <span class="badge badge-mint">配对码 {{ d.bind_code }}</span>
+                        <p class="cell-sub">未绑定 · {{ Math.max(0, Math.ceil(d.bind_code_expires * 1000 - Date.now()) / 60000).toFixed(0) }} 分钟后过期</p>
+                      </template>
                       <span v-else class="badge badge-sub">未绑定</span>
                     </td>
                     <td data-label="状态">
@@ -582,7 +586,7 @@
           <div class="action-bar">
             <div class="action-info">
               <p class="action-title">固件上传</p>
-              <p class="action-sub">上传固件并登记 bin_id，上传后自动设为「启用中」，作为设备 OTA 自检的比对目标</p>
+              <p class="action-sub">上传固件并登记 bin_id，从文件名自动识别类型（含 -wifi- 为 WiFi 配网版）；上传后自动启用到对应类型槽位</p>
             </div>
           </div>
           <div class="table-card" style="margin-bottom:14px">
@@ -609,7 +613,7 @@
             <div class="table-head">
               <div>
                 <h3 class="table-title">固件列表</h3>
-                <p class="table-sub">「启用中」的固件作为设备 OTA 自检的比对目标；设备检测到 bin_id 或版本不同即自动升级</p>
+                <p class="table-sub">固件按配网方式分为「蓝牙版 / WiFi 版」两个独立槽位，各自可启用一个；设备 OTA 自检只与同类型槽位的固件比对，两种版本互不干扰</p>
               </div>
               <button class="btn btn-ghost" :disabled="loadingFirmwares" @click="loadFirmwares">刷新</button>
             </div>
@@ -631,18 +635,22 @@
                 </thead>
                 <tbody>
                   <tr v-for="f in firmwares" :key="f.filename">
-                    <td data-label="固件"><strong>{{ f.filename }}</strong></td>
+                    <td data-label="固件">
+                      <strong>{{ f.filename }}</strong>
+                      <span class="fw-type-badge" :class="f.fw_type === 'wifi' ? 'fw-wifi' : 'fw-ble'">{{ f.fw_type === 'wifi' ? 'WiFi 版' : '蓝牙版' }}</span>
+                      <span v-if="f.fw_sig?.board" class="fw-type-badge fw-board" :title="`板卡：${f.fw_sig.board}，屏幕：${f.fw_sig.display || '未知'}`">{{ f.fw_sig.display && f.fw_sig.display !== 'none' ? f.fw_sig.display : '无屏' }}</span>
+                    </td>
                     <td data-label="bin_id"><span class="cell-sub">{{ f.bin_id || '—' }}</span></td>
                     <td data-label="版本">{{ f.version || '—' }}</td>
                     <td data-label="大小">{{ formatSize(f.size) }}</td>
                     <td data-label="上传者">{{ f.uploaded_by || '—' }}</td>
                     <td data-label="上传时间" class="cell-muted">{{ formatDate(f.uploaded_at || f.created_time) }}</td>
                     <td data-label="状态">
-                      <span class="badge" :class="f.active ? 'badge-mint' : 'badge-sub'">{{ f.active ? '启用中' : '备用' }}</span>
+                      <span class="badge" :class="f.active ? 'badge-mint' : 'badge-sub'">{{ f.active ? (f.fw_type === 'wifi' ? 'WiFi 槽启用中' : '蓝牙槽启用中') : '备用' }}</span>
                     </td>
                     <td data-label="操作">
                       <div class="row-actions">
-                        <button v-if="!f.active" class="btn btn-ghost btn-xs" @click="setFirmwareActive(f)">设为启用</button>
+                        <button v-if="!f.active" class="btn btn-ghost btn-xs" :title="`启用到${f.fw_type === 'wifi' ? 'WiFi' : '蓝牙'}槽（不影响另一槽）`" @click="setFirmwareActive(f)">设为启用</button>
                         <a class="btn btn-ghost btn-xs" :href="f.download_url" target="_blank">下载</a>
                         <button class="btn btn-danger btn-xs" @click="deleteFirmware(f)">删除</button>
                       </div>
@@ -3042,6 +3050,17 @@ tbody tr:hover { background: var(--mint-softer); }
 .badge-mint { background: var(--mint-soft); color: var(--mint-deep); border: 1px solid var(--mint-border); }
 .badge-sub { background: var(--glass-bg-strong); color: var(--text-sub); border: 1px solid var(--glass-border); }
 .badge-danger { background: var(--danger-soft); color: var(--danger); border: 1px solid rgba(239,68,68,.2); }
+/* 固件类型小徽标（蓝牙版 / WiFi 版） */
+.fw-type-badge {
+  display: inline-block; vertical-align: 1px;
+  margin-left: 8px; padding: 1px 8px;
+  font-size: 11px; font-weight: 600; line-height: 16px;
+  border-radius: 999px; white-space: nowrap;
+}
+.fw-type-badge.fw-ble { background: var(--glass-bg-strong); color: var(--text-sub); border: 1px solid var(--glass-border); }
+.fw-type-badge.fw-wifi { background: rgba(102,192,244,.12); color: #2b8bc0; border: 1px solid rgba(102,192,244,.3); }
+/* 板卡/屏幕型号徽标（来自固件内嵌签名 esp-ai-fw:） */
+.fw-type-badge.fw-board { background: rgba(52,211,153,.1); color: var(--mint-deep, #0d9488); border: 1px solid rgba(52,211,153,.3); }
 .badge .dot {
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--text-dim);

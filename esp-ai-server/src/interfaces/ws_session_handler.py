@@ -738,7 +738,13 @@ class WebSocketSessionHandler:
             # 基础 30s + 已合成音频时长×1.5 + 15s 余量，
             # 避免长故事/长回答（LLM 10s + 串行 TTS 合成 + 音频按播放速率发送）被 30s 硬超时误杀。
             _pipeline = session._current_pipeline
-            _deadline = time.time() + 30.0
+            _started = time.time()
+            _deadline = _started + 30.0
+            # 绝对上限：无论音频产出多少，本轮 pipeline 最多等 300s。
+            # 见下方"只在有进展时续期"的说明——没有这条上限，续期逻辑本身能把
+            # 一轮已卡死的 pipeline 无限续命。
+            _hard_deadline = _started + 300.0
+            _last_est_audio_s = 0.0
             result = None
             try:
                 while True:
@@ -761,14 +767,23 @@ class WebSocketSessionHandler:
                         )
                         break
                     except asyncio.TimeoutError:
-                        # 每 5s 检查一次：若 TTS 仍在产出音频，按已合成时长延长 deadline
+                        # 每 1s 检查一次：只有"确实又产出了更多音频"才算有进展，才允许延期。
+                        # 旧实现只要 _total_duration_ms > 0 就每秒续一次，pipeline 卡在
+                        # TTS 死连接上（音频不再增长）时会永远等不到超时——设备停在
+                        # "播放中"，服务端空转（2026-10-26 打断后卡住实测就是这个）。
                         _est_audio_s = 0.0
                         if _pipeline is not None:
                             _est_audio_s = getattr(_pipeline, "_total_duration_ms", 0) / 1000.0
-                        if _est_audio_s > 0:
+                        if _est_audio_s > _last_est_audio_s + 0.05:
+                            _last_est_audio_s = _est_audio_s
                             _new_deadline = time.time() + max(30.0, _est_audio_s * 1.5 + 15.0)
                             if _new_deadline > _deadline:
-                                _deadline = _new_deadline
+                                _deadline = min(_new_deadline, _hard_deadline)
+                                if _deadline >= _hard_deadline:
+                                    logger.warning(
+                                        f"[Session:{session.session_id}] Pipeline 已达 300s 硬上限，"
+                                        f"不再随音频产出延期（est_audio={_est_audio_s:.1f}s）"
+                                    )
             except asyncio.CancelledError:
                 # pipeline 被外部取消（如 client_out_audio_over 或新 start 命令）
                 logger.info(f"[Session:{session.session_id}] Pipeline cancelled externally")
@@ -1228,11 +1243,22 @@ class WebSocketSessionHandler:
                                 tool_mgr._pending_command_ack_future.set_result(str(ack_data))
                                 tool_mgr._pending_command_ack_future = None
                         elif t == "start":
-                            if self.wake_start_task and not self.wake_start_task.done():
-                                logger.info(f"[Session:{session.session_id}] Duplicate start ignored: wake flow already running")
-                                continue
+                            # 固件 VAD 实时打断带的标记：用户的话正在说，
+                            # 唤醒问候语（"我在呢"）会让 iat_start 晚 1.4~2.1 秒，
+                            # 这半句话全丢——打断必须直接开麦。
+                            is_barge_in = data.get("source") == "vad_barge_in"
                             if session._waiting_wake_audio:
-                                logger.info(f"[Session:{session.session_id}] Duplicate start ignored: waiting wake audio completion")
+                                # 唤醒提示音播放中设备又发来 start = AEC 实时打断。
+                                # 提示音被固件 audio_spk_hard_stop 掐断后不会回
+                                # client_out_audio_over，_do_wake_start 会白等满 10s
+                                # 看门狗，期间 iat_start 不下发、麦克风不开（表现为
+                                # "打断后麦克风失灵"）。这条 start 本身就是
+                                # "提示音不用再等了"的确认，放行在途唤醒流程直接进 ASR。
+                                logger.info(f"[Session:{session.session_id}] Start during wake prompt: releasing wake audio wait")
+                                session._wake_audio_played.set()
+                                continue
+                            if self.wake_start_task and not self.wake_start_task.done() and not is_barge_in:
+                                logger.info(f"[Session:{session.session_id}] Duplicate start ignored: wake flow already running")
                                 continue
 
                             if fsm.get() == SessionState.ASR:
@@ -1261,6 +1287,15 @@ class WebSocketSessionHandler:
                             # 取消旧的 pipeline 任务
                             if self.pipeline_task and not self.pipeline_task.done():
                                 logger.info(f"[Session:{session.session_id}] Cancelling old pipeline on new start")
+                                # 必须先置位 cancel_event 再 cancel：本轮的唤醒提示音/新 pipeline
+                                # 与旧 pipeline 共用 SID_TTS("0010") 音频流，旧 pipeline 退出时
+                                # 补发的 end_frame+tts_real_end 会把刚打开的新流立刻关掉
+                                # （表现为打断后"TTS 瞬间播完 + 多句叠播"）。
+                                # pipeline.py 的 cancel_event 分支正是为此存在，
+                                # 但只有 interrupt()/send_session_end() 会置位，
+                                # tts_playing=False 的打断路径漏掉了它。
+                                # 下一轮 run_pipeline 开头会 clear()，不会污染后续轮次。
+                                session.cancel_event.set()
                                 self.pipeline_task.cancel()
                                 self.pipeline_task = None
 
@@ -1289,12 +1324,22 @@ class WebSocketSessionHandler:
                                 session.cancel_pre_asr()
                                 background_task(session.pre_connect_asr(), name="pre_connect_asr")
 
-                            if _get_wake_enable_audio(settings, self.user_config):
+                            if _get_wake_enable_audio(settings, self.user_config) and not is_barge_in:
                                 # 取消旧的唤醒任务，避免多个 task 竞争 _waiting_wake_audio 标志
                                 if self.wake_start_task and not self.wake_start_task.done():
                                     self.wake_start_task.cancel()
                                 self.wake_start_task = background_task(self._do_wake_start(), name="wake_start")
                             else:
+                                if is_barge_in:
+                                    # 打断可能落在唤醒问候语的等待窗口里：那个工作中的
+                                    # _do_wake_start 会把问候语放完才开麦，这里直接掐掉，
+                                    # 由本分支立刻进 ASR。
+                                    if self.wake_start_task and not self.wake_start_task.done():
+                                        logger.info(f"[Session:{session.session_id}] Barge-in cancels in-flight wake start")
+                                        self.wake_start_task.cancel()
+                                        self.wake_start_task = None
+                                    session._waiting_wake_audio = False
+                                    logger.info(f"[Session:{session.session_id}] Barge-in start: 跳过唤醒问候语，立刻开麦")
                                 # 无唤醒音频：直接启动 ASR，唤醒流程标志在此清除
                                 self._new_wake_pending = False
                                 await fsm.set(SessionState.ASR)

@@ -672,19 +672,25 @@ class Adjudicator:
             raise RuntimeError(f"WebSocket 接收失败: {e}")
 
     async def _op_ws_close(self, params, ctx) -> None:
-        """关闭 WebSocket 连接；reuse 模式的连接归还连接池。"""
+        """关闭 WebSocket 连接；reuse 模式的连接归还连接池。
+
+        discard=True 时不归还、直接关闭：合成中途被打断或对端静默关闭的连接
+        已经不可复用，归还进池只会让下一次合成拿到"收不到数据也不报错"的死连接。
+        """
         session_id = str(params.get("session_id", ""))
+        discard = bool(params.get("discard", False))
         ws = self._ws_connections.pop(session_id, None)
         self._ws_recv_locks.pop(session_id, None)
         mode = self._ws_pool_modes.pop(session_id, "normal")
         key = self._ws_pool_keys.pop(session_id, "")
         if ws is None:
             return
-        if mode == "reuse" and key and self._pool_release(key, ws):
+        if not discard and mode == "reuse" and key and self._pool_release(key, ws):
             logger.info(f"[插件沙箱] 插件 {self.plugin_id} 归还 WebSocket 到连接池: {session_id}")
             return
         await self._ws_close_safe(ws)
-        logger.info(f"[插件沙箱] 插件 {self.plugin_id} 关闭 WebSocket 连接: {session_id}")
+        logger.info(f"[插件沙箱] 插件 {self.plugin_id} 关闭 WebSocket 连接: {session_id}"
+                    f"{'（丢弃：连接已不可复用）' if discard else ''}")
 
     async def _op_ws_prewarm(self, params, ctx) -> int:
         """预热 WebSocket 连接放入连接池，返回成功创建数量。"""

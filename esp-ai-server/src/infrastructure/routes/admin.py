@@ -1,4 +1,4 @@
-﻿"""管理员后台 API
+"""管理员后台 API
 
 所有接口均要求当前用户 role=admin：
 - GET    /api/v1/admin/stats              - 后台仪表盘统计
@@ -146,6 +146,9 @@ def _serialize_device(device: DeviceModel, owner_email: str = "", owner_nickname
         "is_banned": device.is_banned,
         "ban_reason": device.ban_reason,
         "banned_at": device.banned_at,
+        # 未绑定设备的配对码（无屏设备无法显示绑定码，管理员在后台查看后告知用户）
+        "bind_code": device.bind_code,
+        "bind_code_expires": device.bind_code_expires,
     }
 
 
@@ -566,8 +569,8 @@ def _extract_bin_id_from_firmware(content: bytes) -> str:
 
 @router.get("/firmwares")
 async def admin_list_firmwares(_: UserModel = Depends(require_admin)):
-    # 固件列表（含 bin_id/版本/上传者/启用状态）
-    from src.infrastructure.device_api import list_firmwares
+    # 固件列表（含 bin_id/版本/上传者/启用状态/内嵌签名）
+    from src.infrastructure.device_api import list_firmwares, firmware_type_from_signature_or_filename
     meta = _firmware_meta()
     items = []
     for f in await asyncio.to_thread(list_firmwares):
@@ -579,6 +582,8 @@ async def admin_list_firmwares(_: UserModel = Depends(require_admin)):
             "download_url": f.download_url,
             "bin_id": m.get("bin_id", ""),
             "version": m.get("version", "") or f.version or "",
+            "fw_type": m.get("fw_type", firmware_type_from_signature_or_filename(m.get("fw_sig", {}), f.filename)),
+            "fw_sig": m.get("fw_sig", {}),
             "uploaded_by": m.get("uploaded_by", ""),
             "uploaded_at": m.get("uploaded_at"),
             "active": bool(m.get("active")),
@@ -624,10 +629,21 @@ async def admin_upload_firmware(
 
     await asyncio.to_thread(_write)
 
-    # 元数据登记：新上传自动设为启用中（单选）
+    # 元数据登记：新上传自动设为启用中（按固件类型分槽单选——
+    # 上传 WiFi 版只取消其他 WiFi 版的激活，BLE 槽不受影响，反之亦然）
+    # 配网类型/版本优先从固件内嵌签名 esp-ai-fw:prov=...;ver=... 提取（idf.py 原生产物
+    # 也能正确识别），签名缺失回退文件名 -wifi- 标识
+    from src.infrastructure.device_api import (
+        firmware_type_from_signature_or_filename, extract_fw_signature,
+    )
+    fw_sig = extract_fw_signature(content)
+    fw_type = firmware_type_from_signature_or_filename(fw_sig, safe_filename)
+    if not version.strip() and fw_sig.get("ver"):
+        version = fw_sig["ver"]
     meta = load_firmware_meta()
     for name, m in meta.items():
-        m["active"] = False
+        if m.get("fw_type", firmware_type_from_signature_or_filename(m.get("fw_sig", {}), name)) == fw_type:
+            m["active"] = False
 
     # bin_id：auto=从固件中识别（提取不到回退文件名主干）; custom=自定义输入
     if bin_id_mode == "auto" or not bin_id.strip():
@@ -638,6 +654,8 @@ async def admin_upload_firmware(
     meta[safe_filename] = {
         "bin_id": bin_id,
         "version": version.strip(),
+        "fw_type": fw_type,
+        "fw_sig": fw_sig,  # 结构化签名（prov/board/display/ver...），后台展示与后续扩展用
         "uploaded_by": admin.email,
         "uploaded_at": _time.time(),
         "active": True,
@@ -767,9 +785,12 @@ async def admin_device_ota_check(device_id: str, _: UserModel = Depends(require_
     ota = settings.ota
     ota_enabled = bool(device.ota_enabled) and bool(ota.enabled if ota else True)
 
-    # OTA 目标优先级：设备级配置 → 固件管理「启用中」固件 → 全局环境变量
-    from src.infrastructure.device_api import get_active_firmware
-    active = get_active_firmware()
+    # OTA 目标优先级：设备级配置 → 固件管理「启用中」固件（按设备固件类型分槽） → 全局环境变量
+    from src.infrastructure.device_api import get_active_firmware, pick_active_slot_for_bin
+    # 设备 bin_id 能匹配到已登记固件 → 精确知道设备是 BLE 还是 WiFi 版，取对应槽的激活固件；
+    # 匹配不到（离线/未知固件）→ 按 BLE 槽兜底（存量设备以 BLE 版为主）
+    fw_type = pick_active_slot_for_bin(device_bin_id) or "ble"
+    active = get_active_firmware(fw_type)
     if device.ota_bin_id or device.ota_bin_url or device.ota_version:
         target_version = device.ota_version
         target_url = device.ota_bin_url
@@ -865,11 +886,13 @@ async def admin_device_ota_force(device_id: str, admin: UserModel = Depends(requ
     if not (channel and getattr(channel, "connected", False)):
         raise HTTPException(400, "设备不在线，无法下发升级指令")
 
-    # OTA 目标优先级与「检测升级」一致：设备级 → 固件管理启用中固件 → 全局环境变量
+    # OTA 目标优先级与「检测升级」一致：设备级 → 固件管理启用中固件（按设备固件类型分槽） → 全局环境变量
     settings = get_settings()
     ota = settings.ota
-    from src.infrastructure.device_api import get_active_firmware
-    active = get_active_firmware()
+    from src.infrastructure.device_api import get_active_firmware, pick_active_slot_for_bin
+    device_bin_id = (entry or {}).get("bin_id", "") or ""
+    fw_type = pick_active_slot_for_bin(device_bin_id) or "ble"
+    active = get_active_firmware(fw_type)
     if device.ota_bin_url:
         url = device.ota_bin_url
         version = device.ota_version

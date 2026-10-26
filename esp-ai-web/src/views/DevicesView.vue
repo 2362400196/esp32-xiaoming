@@ -2,7 +2,8 @@
   <div class="devices-view" @dblclick="resetLayout">
       <div v-if="!devices.length && !loading" class="empty card card-in">
         <p>还没有设备</p>
-        <p class="empty-sub">在 App 中完成配网绑定后，这里会自动出现</p>
+        <p class="empty-sub">设备配网后屏幕会显示 6 位配对码，点击下方按钮添加</p>
+        <button class="btn-add" @click="openBindDialog">添加设备</button>
       </div>
       <!-- OLD_TOP_START
       
@@ -103,23 +104,28 @@
       </div>
     </div>
 
+    <!-- 添加设备悬浮按钮 -->
+    <transition name="modal-fade">
+      <button v-if="!bindDialogVisible" class="add-device-fab" title="添加设备" @dblclick.stop @click="openBindDialog">＋</button>
+    </transition>
 
       <!-- 绑定设备弹窗 -->
       <transition name="modal-fade">
         <div v-if="bindDialogVisible" class="modal-mask" @click.self="closeBindDialog" @dblclick.stop>
           <div class="modal-card">
             <div class="modal-head">
-              <span class="modal-title">绑定设备</span>
+              <span class="modal-title">添加设备</span>
               <button class="modal-close" @click="closeBindDialog">×</button>
             </div>
             <div class="modal-body">
-              <p class="bind-tip">输入设备屏幕上显示的 6 位绑定码完成绑定</p>
-              <input v-model="bindCode" class="input bind-input" placeholder="6 位绑定码" maxlength="6" @keyup.enter="doBind" />
+              <p class="bind-tip">输入设备屏幕上显示的 6 位配对码完成绑定（配对码 5 分钟有效）</p>
+              <p class="bind-tip" style="color:var(--text-dim)">无屏幕设备请联系管理员查询配对码</p>
+              <input v-model="bindCode" class="input bind-input" placeholder="6 位配对码" maxlength="6" @keyup.enter="doBind" />
               <input v-model="bindName" class="input bind-input" placeholder="设备名称（可选）" @keyup.enter="doBind" />
             </div>
             <div class="modal-foot">
               <button class="btn-sm" @click="closeBindDialog">取消</button>
-              <button class="btn-sm btn-mint" :disabled="binding" @click="doBind">
+              <button class="btn-add" :disabled="binding" @click="doBind">
                 {{ binding ? '绑定中...' : '确认绑定' }}
               </button>
             </div>
@@ -856,6 +862,49 @@ watch(() => props.devices, () => { nextTick(updateBoardHeight) }, { deep: true }
 
 .empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 70px 20px; color: var(--text-sub); }
 .empty-sub { font-size: 12px; color: var(--text-dim); }
+
+/* 薄荷绿主按钮（独立类，避免与 .btn-sm 白底样式冲突） */
+.btn-add {
+  margin-top: 6px;
+  padding: 9px 26px;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--grad-mint);
+  box-shadow: 0 6px 18px rgba(16, 185, 129, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  cursor: pointer;
+  transition: all 0.3s var(--ease);
+}
+.btn-add:hover { transform: translateY(-2px); box-shadow: var(--shadow-mint), inset 0 1px 0 rgba(255, 255, 255, 0.3); }
+.btn-add:active { transform: translateY(0); }
+.btn-add:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+/* 添加设备悬浮按钮 */
+.add-device-fab {
+  position: fixed;
+  right: 28px;
+  bottom: 28px;
+  z-index: 8;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: none;
+  font-size: 26px;
+  font-weight: 300;
+  line-height: 1;
+  color: #fff;
+  background: var(--grad-mint, linear-gradient(135deg, #34d399, #10b981));
+  box-shadow: 0 8px 22px rgba(16, 185, 129, 0.35);
+  cursor: pointer;
+  transition: transform 0.2s var(--ease, ease), box-shadow 0.2s var(--ease, ease);
+}
+.add-device-fab:hover {
+  transform: translateY(-3px) scale(1.05);
+  box-shadow: 0 12px 28px rgba(16, 185, 129, 0.45);
+}
+.add-device-fab:active { transform: translateY(0) scale(0.97); }
 
 .devices-header {
   display: flex; align-items: center; justify-content: space-between;

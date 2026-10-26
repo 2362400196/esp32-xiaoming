@@ -7,7 +7,9 @@
  */
 #include "provisioning.h"
 #include "provisioning_page.h"
+#include "captive_portal.h"
 #include "config.h"
+#include "device_id.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -15,6 +17,8 @@
 #include "esp_random.h"
 #include "cJSON.h"
 #include "esp_http_server.h"
+#include "esp_event.h"
+#include "esp_timer.h"
 #include "string.h"
 #include "stdlib.h"
 
@@ -34,7 +38,6 @@ static const char *TAG = "provisioning";
 #define BLE_SERVICE_UUID 0xBAAD
 #define BLE_CHAR_UUID    0xF00D
 #define EOT_MARKER "--END--"
-#define AP_PROVISION_PASSWORD "esp-ai-setup"
 
 static bool s_ble_prov_running = false;
 static bool s_is_connected = false;
@@ -382,7 +385,7 @@ static esp_err_t ble_prov_start(void)
     nimble_port_freertos_init(host_task);
 
     // 广播在 bleprph_on_sync 回调中启动
-    
+
     ESP_LOGI(TAG, "BLE: %s, UUID: BAAD/F00D", dn);
     display_show_status("请使用App配置网络");
     return ESP_OK;
@@ -761,56 +764,290 @@ void provisioning_ble_connect_wifi(void)
     }
 }
 
-// ==================== AP 配网（保留） ====================
+// ==================== AP 配网 ====================
+// 设备开启 SoftAP 热点，手机连接后浏览器访问 http://192.168.4.1 打开配网页。
+// 页面通过 JSON 接口交互（与 App BLE 配网保存的 NVS 键完全一致）：
+//   GET  /get_ssids  → {"success":true,"data":[{"ssid","channel"}...]}
+//   GET  /get_config → {"success":true,"data":{wifi_name,wifi_pwd,device_id,ext4..ext8}}
+//   POST /set_config → 保存全部字段到 NVS + 置 _ble_temp_=1 → 重启
+//                       复用 BLE 配网重启后的 STA 连接/绑定路径(provisioning_ble_connect_wifi)
 static char s_ap_ssid[64], s_ap_password[64];
 static httpd_handle_t s_ap_server = NULL;
 static bool s_ap_prov_running = false;
 
+// ==================== 后台扫描（参考 xiaozhi-esp32 / esp-wifi-connect）====================
+// 扫描永远在后台定时执行，/get_ssids 只返回缓存结果（毫秒级响应），
+// 页面轮询永不超时 —— 这是 portal WebView 环境下配网稳定的关键
+#define AP_SCAN_MAX 30
+static wifi_ap_record_t s_scan_cache[AP_SCAN_MAX];
+static uint16_t s_scan_count = 0;
+static SemaphoreHandle_t s_scan_mutex = NULL;
+static esp_timer_handle_t s_scan_timer = NULL;
+
+// 后台触发一次非阻塞扫描；失败（如协议栈状态拒绝）3 秒后自动重试
+static void ap_scan_trigger(void)
+{
+    wifi_scan_config_t sc = { .show_hidden = false };
+    esp_wifi_disconnect();  // 忽略返回值：配网模式下 STA 本就未连接
+    esp_err_t err = esp_wifi_scan_start(&sc, false);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "AP prov: 后台扫描启动失败(%s)，3s后重试", esp_err_to_name(err));
+        if (s_scan_timer) esp_timer_start_once(s_scan_timer, 3 * 1000000ULL);
+    }
+}
+
+static void ap_scan_timer_cb(void *arg)
+{
+    (void)arg;
+    ap_scan_trigger();
+}
+
+// WIFI_EVENT_SCAN_DONE：取回结果缓存，10 秒后再扫
+static void ap_wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg; (void)data;
+    if (base != WIFI_EVENT || id != WIFI_EVENT_SCAN_DONE) return;
+
+    uint16_t num = 0;
+    esp_wifi_scan_get_ap_num(&num);
+    if (num > AP_SCAN_MAX) num = AP_SCAN_MAX;
+
+    if (xSemaphoreTake(s_scan_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        s_scan_count = 0;
+        if (num > 0 && esp_wifi_scan_get_ap_records(&num, s_scan_cache) == ESP_OK) {
+            s_scan_count = num;
+        }
+        xSemaphoreGive(s_scan_mutex);
+    }
+    ESP_LOGI(TAG, "AP prov: 后台扫描完成，%d 个AP", num);
+
+    if (s_scan_timer) esp_timer_start_once(s_scan_timer, 10 * 1000000ULL);
+}
+
+static void ap_resp_json(httpd_req_t *req, const char *json)
+{
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_send(req, json, strlen(json));
+}
+
+// 系统联网探测 URL 统一 302 到配网页 → 触发 Captive Portal 识别：
+// 手机弹出配网入口并在系统层面提示"保持连接"，流量不再走蜂窝
+static esp_err_t captive_redirect_h(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
+// favicon 返回 204，消除 404 日志噪音
+static esp_err_t favicon_h(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "204 No Content");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
 static esp_err_t ap_http_h(httpd_req_t *req)
 {
-    if (req->method == HTTP_GET) {
+    // 配网页面
+    if (strcmp(req->uri, "/") == 0 && req->method == HTTP_GET) {
         httpd_resp_set_type(req, "text/html");
         httpd_resp_send(req, provisioning_html, strlen(provisioning_html));
         return ESP_OK;
     }
-    if (req->method == HTTP_POST) {
-        char buf[512] = {0};
-        int r = httpd_req_recv(req, buf, sizeof(buf) - 1);
-        if (r <= 0) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data"); return ESP_FAIL; }
-        buf[r] = 0;
-        char *sv = strstr(buf, "ssid=");
-        if (sv) { sv += 5; char *e = strchr(sv, '&'); if (e) *e = 0;
-            url_decode(sv, strlen(sv), s_ap_ssid, sizeof(s_ap_ssid)); }
-        char *pv = strstr(buf, "password=");
-        if (pv) { pv += 9; char *e = strchr(pv, '&'); if (e) *e = 0;
-            url_decode(pv, strlen(pv), s_ap_password, sizeof(s_ap_password)); }
-        ESP_LOGI(TAG, "AP prov: ssid=%s", s_ap_ssid);
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"status\":\"ok\"}", 13);
-        provisioning_save_credentials(s_ap_ssid, s_ap_password);
-        esp_wifi_connect();
+
+    // WiFi 扫描结果：只返回后台扫描缓存（参考 xiaozhi-esp32，接口永不阻塞）
+    if (strcmp(req->uri, "/get_ssids") == 0 && req->method == HTTP_GET) {
+        ESP_LOGI(TAG, "AP prov: /get_ssids 收到请求");
+        cJSON *arr = cJSON_CreateArray();
+        if (!arr) {
+            ap_resp_json(req, "{\"success\":false,\"message\":\"内存不足\"}");
+            return ESP_OK;
+        }
+        if (s_scan_mutex && xSemaphoreTake(s_scan_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+            for (int i = 0; i < s_scan_count; i++) {
+                const char *ssid = (const char *)s_scan_cache[i].ssid;
+                if (ssid[0] == '\0') continue;  // 跳过隐藏 SSID
+                // 同名 AP 去重（保留第一个 = 信号最强的）
+                bool dup = false;
+                cJSON *it = NULL;
+                cJSON_ArrayForEach(it, arr) {
+                    cJSON *s = cJSON_GetObjectItem(it, "ssid");
+                    if (s && cJSON_IsString(s) && strcmp(s->valuestring, ssid) == 0) { dup = true; break; }
+                }
+                if (dup) continue;
+                cJSON *obj = cJSON_CreateObject();
+                cJSON_AddStringToObject(obj, "ssid", ssid);
+                cJSON_AddNumberToObject(obj, "channel", s_scan_cache[i].primary);
+                cJSON_AddItemToArray(arr, obj);
+            }
+            xSemaphoreGive(s_scan_mutex);
+        }
+
+        // 与页面约定格式：{"success":true,"data":[...]}
+        cJSON *resp = cJSON_CreateObject();
+        if (!resp) {
+            cJSON_Delete(arr);
+            ap_resp_json(req, "{\"success\":false,\"message\":\"内存不足\"}");
+            return ESP_OK;
+        }
+        cJSON_AddBoolToObject(resp, "success", true);
+        cJSON_AddItemToObject(resp, "data", arr);
+        char *json = cJSON_PrintUnformatted(resp);
+        cJSON_Delete(resp);
+        if (!json) {
+            ap_resp_json(req, "{\"success\":false,\"message\":\"内存不足\"}");
+            return ESP_OK;
+        }
+        ap_resp_json(req, json);
+        free(json);
         return ESP_OK;
     }
+
+    // 读取已保存的配置（页面回填）
+    if (strcmp(req->uri, "/get_config") == 0 && req->method == HTTP_GET) {
+        nvs_handle_t h;
+        char wifi_name[64] = {0}, wifi_pwd[64] = {0};
+        char ext4[8] = {0}, ext5[64] = {0}, ext6[8] = {0}, ext7[8] = {0}, ext8[128] = {0};
+        size_t l;
+        if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+            l = sizeof(wifi_name); nvs_get_str(h, "wifi_name", wifi_name, &l);
+            l = sizeof(wifi_pwd);  nvs_get_str(h, "wifi_pwd", wifi_pwd, &l);
+            l = sizeof(ext4);      nvs_get_str(h, "ext4", ext4, &l);
+            l = sizeof(ext5);      nvs_get_str(h, "ext5", ext5, &l);
+            l = sizeof(ext6);      nvs_get_str(h, "ext6", ext6, &l);
+            l = sizeof(ext7);      nvs_get_str(h, "ext7", ext7, &l);
+            l = sizeof(ext8);      nvs_get_str(h, "diyServerParams", ext8, &l);
+            nvs_close(h);
+        }
+
+        char device_id[64];
+        device_id_get(device_id, sizeof(device_id));
+
+        cJSON *data = cJSON_CreateObject();
+        cJSON_AddBoolToObject(data, "success", true);
+        cJSON *d = cJSON_CreateObject();
+        cJSON_AddStringToObject(d, "wifi_name", wifi_name);
+        cJSON_AddStringToObject(d, "wifi_pwd", wifi_pwd);
+        cJSON_AddStringToObject(d, "device_id", device_id);
+        cJSON_AddStringToObject(d, "ext4", ext4);
+        cJSON_AddStringToObject(d, "ext5", ext5);
+        cJSON_AddStringToObject(d, "ext6", ext6);
+        cJSON_AddStringToObject(d, "ext7", ext7);
+        cJSON_AddStringToObject(d, "diyServerParams", ext8);
+        cJSON_AddItemToObject(data, "data", d);
+        char *json = cJSON_PrintUnformatted(data);
+        cJSON_Delete(data);
+        if (!json) {
+            ap_resp_json(req, "{\"success\":false,\"message\":\"内存不足\"}");
+            return ESP_OK;
+        }
+        ap_resp_json(req, json);
+        free(json);
+        return ESP_OK;
+    }
+
+    // 保存配置（页面 JSON POST）
+    if (strcmp(req->uri, "/set_config") == 0 && req->method == HTTP_POST) {
+        char buf[1024] = {0};
+        int r = httpd_req_recv(req, buf, sizeof(buf) - 1);
+        if (r <= 0) {
+            ap_resp_json(req, "{\"success\":false,\"message\":\"数据接收失败\"}");
+            return ESP_OK;
+        }
+        cJSON *json = cJSON_Parse(buf);
+        if (!json) {
+            ap_resp_json(req, "{\"success\":false,\"message\":\"数据格式错误\"}");
+            return ESP_OK;
+        }
+
+        // 与 BLE 配网 process_ble_complete 一致：遍历键值对全部写入 NVS
+        // （save_key_to_nvs 自动维护 _keys_list_，绑定回调依赖它）
+        int key_count = 0;
+        cJSON *item = NULL;
+        cJSON_ArrayForEach(item, json) {
+            if (cJSON_IsString(item)) {
+                if (strcmp(item->string, "device_id") == 0) continue;  // 只读字段不保存
+                ESP_LOGI(TAG, "AP prov save: %s = %s", item->string,
+                         strstr(item->string, "pwd") ? "******" : item->valuestring);
+                save_key_to_nvs(item->string, item->valuestring);
+                key_count++;
+            }
+        }
+        cJSON_Delete(json);
+
+        if (key_count == 0) {
+            ap_resp_json(req, "{\"success\":false,\"message\":\"未包含有效配置项\"}");
+            return ESP_OK;
+        }
+
+        ESP_LOGI(TAG, "AP prov: %d keys saved, restarting to connect...", key_count);
+        ap_resp_json(req, "{\"success\":true,\"message\":\"配置已保存，设备正在连接WiFi，请稍候...\"}");
+
+        // 置临时标记后重启 → 走 provisioning_ble_connect_wifi（STA 连接+绑定+清标记）
+        save_key_to_nvs("_ble_temp_", "1");
+        vTaskDelay(pdMS_TO_TICKS(1000));  // 让 HTTP 响应发出
+        esp_restart();
+        return ESP_OK;
+    }
+
+    httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not Found");
     return ESP_FAIL;
 }
 
 static esp_err_t ap_prov_start(void)
 {
     s_ap_prov_running = true;
-    wifi_config_t apc = { .ap = { .ssid_len = 0, .channel = 1, .max_connection = 4, .authmode = WIFI_AUTH_WPA2_PSK } };
-    snprintf((char*)apc.ap.ssid, sizeof(apc.ap.ssid),
-        "ESP-AI-AP-%02X%02X", (uint8_t)(esp_random()&0xFF), (uint8_t)(esp_random()&0xFF));
-    strlcpy((char *)apc.ap.password, AP_PROVISION_PASSWORD, sizeof(apc.ap.password));
+
+    // 热点名固定 xiaoming，免密开放（WIFI_AUTH_OPEN 时 password 必须为空）
+    wifi_config_t apc = { .ap = { .ssid_len = 0, .channel = 1, .max_connection = 4, .authmode = WIFI_AUTH_OPEN } };
+    strlcpy((char *)apc.ap.ssid, "xiaoming", sizeof(apc.ap.ssid));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &apc));
     ESP_ERROR_CHECK(esp_wifi_start());
+
+    // 后台扫描：立即扫一次，之后每次 SCAN_DONE 间隔 10s 自动续扫（参考 xiaozhi-esp32）
+    s_scan_mutex = xSemaphoreCreateMutex();
+    esp_timer_create_args_t timer_args = {
+        .callback = ap_scan_timer_cb,
+        .arg = NULL,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "ap_scan_timer",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &s_scan_timer));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_SCAN_DONE,
+                    ap_wifi_event_handler, NULL, NULL));
+    ap_scan_trigger();
+
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.lru_purge_enable = true;
+    hc.max_uri_handlers = 24;  // 业务 URI + 8 个系统探测端点，默认 8 个槽位不够
+    hc.stack_size = 8192;  // cJSON 解析 + 页面发送需要更大栈
     if (httpd_start(&s_ap_server, &hc) == ESP_OK) {
         httpd_register_uri_handler(s_ap_server, &(httpd_uri_t){ .uri = "/", .method = HTTP_GET, .handler = ap_http_h });
-        httpd_register_uri_handler(s_ap_server, &(httpd_uri_t){ .uri = "/", .method = HTTP_POST, .handler = ap_http_h });
+        httpd_register_uri_handler(s_ap_server, &(httpd_uri_t){ .uri = "/get_ssids", .method = HTTP_GET, .handler = ap_http_h });
+        httpd_register_uri_handler(s_ap_server, &(httpd_uri_t){ .uri = "/get_config", .method = HTTP_GET, .handler = ap_http_h });
+        httpd_register_uri_handler(s_ap_server, &(httpd_uri_t){ .uri = "/set_config", .method = HTTP_POST, .handler = ap_http_h });
+        httpd_register_uri_handler(s_ap_server, &(httpd_uri_t){ .uri = "/favicon.ico", .method = HTTP_GET, .handler = favicon_h });
+        // 主流系统联网探测端点 → 302 配网页（Android/iOS/Windows 各家探测路径）
+        const char *probe_uris[] = {
+            "/generate_204", "/gen_204",              // Android (Google/国内 ROM)
+            "/hotspot-detect.html",                   // iOS/macOS
+            "/ncsi.txt", "/connecttest.txt",          // Windows
+            "/fwlink", "/canonical.html", "/success.txt",
+        };
+        for (size_t i = 0; i < sizeof(probe_uris) / sizeof(probe_uris[0]); i++) {
+            httpd_register_uri_handler(s_ap_server, &(httpd_uri_t){
+                .uri = probe_uris[i], .method = HTTP_GET, .handler = captive_redirect_h });
+        }
     }
-    ESP_LOGI(TAG, "AP prov: %s", (char*)apc.ap.ssid);
+
+    captive_portal_start();  // DNS 劫持：所有域名解析到设备，触发系统 Portal 弹窗
+
+    ESP_LOGI(TAG, "AP 配网已启动: 热点 xiaoming（免密），访问 http://192.168.4.1");
+    strlcpy(s_ap_ssid, "xiaoming", sizeof(s_ap_ssid));
     display_show_status("连接热点进行配置");
     return ESP_OK;
 }
@@ -819,7 +1056,11 @@ static void ap_prov_stop(void)
 {
     if (!s_ap_prov_running) return;
     s_ap_prov_running = false;
+    if (s_scan_timer) { esp_timer_stop(s_scan_timer); esp_timer_delete(s_scan_timer); s_scan_timer = NULL; }
+    captive_portal_stop();
     if (s_ap_server) { httpd_stop(s_ap_server); s_ap_server = NULL; }
+    // 关闭热点，切回 STA 模式（配网成功后 WiFi 需要独占连接）
+    esp_wifi_set_mode(WIFI_MODE_STA);
     ESP_LOGI(TAG, "AP prov stopped");
 }
 

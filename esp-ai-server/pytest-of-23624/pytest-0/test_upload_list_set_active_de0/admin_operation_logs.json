@@ -1,0 +1,26 @@
+[
+  {
+    "time": 1793020744.373472,
+    "admin": "admin@test.local",
+    "action": "firmware_delete",
+    "detail": "删除固件 esp32s3-1.1.0.bin"
+  },
+  {
+    "time": 1793020744.3544607,
+    "admin": "admin@test.local",
+    "action": "firmware_set_active",
+    "detail": "启用固件 esp32s3-1.1.0.bin"
+  },
+  {
+    "time": 1793020744.3249257,
+    "admin": "admin@test.local",
+    "action": "firmware_upload",
+    "detail": "上传固件 esp32s3-1.2.0.bin（bin_id=bin-newer）"
+  },
+  {
+    "time": 1793020744.285379,
+    "admin": "admin@test.local",
+    "action": "firmware_upload",
+    "detail": "上传固件 esp32s3-1.1.0.bin（bin_id=bin-new）"
+  }
+]

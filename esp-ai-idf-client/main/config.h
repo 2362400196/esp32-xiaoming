@@ -64,8 +64,28 @@ extern "C" {
 #define SPK_SAMPLE_RATE      24000
 #endif
 
+// ==================== 字幕同步：扬声器链路延迟 ====================
+// 字幕字级时间戳以"音频流位置"计（s_tts_start_time_ms = 首包音频到达时刻），
+// 而声音实际出喇叭要晚：预缓冲（audio.c 播放前置 6720B）+ I2S TX DMA 管道深度。
+// 显示字幕时按 play_pos - 本延迟 对齐可听位置。
+// ES8311：预缓冲 6720B/(32B/ms)=210ms + TX DMA 12×240@16k=180ms → 390ms
+// 直连：  预缓冲 6720B/(48B/ms)=140ms + TX DMA 480ms@24k       → 620ms
+#if defined(AUDIO_SCHEME_ES8311)
+#define SPK_PIPELINE_LATENCY_MS  390
+#else
+#define SPK_PIPELINE_LATENCY_MS  620
+#endif
+
 // ==================== 麦克风采样率（WakeNet 使用）====================
 #define MIC_SAMPLE_RATE      16000
+
+// ==================== 麦克风模拟增益（ES8311 REG16，离散档 0/6/12/18/24/30/36/42）====
+// 【为什么从 36 降到 30】36dB 时自家 TTS 近场回声多次把 ADC 打满（峰值 32768），
+// 削顶是非线性失真，线性 AEC 原理上消不掉：残余回声抬高出/参考比值 → 自打断；
+// 互相关也被削平 → 滞后标定跟着抖。30dB 比 36 低 6dB（峰值减半），回声落回线性区；
+// 又比曾因"唤醒不灵敏"被弃用的 24dB 高 6dB。若实测唤醒变差先回 36 并查喇叭-麦克风
+// 距离，不要直接回调 AEC 判据。
+#define MIC_GAIN_DB          30
 
 // ==================== 唤醒词配置 ====================
 // 由 menuconfig 选择，需要烧录对应的 WakeNet 模型到 model 分区
@@ -123,6 +143,13 @@ esp_err_t board_init(void);
 const board_config_t *board_get_config(void);
 const char *board_get_info_json(void);
 
+// 唤醒灵敏度（wakeup.c 实现，config_commands 远程配置即时生效调用）
+void wakeup_set_sensitivity(float threshold);
+
+// 实时打断开关（wakeup.c 实现，config_commands 远程配置即时生效调用）
+// false = TTS 播放中说话不打断，仅保留唤醒词打断（旧版行为）
+void wakeup_set_barge_in_enabled(bool enabled);
+
 // WiFi
 esp_err_t wifi_init(void);
 void wifi_set_power_save(bool enable);   // 待机省电开关（power_manager 调用）
@@ -164,6 +191,9 @@ esp_err_t audio_spk_write(const uint8_t *data, size_t len);
 void audio_spk_reset_decoder(void);
 esp_err_t audio_spk_play(void);
 bool audio_spk_is_playing(void);
+// TX 队列代际号：每次 i2s_channel_enable 递增。i2s_channel_disable 会丢弃已排队
+// 未发送的样本，AEC 参考的"写入序号=发出序号"账本随之作废，wakeup.c 据此重新起账。
+uint32_t audio_spk_tx_epoch(void);
 esp_err_t audio_spk_stop(void);
 esp_err_t audio_spk_hard_stop(void);
 esp_err_t audio_spk_wait_drain(void);
@@ -191,8 +221,29 @@ void wakeup_pause(void);
 void wakeup_resume(void);
 void wakeup_clear_cooldown(void);   // 唤醒发送失败时清除冷却（网络恢复后立即可唤醒）
 bool wakeup_is_paused(void);
+bool wakeup_take_barge_in(void);    // 取走并清零"本次唤醒来自 VAD 实时打断"标志
+// 打断预缓冲：播放期间滚动保存 AEC 输出，VAD 实时打断开麦时先回灌这一段
+// （判据攒满能量窗要 0.8 秒以上，不回灌就必然丢掉用户那句话的开头）。
+// 只有打断会话能取，正常唤醒取到 0。见 wakeup.c 本节说明。
+#define WAKEUP_PREROLL_MS 1500
+#define WAKEUP_PREROLL_MAX_SAMPLES (16 * WAKEUP_PREROLL_MS)   // 16kHz 单声道
+// 回灌起点 = 本段连续人声的第一帧，再往前推这么多毫秒。
+// 旧实现固定回灌"最后 1.5 秒"：起点落在整段语音之前，把自家 TTS 尾音一起喂给 ASR
+// （实测识别出"嗯那还可以…"），而用户话头被挤到缓冲末尾、开头一两个字被截掉。
+#define WAKEUP_PREROLL_LEAD_MS 300
+void wakeup_preroll_push(const int16_t *samples, int num);
+void wakeup_preroll_clear(void);
+void wakeup_preroll_mark_onset(int frames);   // 记录本段连续人声起点（frames = 已连续帧数）
+int  wakeup_preroll_take(int16_t *dst, int max_samples);      // 返回取走的样本数
 void *wakeup_get_mic_handle(void);
 void *wakeup_get_spk_handle(void);
+// AEC 参考信号（仅 S3 AFE 模式实现）：推送实际写入扬声器的 16kHz 单声道 PCM，
+// 供 AEC 消除设备自身播放声，实现 TTS 播放中实时打断（其他平台为空实现）
+void wakeup_spk_ref_push(const int16_t *samples, int num);
+// TTS 打断窗口 I2S 互斥锁管理：ASR 结束后放锁（afe_task 可读 RX 检测打断），
+// 下一轮 ASR 开始前重新拿锁（保护 mic_task 独占 RX）
+void wakeup_i2s_mutex_release(void);
+void wakeup_i2s_mutex_reacquire(void);
 
 // ==================== 硬件 IO 控制（移植自 Arduino hardware-fns）====================
 #include "cJSON.h"

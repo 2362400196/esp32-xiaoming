@@ -69,8 +69,15 @@ async def ws_recv(session_id: str, timeout: float = 0.1) -> bytes | None:
         return None
 
 
-async def ws_close(session_id: str) -> None:
-    """关闭 WebSocket 连接。"""
+async def ws_close(session_id: str, discard: bool = False) -> None:
+    """关闭 WebSocket 连接。
+
+    Args:
+        session_id: ws_connect 返回的会话 id
+        discard: 仅对连接池模式下有意义。True 表示这条连接已被写坏
+                 （例如合成中途被打断、服务端静默关闭），必须真正关闭、
+                 不要归还连接池给下一次请求复用。
+    """
     ws = _sessions.pop(session_id, None)
     if ws is None:
         return

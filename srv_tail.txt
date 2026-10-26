@@ -1,0 +1,40 @@
+[20:56:48.923] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] TTS #5 字幕 10 字, 流基准 8385ms
+[20:56:48.954] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 json: {'type': 'instruct', 'command_id': 'tts_subtitle', 'data': '{"seq": 5, "words": [{"word": "只", "start_ms": 8385, "end_ms": 8590}, {"word": "有", "start_ms": 8590, "end_ms": 8780}, {"word": "中", "start_
+[20:56:49.031] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] 设备指令 ack: 
+[20:56:56.123] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Keepalive] bound_6b: 1140 times
+[20:57:01.156] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [WS] Received client_out_audio_over, tts_playing=False, fsm=SessionState.TTS, waiting_wake=False, tts_playback_done=False
+[20:57:01.156] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] client_out_audio_over while pipeline still running, cancelling pipeline
+[20:57:01.157] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] TTS playback done, pre-created audio queue
+[20:57:01.157] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] 被取消
+[20:57:01.161] [INFO] [-|-|-] [插件沙箱] 插件 tts_volcengine 归还 WebSocket 到连接池: ws_tts_volcengine_257
+[20:57:01.229] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] 已发送 end_frame + tts_real_end
+[20:57:01.229] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Pipeline] 总音频时长: 8385.0ms (8.4s)
+[20:57:01.230] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] Pipeline completed, audio_duration=8.4s, dynamic_timeout=42.6s, waiting for TTS playback done
+[20:57:01.230] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Growth] 已启动成长任务冷却定时器（300秒）: bound_6b393bc9e3
+[20:57:01.230] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] TTS playback done, fsm=SessionState.TTS, closed=False
+[20:57:01.231] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] 
+════════════════════════════════════════════════════════════════
+[Perf] 对话性能报告  session=7c4ec2da  device=bound_6b393bc9e3
+  用户输入 : "换一个故事"
+  ASR 识别 : 5278ms
+  LLM 生成 : n/a   (首token n/a, 输出 0字/0句)
+  TTS 合成 : 15088ms   (9块, 共8385ms音频)
+  首响延迟 : 2526ms   (ASR完成→首帧音频)
+  Prompt组装: 1ms  (system 2746字/含历史 4550字)
+  Pipeline : 15158ms   (总耗时)
+  端到端   : 21196ms   (ASR开始→播放完成)
+  回复     : ""
+════════════════════════════════════════════════════════════════
+[20:57:01.238] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Billing] 会话 7c4ec2da 计费: ASR 0.1分钟/0.001665元, LLM 输入0(缓存命中0)/输出0tokens/0.0元（谷时）, TTS 42字/0.021元, 合计 0.022665元
+[20:57:01.238] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] 插件 ASR 流式识别已启动
+[20:57:01.238] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] Next round ASR started
+[20:57:01.255] [INFO] [-|-|-] [插件沙箱] 插件 asr_volcengine 获取 WebSocket 连接: ws_asr_volcengine_73（连接池复用）
+[20:57:01.259] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] 插件 ASR 会话已就绪，开始监听
+[20:57:01.777] [INFO] [-|-|-] [插件沙箱] 插件 asr_volcengine 预热 1 个 WebSocket 连接
+[20:57:06.407] [WARNING] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] 5s 无有效语音
+[20:57:06.453] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [PluginASR] 识别完成
+[20:57:06.453] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Session:7c4ec2da] 会话结束消息已发送
+[20:57:06.504] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|-|D8:3B:DA:6D:D9:3C] [WSChannel] 已发送 text: session_end
+[20:57:06.504] [WARNING] [-|-|-] [插件沙箱] SDK 操作 ws_recv 执行异常: WebSocket 接收失败: received 1000 (OK) finish last sequence; then sent 1000 (OK) finish last sequence
+[20:57:06.507] [INFO] [-|-|-] [插件沙箱] 插件 asr_volcengine 关闭 WebSocket 连接: ws_asr_volcengine_73
+[20:57:14.194] [INFO] [c1545031-de23-4eb8-bc3f-b2fbc7f0b444|7c4ec2da|D8:3B:DA:6D:D9:3C] [Keepalive] bound_6b: 1150 times

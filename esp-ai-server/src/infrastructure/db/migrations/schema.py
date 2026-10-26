@@ -114,6 +114,12 @@ async def init_db() -> None:
         await _ensure_column(conn, "devices", "screensaver_timeout",
             "ALTER TABLE devices ADD COLUMN screensaver_timeout VARCHAR(8) NOT NULL DEFAULT '30'",
             devices_cols)
+        await _ensure_column(conn, "devices", "wake_sensitivity",
+            "ALTER TABLE devices ADD COLUMN wake_sensitivity VARCHAR(8) NOT NULL DEFAULT '0.55'",
+            devices_cols)
+        await _ensure_column(conn, "devices", "vad_barge_in_enabled",
+            "ALTER TABLE devices ADD COLUMN vad_barge_in_enabled VARCHAR(8) NOT NULL DEFAULT 'true'",
+            devices_cols)
         await _ensure_column(conn, "marketplace_plugins", "provides",
             "ALTER TABLE marketplace_plugins ADD COLUMN provides TEXT NOT NULL DEFAULT '[]'",
             marketplace_cols)

@@ -15,6 +15,17 @@
 
 static const char *TAG = "board";
 
+// ==================== 固件结构化签名 ====================
+// 编译期由 CMake 注入 ESP_AI_FW_SIG（形如 "esp-ai-fw:prov=wifi;board=xxx;display=st7789_240;ver=062438e"），
+// __attribute__((used)) 确保符号不被链接器消除、始终写入 rodata。
+// 服务端收到上传的固件 bin 后扫描二进制提取该签名，自动识别
+// 配网类型（归 BLE/WiFi 激活槽）、板卡、屏幕型号与版本号，不依赖文件名。
+#if defined(ESP_AI_FW_SIG)
+const char __attribute__((used)) esp_ai_fw_sig[] = ESP_AI_FW_SIG;
+#else
+const char __attribute__((used)) esp_ai_fw_sig[] = "esp-ai-fw:prov=ble;board=unknown;display=none;ver=unknown";
+#endif
+
 // ==================== 显示驱动注册表 ====================
 // 新增显示类型只需在此数组添加条目，无需修改 board_init()
 

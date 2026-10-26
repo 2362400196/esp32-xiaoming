@@ -26,6 +26,7 @@ dependencies.lock
 .venv/
 .cache/
 .opencode/
+design/
 
 # ========== esp-ai-server（Python 后端） ==========
 __pycache__/

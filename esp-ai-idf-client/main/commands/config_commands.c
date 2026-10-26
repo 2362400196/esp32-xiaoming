@@ -42,11 +42,27 @@ static void apply_config_immediate(const char *key, const char *value)
         eeui_port_set_robot_mode(enabled);
         ESP_LOGI(TAG, "机器人模式已即时调整: %s", enabled ? "开启" : "关闭");
     }
+    // 唤醒灵敏度：立即生效（WakeNet 阈值 0.4~0.9，越低越灵敏）
+    if (strcmp(key, "wake_sensitivity") == 0) {
+        float t = atof(value);
+        if (t >= 0.4f && t <= 0.9f) {
+            wakeup_set_sensitivity(t);
+            ESP_LOGI(TAG, "唤醒灵敏度已即时调整: %s", value);
+        } else {
+            ESP_LOGW(TAG, "唤醒灵敏度 %s 超出范围 [0.4, 0.9]，跳过即时生效", value);
+        }
+    }
     // 屏保开关：立即生效
     if (strcmp(key, "screensaver_enabled") == 0) {
         bool enabled = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
         power_manager_set_screensaver_config(enabled ? 1 : 0, -1);
         ESP_LOGI(TAG, "屏保开关已即时调整: %s", enabled ? "开启" : "关闭");
+    }
+    // 实时打断开关：立即生效（false = TTS 播放中说话不打断，仅唤醒词打断）
+    if (strcmp(key, "vad_barge_in_enabled") == 0) {
+        bool enabled = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
+        wakeup_set_barge_in_enabled(enabled);
+        ESP_LOGI(TAG, "实时打断开关已即时调整: %s", enabled ? "开启" : "关闭");
     }
     // 屏保超时秒数：立即生效（只改超时，不修改开关状态）
     if (strcmp(key, "screensaver_timeout") == 0) {
@@ -126,6 +142,8 @@ static esp_err_t cmd_update_config(cJSON *json)
         const char *nvs_key = key;
         if (strcmp(key, "screensaver_enabled") == 0) nvs_key = "ss_enabled";
         else if (strcmp(key, "screensaver_timeout") == 0) nvs_key = "ss_timeout";
+        else if (strcmp(key, "wake_sensitivity") == 0) nvs_key = "wake_sens";
+        else if (strcmp(key, "vad_barge_in_enabled") == 0) nvs_key = "barge_in";
         else if (strlen(key) > 15) {
             ESP_LOGD(TAG, "NVS 键名超长(>15)且无映射，跳过持久化: %s", key);
             continue;

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Session Management - 会话管理
 
 与旧架构(app/session/session.py, app/websocket/session_runtime.py)完全对齐：
@@ -9,9 +9,11 @@ Session Management - 会话管理
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from contextlib import suppress
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 from src.domain.entities import SessionState
@@ -38,6 +40,63 @@ if TYPE_CHECKING:
     from src.use_cases.tools_system import PerUserToolManager
 
 logger = get_logger(__name__)
+
+
+class _AsrAudioDumper:
+    """【临时诊断】把喂给 ASR 的上行 PCM 原样落盘，用于定位"打断后识别不完整"。
+
+    环境变量 ESP_AI_ASR_DUMP=1 时开启（默认关闭，无额外开销）：
+    每轮 ASR 生成 logs/asr_dump/<时间>_<sid>.pcm（16kHz/16bit/单声道，可直接转 wav）
+    和同名 .csv（每包到达的相对时刻），用来区分"设备少发/发错内容"与"ASR 侧丢音频"。
+    """
+
+    def __init__(self, session_id: str):
+        self.enabled = os.environ.get("ESP_AI_ASR_DUMP", "") not in ("", "0")
+        self.bytes_written = 0
+        self.path: Optional[Path] = None
+        self._pcm = None
+        self._csv = None
+        self._t0 = 0.0
+        if not self.enabled:
+            return
+        try:
+            out_dir = Path(__file__).resolve().parents[2] / "logs" / "asr_dump"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            base = out_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{session_id}"
+            self._pcm = open(base.with_suffix(".pcm"), "wb")
+            self._csv = open(base.with_suffix(".csv"), "w", encoding="utf-8")
+            self._csv.write("elapsed_s,chunk_bytes,total_bytes\n")
+            self.path = base.with_suffix(".pcm")
+        except OSError as e:
+            logger.warning(f"[AsrDump] 落盘文件打开失败，本次不落盘: {e}")
+            self.enabled = False
+
+    def write(self, payload: bytes) -> None:
+        if not self.enabled or not payload:
+            return
+        try:
+            if not self._t0:
+                self._t0 = time.time()
+            self._pcm.write(payload)
+            self.bytes_written += len(payload)
+            self._csv.write(f"{time.time() - self._t0:.3f},{len(payload)},{self.bytes_written}\n")
+            self._csv.flush()
+        except (OSError, ValueError) as e:
+            logger.warning(f"[AsrDump] 写盘异常，停止落盘: {e}")
+            self.enabled = False
+
+    def close(self) -> None:
+        for fh in (self._pcm, self._csv):
+            if fh is not None:
+                try:
+                    fh.close()
+                except OSError:
+                    pass
+        if self.enabled and self.bytes_written:
+            logger.info(
+                f"[AsrDump] 已落盘 {self.bytes_written} bytes "
+                f"({self.bytes_written / 32000:.2f}s) -> {self.path}"
+            )
 
 
 class SessionRuntime:
@@ -688,42 +747,52 @@ class Session:
                 batch_size = 5120  # 160ms @ 16kHz 16bit
                 buf = bytearray()
                 first_sent = False
-                while not send_done and not stop_event.is_set():
-                    try:
-                        audio_data = await asyncio.wait_for(audio_queue.get(), timeout=0.5)
-                        if stop_event.is_set():
-                            break
-                        if audio_data is None:
-                            # 音频结束标记：先冲刷缓冲，再发结束信号
+                dumper = _AsrAudioDumper(self.session_id)
+
+                async def _emit(payload: bytes) -> None:
+                    """落盘（仅在开启诊断时）后再送给插件 ASR"""
+                    dumper.write(payload)
+                    await asr_client.send_audio_data(None, payload)
+
+                try:
+                    while not send_done and not stop_event.is_set():
+                        try:
+                            audio_data = await asyncio.wait_for(audio_queue.get(), timeout=0.5)
+                            if stop_event.is_set():
+                                break
+                            if audio_data is None:
+                                # 音频结束标记：先冲刷缓冲，再发结束信号
+                                if buf:
+                                    await _emit(bytes(buf))
+                                    audio_sent += len(buf)
+                                    buf.clear()
+                                await asr_client.send_audio_end(None)
+                                break
+                            if not first_sent:
+                                # 首块立即发送，保证首个部分结果尽快返回
+                                await _emit(audio_data)
+                                audio_sent += len(audio_data)
+                                first_sent = True
+                            else:
+                                buf.extend(audio_data)
+                                if len(buf) >= batch_size:
+                                    await _emit(bytes(buf))
+                                    audio_sent += len(buf)
+                                    buf.clear()
+                        except asyncio.TimeoutError:
                             if buf:
-                                await asr_client.send_audio_data(None, bytes(buf))
+                                await _emit(bytes(buf))
                                 audio_sent += len(buf)
                                 buf.clear()
-                            await asr_client.send_audio_end(None)
+                            continue
+                        except Exception as e:
+                            logger.debug(f"[PluginASR] send_audio 异常: {e}")
                             break
-                        if not first_sent:
-                            # 首块立即发送，保证首个部分结果尽快返回
-                            await asr_client.send_audio_data(None, audio_data)
-                            audio_sent += len(audio_data)
-                            first_sent = True
-                        else:
-                            buf.extend(audio_data)
-                            if len(buf) >= batch_size:
-                                await asr_client.send_audio_data(None, bytes(buf))
-                                audio_sent += len(buf)
-                                buf.clear()
-                    except asyncio.TimeoutError:
-                        if buf:
-                            await asr_client.send_audio_data(None, bytes(buf))
-                            audio_sent += len(buf)
-                            buf.clear()
-                        continue
-                    except Exception as e:
-                        logger.debug(f"[PluginASR] send_audio 异常: {e}")
-                        break
-                if buf:
-                    await asr_client.send_audio_data(None, bytes(buf))
-                    audio_sent += len(buf)
+                    if buf:
+                        await _emit(bytes(buf))
+                        audio_sent += len(buf)
+                finally:
+                    dumper.close()
                 if audio_sent > 0:
                     logger.info(f"[PluginASR] 发送结束, 共 {audio_sent} bytes")
 
@@ -1178,7 +1247,17 @@ class Session:
                         return
 
                     if lr and now - lr > self.silence_timeout and not self.runtime.asr_processed:
-                        await on_vad_end()
+                        # 【绝不能在 watchdog 任务内 await on_vad_end()】on_vad_end 的
+                        # drain_asr → stop_asr() 会 self._watchdog_task.cancel()——
+                        # 而此时正在执行 on_vad_end 的恰恰就是 watchdog 任务自己，
+                        # 取消会在下一个 await 点把 on_vad_end 静默杀死：iat_end 已发、
+                        # final text 已打日志，但 pipeline 永远不启动、会话也不结束，
+                        # 设备停在"等 TTS"直到 60s 看门狗（2026-10-25 11:38 实测：
+                        # 打断后说话"多半"被整句丢弃，日志在 final text 后戛然而止）。
+                        # 改成独立 task，与 _vad_cb 的 create_task 路径同构。
+                        _t = asyncio.create_task(on_vad_end())
+                        self._bg_tasks.add(_t)
+                        _t.add_done_callback(self._bg_tasks.discard)
                         return
 
                     if st and now - st > max_asr_duration:

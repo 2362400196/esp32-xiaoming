@@ -524,9 +524,13 @@ async def ws_recv(session_id: str, timeout: float = 0.1) -> bytes | None:
     return None
 
 
-async def ws_close(session_id: str) -> None:
-    """关闭 WebSocket 连接。"""
-    await client.send_async("ws_close", {"session_id": session_id})
+async def ws_close(session_id: str, discard: bool = False) -> None:
+    """关闭 WebSocket 连接。
+
+    discard=True：这条连接已被写坏（合成中途被打断 / 服务端静默关闭），
+    要求宿主真正关闭，不要归还连接池给下一次合成复用。
+    """
+    await client.send_async("ws_close", {"session_id": session_id, "discard": bool(discard)})
 
 
 # ════════════════════════════════════════════════════════════

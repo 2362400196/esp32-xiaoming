@@ -202,7 +202,9 @@ static void llm_timer_cb(void *arg)
     }
 
     if (tts_playing) {
-        int play_pos_ms = (int)(now_ms() - tts_start_ms);
+        // 字幕对齐可听位置：时间戳是音频流位置（首包到达 = 0），而声音出喇叭
+        // 要晚 SPK_PIPELINE_LATENCY_MS（预缓冲 + TX DMA 管道），减去后同步
+        int play_pos_ms = (int)(now_ms() - tts_start_ms) - SPK_PIPELINE_LATENCY_MS;
         if (play_pos_ms < 0) play_pos_ms = 0;
 
         // 查找当前正在播放的字（时间戳为绝对流位置，与 play_pos 直接比对）
@@ -338,7 +340,10 @@ static void llm_timer_cb(void *arg)
             tts_start_ms = s_tts_start_time_ms;
             tts_duration = s_tts_duration_ms;
         }
-        uint64_t elapsed = now_ms() - tts_start_ms;
+        // 同样减去扬声器链路延迟对齐可听位置（与字级时间戳路径一致）
+        int64_t elapsed_i = (int64_t)now_ms() - (int64_t)tts_start_ms - SPK_PIPELINE_LATENCY_MS;
+        if (elapsed_i < 0) elapsed_i = 0;
+        uint64_t elapsed = (uint64_t)elapsed_i;
         int base_speed = is_english_segment ? 80 : 200;  // ms/字，中文慢速确保与语音同步
         int current_speed = base_speed;
 

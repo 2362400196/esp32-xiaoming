@@ -1,4 +1,4 @@
-﻿"""
+"""
 ws_session_handler.py 单元测试
 
 覆盖范围：
@@ -1172,6 +1172,137 @@ class TestRun:
         await handler.run()
 
         handler.fsm.set.assert_any_call(SessionState.ASR)
+
+    async def test_start_arms_cancel_event_before_cancelling_old_pipeline(self):
+        """AEC 打断新唤醒时必须先置位 cancel_event 再取消旧 pipeline。
+
+        旧 pipeline 与新流程共用 SID_TTS("0010") 音频流：若 cancel_event 未置位，
+        pipeline 退出时会补发 end_frame+tts_real_end，把刚打开的新流立刻关掉
+        （设备表现为"TTS 瞬间播完、多句叠播"）。
+        """
+        handler = _make_handler()
+        handler.session = _make_session()
+        handler.fsm = MagicMock()
+        handler.fsm.set = AsyncMock()
+        handler.fsm.get.return_value = SessionState.IDLE
+        handler.channel = MagicMock()
+        handler.channel.send_json = AsyncMock()
+        handler.settings.wakeup.enable_audio = False
+        handler.asr_client = MagicMock()
+
+        old_task = asyncio.ensure_future(asyncio.sleep(100))
+        handler.pipeline_task = old_task
+
+        handler.websocket.receive = AsyncMock(side_effect=[
+            {"type": "websocket.receive", "text": json.dumps({"type": "start"})},
+            {"type": "websocket.disconnect"},
+        ])
+
+        await handler.run()
+        await asyncio.sleep(0)
+
+        handler.session.cancel_event.set.assert_called_once()
+        assert old_task.cancelled()
+
+    async def test_start_during_wake_prompt_releases_wake_wait(self):
+        """唤醒提示音播放中再次唤醒 = AEC 实时打断，必须放行在途唤醒等待。
+
+        提示音被固件硬停后不会回 client_out_audio_over，_do_wake_start 会白等满
+        10s 看门狗，期间不下发 iat_start、麦克风不开（"打断后麦克风失灵"）。
+        """
+        handler = _make_handler()
+        handler.session = _make_session()
+        handler.session._waiting_wake_audio = True
+        handler.fsm = MagicMock()
+        handler.fsm.set = AsyncMock()
+        handler.fsm.get.return_value = SessionState.IDLE
+        handler.channel = MagicMock()
+        handler.channel.send_json = AsyncMock()
+
+        handler.websocket.receive = AsyncMock(side_effect=[
+            {"type": "websocket.receive", "text": json.dumps({"type": "start"})},
+            {"type": "websocket.disconnect"},
+        ])
+
+        await handler.run()
+
+        assert handler.session._wake_audio_played.is_set()
+        # 放行的这条 start 不再重复走正常唤醒流程
+        handler.channel.send_json.assert_not_called()
+        handler.session.cancel_event.set.assert_not_called()
+
+    async def test_vad_barge_in_start_skips_wake_audio(self):
+        """带 source=vad_barge_in 的 start 必须跳过唤醒问候语，直接开麦。
+
+        打断那一刻用户的话正在说：走 _do_wake_start 会先播"我在呢"，实测
+        iat_start 因此晚 1.4~2.1 秒，前半句全丢（表现为"只回我在呢、
+        我说话它收不到音"）。
+        """
+        handler = _make_handler()
+        handler.session = _make_session()
+        handler.fsm = MagicMock()
+        handler.fsm.set = AsyncMock()
+        handler.fsm.get.return_value = SessionState.IDLE
+        handler.channel = MagicMock()
+        handler.channel.send_json = AsyncMock()
+        handler.settings.wakeup.enable_audio = True  # 正常唤醒是要播问候语的
+        handler._do_wake_start = AsyncMock()
+        handler._start_asr_session = MagicMock()
+        # 上一轮残留的唤醒任务（问候语已放行但任务还没退出），打断必须掐掉它
+        stale = asyncio.ensure_future(asyncio.sleep(100))
+        handler.wake_start_task = stale
+
+        handler.websocket.receive = AsyncMock(side_effect=[
+            {"type": "websocket.receive",
+             "text": json.dumps({"type": "start", "source": "vad_barge_in"})},
+            {"type": "websocket.disconnect"},
+        ])
+
+        await handler.run()
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        assert stale.cancelled()
+        assert handler.wake_start_task is None
+        handler._do_wake_start.assert_not_called()
+        handler._start_asr_session.assert_called_once()
+        handler.fsm.set.assert_any_call(SessionState.ASR)
+        handler.channel.send_json.assert_any_call(
+            {"type": "session_status", "status": "iat_start"})
+
+    async def test_plain_start_still_plays_wake_audio(self):
+        """对照：不带 source 的唤醒仍然走问候语流程（不能把正常唤醒也改掉）。"""
+        handler = _make_handler()
+        handler.session = _make_session()
+        handler.fsm = MagicMock()
+        handler.fsm.set = AsyncMock()
+        handler.fsm.get.return_value = SessionState.IDLE
+        handler.channel = MagicMock()
+        handler.channel.send_json = AsyncMock()
+        handler.settings.wakeup.enable_audio = True
+        handler._do_wake_start = AsyncMock()
+        handler._start_asr_session = MagicMock()
+        handler.wake_start_task = None
+
+        scheduled = []
+
+        def _fake_bg(coro, name=None, **kwargs):
+            scheduled.append(name)
+            coro.close()
+            return asyncio.ensure_future(asyncio.sleep(0))
+
+        handler.websocket.receive = AsyncMock(side_effect=[
+            {"type": "websocket.receive", "text": json.dumps({"type": "start"})},
+            {"type": "websocket.disconnect"},
+        ])
+
+        with patch("src.interfaces.ws_session_handler.background_task", side_effect=_fake_bg):
+            await handler.run()
+
+        assert "wake_start" in scheduled
+        handler._start_asr_session.assert_not_called()
+        assert all(not (c.args and c.args[0].get("status") == "iat_start")
+                   for c in handler.channel.send_json.call_args_list)
 
     async def test_iat_end_message(self):
         handler = _make_handler()

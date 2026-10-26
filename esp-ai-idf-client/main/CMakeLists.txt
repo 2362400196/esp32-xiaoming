@@ -7,6 +7,7 @@ file(GLOB COMMAND_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/commands/*.c")
 # 部分外设 Lua 驱动模块仅在特定芯片可用，按目标条件加入（S3 保持不变，C3 等自动剔除）：
 # - touch:    ESP32 / S2 / S3 / C2 / C6 支持（C3/C5/P4 无 touch 外设）
 # - mcpwm:    ESP32 / S2 / S3 / C6 / P4 支持（C3/C2 无 MCPWM 外设）
+# - pcnt:     ESP32 / S2 / S3 / P4 支持（C3/C2/C6 无 PCNT 外设）
 set(EXTRA_LUA_DRIVER_SRCS)
 set(EXTRA_LUA_DRIVER_REQS)
 if(IDF_TARGET MATCHES "^(esp32|esp32s2|esp32s3|esp32c2|esp32c6)$")
@@ -17,10 +18,23 @@ if(IDF_TARGET MATCHES "^(esp32|esp32s2|esp32s3|esp32c6|esp32p4)$")
     list(APPEND EXTRA_LUA_DRIVER_SRCS "lua/modules/lua_driver_mcpwm.c")
     list(APPEND EXTRA_LUA_DRIVER_REQS esp_driver_mcpwm)
 endif()
+set(LUA_PCNT_SRCS "lua/modules/lua_driver_pcnt.c")
+set(LUA_PCNT_REQS esp_driver_pcnt)
+if(NOT IDF_TARGET MATCHES "^(esp32|esp32s2|esp32s3|esp32p4)$")
+    set(LUA_PCNT_SRCS)
+    set(LUA_PCNT_REQS)
+endif()
+
+# 中文字库按目标选择：C3（4MB flash、无屏）用空壳版省 2.1MB，其余目标用全量版
+if(IDF_TARGET STREQUAL "esp32c3")
+    set(FONT_PUHUI_SRC "fonts/font_puhui_16_4_stub.c")
+else()
+    set(FONT_PUHUI_SRC "fonts/font_puhui_16_4.c")
+endif()
 
 idf_component_register(
     SRCS "main.c" "device_id.c" "wifi.c" "websocket.c" "audio.c" "wakeup.c"
-         "provisioning.c"
+         "provisioning.c" "captive_portal.c"
          "hardware_io.c" "network_audio.c" "ota_update.c"
          "power_manager.c"
          # 板级包核心（board_select.h 自动选择板型，无需手动添加板型源文件）
@@ -33,7 +47,8 @@ idf_component_register(
          "displays/display_uart.c"
          # EEUI 移植层
          "eeui_port.cpp" "gif_downloader.cpp"
-         "fonts/font_puhui_16_4.c"
+         # 中文字库按目标选择：4MB flash 无屏板型（C3）用空壳版省 2.1MB
+         ${FONT_PUHUI_SRC}
          "fonts/weather_icons.c"
          # 音频编解码器（menuconfig → 音频编解码器 选择，未选 ES8311 时函数不被调用）
          "audio_codec/es8311.c"
@@ -48,9 +63,9 @@ idf_component_register(
         "lua/modules/lua_module_gpio.c"
         "lua/modules/lua_module_led.c"
         "lua/modules/lua_module_environmental_sensor.c"
-        # 新移植模块（触摸/MCPWM 驱动按芯片条件加入）
+        # 新移植模块（触摸/MCPWM/PCNT 驱动按芯片条件加入）
         "lua/modules/lua_driver_adc.c"
-        "lua/modules/lua_driver_pcnt.c"
+        ${LUA_PCNT_SRCS}
         ${EXTRA_LUA_DRIVER_SRCS}
         "lua/modules/lua_driver_uart.c"
         "lua/modules/lua_module_ledc.c"
@@ -78,7 +93,7 @@ idf_component_register(
              esp_websocket_client esp_lcd esp_timer cjson esp-sr bt esp_http_server
              esp_adc app_update spiffs
              esp_driver_gpio esp_driver_i2s esp_driver_spi esp_driver_ledc esp_driver_rmt esp_driver_uart
-             ${EXTRA_LUA_DRIVER_REQS} esp_driver_pcnt esp_driver_i2c
+             ${EXTRA_LUA_DRIVER_REQS} ${LUA_PCNT_REQS} esp_driver_i2c
              dht
             )
 
@@ -136,6 +151,57 @@ foreach(_def ${BOARD_DEF_FILES})
     endif()
 endforeach()
 
-string(MD5 BOARD_BIN_ID "${ACTIVE_BOARD_NAME}_${GIT_COMMIT_SHORT}")
-message(STATUS "固件 bin_id (自动生成): ${BOARD_BIN_ID} (板卡=${ACTIVE_BOARD_NAME}, commit=${GIT_COMMIT_SHORT})")
+# 配网类型参与 bin_id 生成：BLE / WiFi(AP) 版固件 bin_id 不同，
+# 服务端 OTA 按类型分槽激活，互不干扰
+if(CONFIG_PROV_TYPE_AP)
+    set(PROV_TAG "wifi")
+else()
+    set(PROV_TAG "ble")
+endif()
+
+string(MD5 BOARD_BIN_ID "${ACTIVE_BOARD_NAME}_${PROV_TAG}_${GIT_COMMIT_SHORT}")
+message(STATUS "固件 bin_id (自动生成): ${BOARD_BIN_ID} (板卡=${ACTIVE_BOARD_NAME}, 配网=${PROV_TAG}, commit=${GIT_COMMIT_SHORT})")
 add_definitions(-DBOARD_BIN_ID="${BOARD_BIN_ID}")
+
+# ==================== 固件结构化签名（esp-ai-fw:）====================
+# 编译期注入签名串 "esp-ai-fw:prov=wifi;board=xxx;display=st7789_240;ver=062438e-dirty"，
+# 服务端收到上传的固件 bin 后直接扫描二进制提取标识，不再依赖文件名——
+# 用户用 idf.py 自己编译的产物（esp-ai-idf-client.bin）上传后也能正确归入
+# BLE/WiFi 激活槽位并自动登记版本号。
+# 可扩展：将来加屏幕型号之外的标识（音频芯片、flash 大小等）直接追加 ;key=value，
+# 服务端按 k=v 解析、未知键原样保留，向后兼容。
+# 显示型号标识：从激活板卡 def 文件的 BOARD_DISPLAY_* 宏推断
+set(FW_DISPLAY_TAG "none")
+foreach(_def ${BOARD_DEF_FILES})
+    get_filename_component(_name ${_def} NAME)
+    string(REGEX REPLACE "\\.h$" "" _base "${_name}")
+    if(_base STREQUAL ACTIVE_BOARD_NAME)
+        file(READ "${_def}" _def_content)
+        if(_def_content MATCHES "BOARD_DISPLAY_ST7789")
+            set(FW_DISPLAY_TAG "st7789_240")
+        elseif(_def_content MATCHES "BOARD_DISPLAY_ILI9341")
+            set(FW_DISPLAY_TAG "ili9341_320x240")
+        elseif(_def_content MATCHES "BOARD_DISPLAY_SSD1306")
+            set(FW_DISPLAY_TAG "ssd1306_128x64")
+        endif()
+        break()
+    endif()
+endforeach()
+# 完整版本号（git describe，与设备 OTA 上报的 FIRMWARE_VERSION 口径一致；失败回退 commit 短哈希）
+execute_process(
+    COMMAND git describe --tags --always --dirty
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_DESCRIBE
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE GIT_DESCRIBE_RESULT
+)
+if(NOT GIT_DESCRIBE_RESULT EQUAL 0 OR GIT_DESCRIBE STREQUAL "")
+    set(GIT_DESCRIBE "${GIT_COMMIT_SHORT}")
+endif()
+set(ESP_AI_FW_SIG "esp-ai-fw:prov=${PROV_TAG};board=${ACTIVE_BOARD_NAME};display=${FW_DISPLAY_TAG};ver=${GIT_DESCRIBE}")
+message(STATUS "固件签名: ${ESP_AI_FW_SIG}")
+# 签名串中的 ';' 是 CMake 的 list 分隔符，必须转义后才能传入 add_definitions，
+# 否则编译命令行被拆散、后续编译参数被当成源文件名导致 cc1 fatal error
+string(REPLACE ";" "\\;" ESP_AI_FW_SIG_ESC "${ESP_AI_FW_SIG}")
+add_definitions("-DESP_AI_FW_SIG=\"${ESP_AI_FW_SIG_ESC}\"")

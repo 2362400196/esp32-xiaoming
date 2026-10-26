@@ -27,6 +27,11 @@
 
 static const char *TAG = "ota_update";
 
+// 固件结构化签名（编译期注入，定义在 board.c）。
+// 此处 extern 引用防止链接器 --gc-sections 把无引用的 rodata 符号删除，
+// 同时在 OTA 检查时打印一次，便于服务端/串口日志核对固件身份。
+extern const char esp_ai_fw_sig[];
+
 // OTA 状态
 static volatile bool s_ota_updating = false;
 static volatile bool s_ota_failed = false;
@@ -280,6 +285,8 @@ esp_err_t ota_check_and_update(const char *server_base_url)
     s_ota_failed = false;
     s_ota_progress = 0;
 
+    ESP_LOGI(TAG, "固件签名: %s", esp_ai_fw_sig);
+
     // 获取设备 MAC 地址，用于 OTA 进度上报（与 Arduino device_id 一致）
     device_id_get(s_device_id, sizeof(s_device_id));
 
@@ -291,12 +298,18 @@ esp_err_t ota_check_and_update(const char *server_base_url)
     }
 
     // 构造查询 URL（与 Arduino auto_update 一致）
-    // GET /sdk/query_new_ota?version=x&bin_id=x&is_official=x&mac=x
+    // GET /sdk/query_new_ota?version=x&bin_id=x&is_official=x&mac=x&prov_type=x
     // mac 参数用于服务端查找设备级 OTA 配置（每个设备有独立的 ota_bin_id）
+    // prov_type 告知服务端本固件是 BLE 还是 WiFi(AP) 配网版，服务端按类型分槽匹配激活固件
+#if CONFIG_PROV_TYPE_AP
+    const char *prov_type = "wifi";
+#else
+    const char *prov_type = "ble";
+#endif
     char query_url[600];
     snprintf(query_url, sizeof(query_url),
-             "%s/sdk/query_new_ota?version=%s&bin_id=%s&is_official=0&mac=%s",
-             server_base_url, FIRMWARE_VERSION, device_bin_id, s_device_id);
+             "%s/sdk/query_new_ota?version=%s&bin_id=%s&is_official=0&mac=%s&prov_type=%s",
+             server_base_url, FIRMWARE_VERSION, device_bin_id, s_device_id, prov_type);
 
     ESP_LOGI(TAG, "OTA 查询: %s", query_url);
 

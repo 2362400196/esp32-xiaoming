@@ -1,4 +1,4 @@
-﻿<template>
+﻿﻿﻿﻿<template>
   <div class="settings-mask" @click.self="$emit('close')">
     <div class="settings-panel">
       <div class="settings-head">
@@ -365,6 +365,33 @@
               </button>
             </div>
           </div>
+
+          <div class="block-divider"></div>
+
+          <div class="block">
+            <p class="block-label">唤醒灵敏度</p>
+            <div class="input-wrap" style="display:flex;align-items:center;gap:10px;">
+              <span class="form-tip" style="margin:0;white-space:nowrap;">迟钝</span>
+              <input type="range" min="0.40" max="0.90" step="0.05"
+                v-model.number="wakeSensitivity" @change="saveWakeSensitivity" style="flex:1;accent-color:#34d399;" />
+              <span class="form-tip" style="margin:0;white-space:nowrap;">灵敏</span>
+              <span style="font-size:12px;color:#34d399;font-weight:600;min-width:36px;text-align:right;">{{ sensitivityLabel }}</span>
+            </div>
+            <p class="form-tip">数值为唤醒判定阈值（0.40~0.90），越低越容易唤醒、误唤醒率也越高。修改立即下发生效，无需重启</p>
+          </div>
+
+          <div class="block">
+            <div class="toggle-row">
+              <div class="toggle-label">
+                <p class="toggle-title">实时打断</p>
+                <p class="toggle-sub">TTS 播放中直接说话即可打断；关闭后仅唤醒词可打断</p>
+              </div>
+              <button class="ios-toggle" :class="{ on: vadBargeIn }" @click="toggleVadBargeIn">
+                <span class="knob"></span>
+              </button>
+            </div>
+            <p class="form-tip" style="margin-top: 10px;">开启后设备在回复播放中检测到人声会立即停止播放并听你说话（回声消除判定，不会误打断）。修改立即下发生效</p>
+          </div>
         </section>
 
         <!-- ============ 显示 ============ -->
@@ -447,6 +474,16 @@ const cloneVoices = ref([])
 const robotMode = ref(false)
 const screensaverEnabled = ref(true)
 const screensaverTimeout = ref(30)
+const wakeSensitivity = ref(0.55)
+const vadBargeIn = ref(true)
+const sensitivityLabel = computed(() => {
+  const v = wakeSensitivity.value
+  if (v <= 0.45) return '很灵敏'
+  if (v <= 0.55) return '灵敏'
+  if (v <= 0.65) return '标准'
+  if (v <= 0.75) return '偏钝'
+  return '很迟钝'
+})
 const form = ref({})
 
 const tabs = [
@@ -544,6 +581,9 @@ async function load() {
     robotMode.value = cfg.robot_mode === 'true' || cfg.robot_mode === true
     screensaverEnabled.value = cfg.screensaver_enabled === undefined || cfg.screensaver_enabled === 'true' || cfg.screensaver_enabled === true
     screensaverTimeout.value = cfg.screensaver_timeout ? parseInt(cfg.screensaver_timeout) : 30
+    wakeSensitivity.value = cfg.wake_sensitivity !== undefined && cfg.wake_sensitivity !== null
+      ? parseFloat(cfg.wake_sensitivity) : 0.55
+    vadBargeIn.value = cfg.vad_barge_in_enabled === undefined || cfg.vad_barge_in_enabled === 'true' || cfg.vad_barge_in_enabled === true
     loadCloneVoices()
   }
   loading.value = false
@@ -606,6 +646,33 @@ async function saveScreensaver() {
     emit('toast', '设置失败: ' + (res.data?.message || res.data?.detail || ''))
   } else {
     emit('toast', '屏保超时已设为 ' + timeout + ' 秒')
+  }
+}
+
+async function saveWakeSensitivity() {
+  const mac = props.device?.mac
+  if (!mac) return
+  const value = Math.max(0.4, Math.min(0.9, wakeSensitivity.value || 0.55))
+  wakeSensitivity.value = value
+  const res = await api.setWakeSensitivity(mac, value)
+  if (res.status !== 200 || res.data?.code !== 0) {
+    emit('toast', '设置失败: ' + (res.data?.message || res.data?.detail || ''))
+  } else {
+    emit('toast', '唤醒灵敏度已更新（' + sensitivityLabel.value + '）')
+  }
+}
+
+async function toggleVadBargeIn() {
+  const mac = props.device?.mac
+  if (!mac) return
+  const enabled = !vadBargeIn.value
+  vadBargeIn.value = enabled
+  const res = await api.setVadBargeIn(mac, enabled)
+  if (res.status !== 200 || res.data?.code !== 0) {
+    vadBargeIn.value = !enabled
+    emit('toast', '设置失败: ' + (res.data?.message || res.data?.detail || ''))
+  } else {
+    emit('toast', enabled ? '实时打断已开启' : '实时打断已关闭（仅唤醒词打断）')
   }
 }
 
