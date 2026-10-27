@@ -87,7 +87,8 @@ static lv_obj_t *s_ota_status_label = NULL;  // "正在升级" 文字
 // 表情下载中提示 UI
 static lv_obj_t *s_emo_dl_overlay = NULL;   // 全屏遮罩
 static lv_obj_t *s_emo_dl_label = NULL;     // "表情下载中..." 文字
-static lv_obj_t *s_emo_dl_arc = NULL;       // 旋转加载圆弧（进度指示）
+static lv_obj_t *s_emo_dl_bar = NULL;        // 下载进度条（0→100 往复）
+static lv_timer_t *s_emo_dl_timer = NULL;    // 进度条驱动定时器（不用 lv_anim，见下）
 
 static int s_screen_width = 240;
 static int s_screen_height = 240;
@@ -243,6 +244,11 @@ static void ui_reorder_layers(void)
     if (s_bat_ui.top && lv_obj_is_valid(s_bat_ui.top)) lv_obj_move_foreground(s_bat_ui.top);
     if (s_bat_ui.label && lv_obj_is_valid(s_bat_ui.label)) lv_obj_move_foreground(s_bat_ui.label);
     if (s_bat_ui.fill && lv_obj_is_valid(s_bat_ui.fill)) lv_obj_move_foreground(s_bat_ui.fill);
+    // 最后：表情下载提示遮罩必须始终在最上层。下载要 5~10 秒，期间状态文字/
+    // 电池/信号仍可能被更新（每次更新都会把自己提到最前），否则提示会被盖住。
+    if (s_emo_dl_overlay && lv_obj_is_valid(s_emo_dl_overlay)) {
+        lv_obj_move_foreground(s_emo_dl_overlay);
+    }
 }
 
 // ==================== 初始化 ====================
@@ -1240,6 +1246,20 @@ void eeui_port_music_destroy(void)
 
 // ==================== 表情下载中提示 ====================
 
+// 进度条扫描：用 lv_timer 直接改 value，不走 lv_anim。
+// 【为什么不用 lv_anim】现场"进度条没走就下载完了"——动画没被驱动（这块板 +
+// 这个 LVGL 版本上 lv_anim 在这段页面里不生效），timer 回调是 LVGL 任务里
+// 每 80ms 必定执行的路径，最稳。
+static void emo_dl_bar_tick(lv_timer_t *t)
+{
+    (void)t;
+    if (s_emo_dl_bar == NULL || !lv_obj_is_valid(s_emo_dl_bar)) return;
+    static int phase = 0;
+    phase = (phase + 6) % 200;                       // 0..199 三角波
+    int value = (phase <= 100) ? phase : (200 - phase);
+    lv_bar_set_value(s_emo_dl_bar, value, LV_ANIM_OFF);
+}
+
 void eeui_port_show_emo_downloading(void)
 {
     if (!s_lvgl_ready) return;
@@ -1264,38 +1284,52 @@ void eeui_port_show_emo_downloading(void)
         lv_obj_remove_flag(s_emo_dl_overlay, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_move_foreground(s_emo_dl_overlay);
 
-        // 创建旋转加载圆弧（spinner 风格）
-        s_emo_dl_arc = lv_arc_create(s_emo_dl_overlay);
-        lv_obj_set_size(s_emo_dl_arc, 60, 60);
-        lv_obj_align(s_emo_dl_arc, LV_ALIGN_CENTER, 0, -20);
-        lv_arc_set_range(s_emo_dl_arc, 0, 100);
-        lv_arc_set_value(s_emo_dl_arc, 0);
-        // 隐藏旋钮
-        lv_obj_remove_style(s_emo_dl_arc, NULL, LV_PART_KNOB);
-        // 设置圆弧颜色
-        lv_obj_set_style_arc_color(s_emo_dl_arc, lv_color_hex(0xCCCCCC), LV_PART_MAIN);
-        lv_obj_set_style_arc_color(s_emo_dl_arc, lv_color_hex(0x4A90D9), LV_PART_INDICATOR);
-        lv_obj_set_style_arc_width(s_emo_dl_arc, 4, LV_PART_INDICATOR);
-        lv_obj_set_style_arc_width(s_emo_dl_arc, 4, LV_PART_MAIN);
-        // 启动旋转动画
-        lv_anim_t a;
-        lv_anim_init(&a);
-        lv_anim_set_var(&a, s_emo_dl_arc);
-        lv_anim_set_values(&a, 0, 360);
-        lv_anim_set_duration(&a, 1000);
-        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-        lv_anim_set_exec_cb(&a, [](void *var, int32_t v) {
-            lv_arc_set_start_angle((lv_obj_t *)var, v);
-            lv_arc_set_end_angle((lv_obj_t *)var, v + 90);
-        });
-        lv_anim_start(&a);
+        // 进度条（0→100 往复扫动）。
+        // 【为什么不用圆弧】现场两次都只画出半圈：弧的绘制/局部刷新在这块屏+
+        // 这个 LVGL 版本上不可靠（改起止角、改 rotation 都试过）。bar 是纯矩形，
+        // 刷新逻辑简单，用户要的"进度条"本来也更适合用 bar 表达。
+        s_emo_dl_bar = lv_bar_create(s_emo_dl_overlay);
+        lv_obj_set_size(s_emo_dl_bar, 160, 12);
+        lv_obj_align(s_emo_dl_bar, LV_ALIGN_CENTER, 0, -12);
+        lv_bar_set_range(s_emo_dl_bar, 0, 100);
+        lv_bar_set_value(s_emo_dl_bar, 0, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(s_emo_dl_bar, lv_color_hex(0xDDDDDD), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(s_emo_dl_bar, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_radius(s_emo_dl_bar, 6, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(s_emo_dl_bar, lv_color_hex(0x4A90D9), LV_PART_INDICATOR);
+        lv_obj_set_style_radius(s_emo_dl_bar, 6, LV_PART_INDICATOR);
+
+        // 用 lv_timer 驱动扫描（lv_anim 在这段页面里不生效，实测"条一动没动"）
+        s_emo_dl_timer = lv_timer_create(emo_dl_bar_tick, 80, NULL);
 
         // 创建提示文字
         s_emo_dl_label = lv_label_create(s_emo_dl_overlay);
         lv_label_set_text(s_emo_dl_label, "表情下载中...");
         lv_obj_set_style_text_font(s_emo_dl_label, &font_puhui_16_4, 0);
         lv_obj_set_style_text_color(s_emo_dl_label, lv_color_hex(0x333333), 0);
-        lv_obj_align(s_emo_dl_label, LV_ALIGN_CENTER, 0, 30);
+        lv_obj_align(s_emo_dl_label, LV_ALIGN_CENTER, 0, 20);
+
+        // 【诊断】先把布局跑一遍再读坐标，否则刚创建的对象坐标还是无效值
+        // (0,0)-(-1,-1)，看不出到底画在哪。
+        {
+            lv_obj_update_layout(s_emo_dl_overlay);
+            lv_area_t oa, ba, la;
+            lv_obj_get_coords(s_emo_dl_overlay, &oa);
+            lv_obj_get_coords(s_emo_dl_bar, &ba);
+            lv_obj_get_coords(s_emo_dl_label, &la);
+            lv_font_glyph_dsc_t gd = {};
+            bool has_glyph = lv_font_get_glyph_dsc(&font_puhui_16_4, &gd, 0x8868 /* 表 */, 0);
+            ESP_LOGI(TAG, "下载提示布局: 屏幕=%dx%d overlay=(%d,%d)-(%d,%d) "
+                          "bar=(%d,%d)-(%d,%d) label=(%d,%d)-(%d,%d) "
+                          "子对象=%d 字形'表'=%d(w=%d) 条值=%d",
+                     s_screen_width, s_screen_height,
+                     (int)oa.x1, (int)oa.y1, (int)oa.x2, (int)oa.y2,
+                     (int)ba.x1, (int)ba.y1, (int)ba.x2, (int)ba.y2,
+                     (int)la.x1, (int)la.y1, (int)la.x2, (int)la.y2,
+                     (int)lv_obj_get_child_count(s_emo_dl_overlay),
+                     (int)has_glyph, has_glyph ? (int)gd.box_w : -1,
+                     (int)lv_bar_get_value(s_emo_dl_bar));
+        }
 
         lvgl_unlock();
     }
@@ -1307,14 +1341,15 @@ void eeui_port_hide_emo_downloading(void)
     if (!s_lvgl_ready) return;
     if (lvgl_lock(200)) {
         if (s_emo_dl_overlay != NULL && lv_obj_is_valid(s_emo_dl_overlay)) {
-            // 停止旋转动画
-            if (s_emo_dl_arc) {
-                lv_anim_delete(s_emo_dl_arc, NULL);
+            // 停止进度条驱动
+            if (s_emo_dl_timer) {
+                lv_timer_delete(s_emo_dl_timer);
+                s_emo_dl_timer = NULL;
             }
             lv_obj_delete(s_emo_dl_overlay);
             s_emo_dl_overlay = NULL;
             s_emo_dl_label = NULL;
-            s_emo_dl_arc = NULL;
+            s_emo_dl_bar = NULL;
         }
         lvgl_unlock();
     }

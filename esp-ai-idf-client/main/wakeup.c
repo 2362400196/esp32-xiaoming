@@ -225,6 +225,11 @@ static bool s_rx_drain_req = false;
 // 比值能漂到几倍"的对照分布。所以这一轮同时把分布记下来（见 s_margin_hist）：
 // 下一轮的阈值由两组的重叠程度定，不再靠猜。
 #define AEC_VOICE_MARGIN_PCT    250   // 窗内比值 ≥ 本底 ×2.5（+4dB）判为真人语音
+                                      // 【不要往下降】2026-10-26 实测：降到 150 后，
+                                      // 回声漏出窗（比值 2.4×、本底 10.3%）会被判成人声，
+                                      // 表现为"TTS 说一半自己停了"；而真人说话的窗通常是
+                                      // 28~1000×，2.5 这道线根本不挡真人。灵敏度问题的
+                                      // 根因在 AEC 锁不上（见 ref_silent 的注释），不在这个倍数。
 #define AEC_DIVERGE_PCT         200   // AEC 后能量超麦克风 2 倍 = 抽头偏早、滤波发散
 // 【按帧持续，不按"窗"】旧版写"连续 3 窗"，代码里却是每帧 +1：三帧 ≈96ms 就作废。
 // serial26 实测 60ms 锁定后 0.29s 就被判发散、改锁 23ms，随后偏置扫描在没有有效样本的
@@ -334,6 +339,23 @@ static int s_aec_search_log_tick = 0;     // 粗搜"没达门"诊断的限流计
 static volatile int s_aec_ref_peak = 0;  // 本帧送给 AEC 的参考峰值
 static int s_aec_ref_peak_play = 0;      // 本轮播放里最响的参考峰值（相对活性判据的尺子）
 static float s_aec_ref_e_play = 0.0f;    // 本轮播放里最响的参考能量（分母口径的同一把尺子）
+
+// ── 双讲检测：麦克风/参考 能量比（= 回声通路增益）──
+// 【为什么必须有】"输出/参考"判的是 AEC 残余，纯回声的残余按定义就是回声，
+// 它天然能超本底（实测误触发：窗13.3%、本底1.4% = 9.7 倍、回波相关只有 0.20，
+// 现有判据全部合格 → 播放 7 秒后自己打断自己）。
+// 但回声通路的 (麦克风能量/参考能量) 是恒定的；用户一开口，麦克风里多了他那份
+// 能量，这个比值才会明显抬起来。用一个慢跟随的下限基线 s_dt_gain 表示"纯回声
+// 应有的大小"，只有比值超过它 2 倍（+3dB）才认为真的有人在说话。
+static float s_dt_gain = 0.0f;    // 纯回声时的 麦克风/参考 能量比（前 20 帧比值的中位数）
+static float s_dt_ratio = 0.0f;   // 当前帧的 麦克风/参考 能量比
+static float s_dt_buf[20];        // 学习期样本（取中位数抗偶发人声）
+static int s_dt_n = 0;            // 已收集样本数
+static bool s_dt_learned = false; // 基线是否已定型
+// 【为什么"按帧学中位数"】原先按"起播 600ms 墙钟"学习，实测 AFE 前几百毫秒没有帧
+// 产出，等第一帧进来窗口已过，s_dt_n 一直是 0 → 基线永远 0.00、双讲门等于没装
+// （日志里 8 次触发全是 "双讲比=x/基线0.00"）。改成"收满 20 帧有效比值取中位数"：
+// 与时间无关；中位数还能扛住学习期里夹杂的几帧人声。
 // 本帧参考环位置快照：估计与取数共用同一个 w，避免两阶段之间漂移
 static int s_aec_ref_w = 0;
 static int s_aec_ref_valid = 0;
@@ -1478,6 +1500,10 @@ static void afe_task(void *arg)
             s_aec_win_ratio = 0.0f;  // 新一轮：上一轮播放的窗读数绝不沿用
             s_aec_ref_peak_play = 0;  // 本轮的响度尺子重新起量（音量/内容每轮都不同）
             s_aec_ref_e_play = 0.0f;
+            s_dt_gain = 0.0f;         // 双讲基线按流重学：不同句子的音量/内容不同
+            s_dt_ratio = 0.0f;
+            s_dt_n = 0;
+            s_dt_learned = false;
             // 【每条播放流都重新标定滞后】发出账本 E 的起点跟着每条流的开始走。
             // 起播相位已由 audio.c 灌满 DMA 队列固定（发出延迟=队列深度），锁出来的
             // 应当只剩 codec+声学这个小常数；标定在有效参考出现之前完成（参考置零 =
@@ -1524,6 +1550,27 @@ static void afe_task(void *arg)
                 aec_out_win_append(res->data, chunksize);
             }
             vad_speech = (res->vad_state == VAD_SPEECH);
+            // 双讲检测：收满 20 帧 麦克风/参考 能量比，取中位数作为"纯回声"基线
+            if (s_aec_ref_e > 1.0e7f && mic_e > 0.0f) {
+                s_dt_ratio = mic_e / s_aec_ref_e;
+                if (!s_dt_learned) {
+                    const int cap = (int)(sizeof(s_dt_buf) / sizeof(s_dt_buf[0]));
+                    if (s_dt_n < cap) {
+                        s_dt_buf[s_dt_n++] = s_dt_ratio;
+                    } else {
+                        float tmp[20];
+                        memcpy(tmp, s_dt_buf, sizeof(tmp));
+                        for (int i = 1; i < cap; i++) {   // 插入排序（20 个元素，够用）
+                            float key = tmp[i];
+                            int j = i - 1;
+                            while (j >= 0 && tmp[j] > key) { tmp[j + 1] = tmp[j]; j--; }
+                            tmp[j + 1] = key;
+                        }
+                        s_dt_gain = tmp[cap / 2];
+                        s_dt_learned = true;
+                    }
+                }
+            }
             if (s_aec_ref_peak > s_aec_ref_peak_play) s_aec_ref_peak_play = s_aec_ref_peak;
             if (s_aec_ref_e > s_aec_ref_e_play) s_aec_ref_e_play = s_aec_ref_e;
             // 计入残余/标定的条件：这一刻参考里确实有声音（既要够响，也要够得上
@@ -1629,7 +1676,22 @@ static void afe_task(void *arg)
             bool over_floor = aec_margin * 100.0f >= AEC_VOICE_MARGIN_PCT;
             bool win_fresh = s_aec_win_ratio > 0.0f
                              && (now - s_aec_win_ratio_tick) * portTICK_PERIOD_MS <= AEC_WIN_HOLD_MS;
+            // 【参考静音窗口】TTS 句间/句尾会有一小段参考为 0（有效参考帧=0）：
+            // 此时"输出/参考"这个比值根本没有意义，旧实现一律拦截，用户正好在
+            // 这段空档插话就完全打不断——实测一次播放里 87 次命中被拦，绝大多数
+            // 是"本窗无有效参考"。参考本身就是静音 = 不存在自家回声，可以安全
+            // 放行，只把能量门限抬高 6dB，避免单纯底噪把人声判据顶过去。
+            // 【不要给"参考=0"开静音窗后门】2026-10-26 两次实测都栽在这里：
+            // AEC 没锁上时会把参考置零（解码后置零，但写队列还在涨），此时"参考=0"
+            // 并不代表扬声器没出声，而是"回声没被消、原样进了麦克风"。一旦把这种
+            // 状态当静音放行，自家 TTS 立刻被判成人声 → 播放 1~3 秒就自己打断自己。
+            // 判据只有一条：AEC 已对齐 + 窗内比值超本底 2.5 倍 + 窗读数新鲜。
+            // 想要更灵敏必须先把 AEC 锁上（粗搜失败的那条流），别在这里开口子。
             bool echo_ok = s_aec_lag_valid && !s_aec_diverged && over_floor && win_fresh;
+            // 【双讲门】麦克风能量必须明显超过"纯回声应有的水平"（2 倍 = +3dB）。
+            // 基线还没学到（本流刚起播）时先放行，由上面三条判据兜底。
+            bool dt_ok = (!s_dt_learned) || (s_dt_ratio > s_dt_gain * 2.0f);
+            if (!dt_ok) echo_ok = false;
 
             // 【实时打断开关关闭 = 旧行为】VAD 打断整链跳过（只保持计数复位），
             // 唤醒词打断（下方 WakeNet 对 AEC 输出检测）与按键打断不受影响。
@@ -1692,12 +1754,13 @@ static void afe_task(void *arg)
                         ESP_LOGI(TAG, "=========================================");
                         ESP_LOGI(TAG, "VAD 实时打断! (播放 %dms 后检测到人声, vol=%.1f dBFS, "
                                      "滞后=%dms 置信=%.2f, 超本底=%.1f倍[窗%.1f%%/本底%.1f%%], "
-                                     "有效%d帧 窗龄%dms, 回波相关=%.2f)",
+                                     "有效%d帧 窗龄%dms, 回波相关=%.2f, 双讲比=%.2f/基线%.2f)",
                                  play_ms, res->data_volume, s_aec_lag_ms, s_aec_lag_conf,
                                  aec_margin, s_aec_win_ratio * 100.0f, s_aec_floor_ratio * 100.0f,
                                  s_aec_resid_frames,
                                  (int)((now - s_aec_win_ratio_tick) * portTICK_PERIOD_MS),
-                                 echo_conf < 0.0f ? -1.0f : echo_conf);
+                                 echo_conf < 0.0f ? -1.0f : echo_conf,
+                                 s_dt_ratio, s_dt_gain);
                         ESP_LOGI(TAG, "=========================================");
                         // 逐帧摊开这一窗：哪几帧在把比值推上去（"-" = 该帧无有效参考）。
                         // 三帧就能把窗从 14% 抬到 77%，不摊开只看汇总分不清是人声还是仪器。
@@ -2660,6 +2723,13 @@ void wakeup_preroll_clear(void)
 int wakeup_preroll_take(int16_t *dst, int max_samples)
 {
     if (!s_preroll_armed || s_preroll == NULL || dst == NULL || max_samples <= 0) return 0;
+
+    // 诊断用的快照：必须在【临界区外】打印。ESP_LOGI 会走 vprintf/锁，在关中断的
+    // 临界区里调用会直接 abort()（实测 "abort() was called at PC 0x4037762f"，
+    // 触发点正是开麦后第一次取预缓冲）。
+    uint64_t dbg_start = 0, dbg_oldest = 0, dbg_total = 0, dbg_onset = 0;
+    bool dbg_valid = false, dbg_first = false;
+
     portENTER_CRITICAL(&s_preroll_mux);
 
     // 缓冲里最旧的样本（绝对序号）
@@ -2675,6 +2745,12 @@ int wakeup_preroll_take(int16_t *dst, int max_samples)
         }
         s_preroll_read_abs = start;
         s_preroll_read_started = true;
+        dbg_first = true;
+        dbg_start = start;
+        dbg_oldest = oldest;
+        dbg_total = s_preroll_total;
+        dbg_onset = s_preroll_onset_abs;
+        dbg_valid = s_preroll_onset_valid;
     }
 
     uint64_t avail = (s_preroll_total > s_preroll_read_abs)
@@ -2685,6 +2761,11 @@ int wakeup_preroll_take(int16_t *dst, int max_samples)
         s_preroll_onset_valid = false;
         s_preroll_read_started = false;
         portEXIT_CRITICAL(&s_preroll_mux);
+        if (dbg_first) {
+            ESP_LOGI(TAG, "预缓冲定位: 起点=%llu 最旧=%llu 总数=%llu 语音起点=%llu(有效=%d) 可发=0",
+                     (unsigned long long)dbg_start, (unsigned long long)dbg_oldest,
+                     (unsigned long long)dbg_total, (unsigned long long)dbg_onset, (int)dbg_valid);
+        }
         return 0;
     }
     int n = (avail < (uint64_t)max_samples) ? (int)avail : max_samples;
@@ -2704,6 +2785,13 @@ int wakeup_preroll_take(int16_t *dst, int max_samples)
         s_preroll_read_started = false;
     }
     portEXIT_CRITICAL(&s_preroll_mux);
+
+    if (dbg_first) {
+        ESP_LOGI(TAG, "预缓冲定位: 起点=%llu 最旧=%llu 总数=%llu 语音起点=%llu(有效=%d) 可发=%lld",
+                 (unsigned long long)dbg_start, (unsigned long long)dbg_oldest,
+                 (unsigned long long)dbg_total, (unsigned long long)dbg_onset, (int)dbg_valid,
+                 (long long)((dbg_total > dbg_start) ? (dbg_total - dbg_start) : 0));
+    }
     return n;
 }
 
@@ -2713,7 +2801,14 @@ bool wakeup_take_barge_in(void)
     s_barge_in_pending = false;
     // 打断会话才放行预缓冲回灌；正常唤醒顺手清掉，免得把上一段 TTS 喂进 ASR
     if (v) {
+        portENTER_CRITICAL(&s_preroll_mux);
         s_preroll_armed = true;
+        // 【每轮打断都必须重新定位读游标】上一次回灌如果被中途掐断（ASR 超时、
+        // 采集任务提前退出），read_started 会留在 true，下一轮就不会再按
+        // "语音起点前 300ms" 定位，而是从上一轮的旧游标继续读 → 回灌变成整段
+        // 1.5s 的旧音频（实测仍然 24000 样本、用户话头被淹没）。
+        s_preroll_read_started = false;
+        portEXIT_CRITICAL(&s_preroll_mux);
     } else {
         wakeup_preroll_clear();
     }
