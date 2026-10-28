@@ -1408,6 +1408,14 @@ const char *websocket_get_http_base(void)
     return s_server_http_base;
 }
 
+// 当前是否处于"ASR 已结束、会话还没结束"的思考窗（iat_end → session_end）。
+// s_llm_start_ms 的生命周期正好是这个窗口：iat_start 清零、iat_end 置位、
+// session_end 清零。供 wakeup.c 的思考窗 VAD 打断使用。
+bool websocket_is_awaiting_reply(void)
+{
+    return s_llm_start_ms > 0;
+}
+
 // 重置对话状态（唤醒/打断时调用，与 Arduino wakeUp 中 esp_ai_session_id = "" 一致）
 void websocket_reset_conversation_state(void)
 {

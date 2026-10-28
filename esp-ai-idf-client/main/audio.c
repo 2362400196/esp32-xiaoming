@@ -30,12 +30,14 @@
 #define SPK_RESIDUAL_BUF_SIZE 4096
 #endif
 
-// 麦克风采集目标间隔
+// 麦克风采集目标间隔：代码是 20ms（注释里长期写成 40ms，与实际不符）。
+// 注意每个包是 32ms 音频，I2S 阻塞读本身就把节奏压到 ~32ms，这个下限只在
+// 积压后突发补发时生效，不是稳态节奏。
 #define MIC_TARGET_INTERVAL_US 20000
-// 打断预缓冲回灌间隔：1KB/帧，比实时快 3.2 倍。1.5 秒的话头要在半秒内补完，
-// 否则用户后半句还没到、服务端就先超时了；但仍保持小帧，不重犯"大二进制帧
-// 撑爆 TCP 缓冲区导致 WebSocket 断开"。
-#define MIC_PREROLL_INTERVAL_MS 10
+// 打断预缓冲回灌间隔：1KB/帧，比实时快 10 倍。回灌期间读不到 live 麦克风，
+// 这段时间越长，交接窗里丢的现场语音越多（旧值 10ms 只有 3.2 倍实时，回灌
+// 1.5 秒要 ~470ms，实测正好丢半句）。仍保持小帧，不重犯"大二进制帧撑爆 TCP"。
+#define MIC_PREROLL_INTERVAL_MS 3
 
 // 看门狗超时阈值（每5ms一次检查）
 #define SPK_WATCHDOG_TIMEOUT_NORMAL 2000   // 10秒
@@ -113,6 +115,11 @@ static volatile bool s_spk_need_reset = false;
 static volatile bool s_spk_overflow = false;
 static volatile bool s_spk_drain_done = false;
 static volatile bool s_spk_reset_decoder_flag = false;  // 异步重置解码器标志
+// 打断静音闩锁：VAD/唤醒词在播放中触发打断时置位，audio_spk_hard_stop() 解除。
+// 作用：mute_now() 到 handle_wakeup 真正跑起来之间（实测最多 ~545ms），服务端
+// 可能还有旧 TTS 的 play_audio 在路上；没有这个闩锁，那些包会把 audio_spk_play()
+// 重新拉起来，刚静音又被播回去，用户听到的就是"打断后还冒出半句"。
+static volatile bool s_spk_muted = false;
 static int s_spk_frame_count = 0;  // 调试：解码帧计数
 static int64_t s_last_i2s_write_us = 0;  // I2S 写入时间戳，用于检测写入间隔
 static volatile bool s_spk_prebuffer = false;  // 预缓冲进行中（等待流缓冲积累足够音频）
@@ -950,11 +957,11 @@ static void mic_task(void *arg)
     // 1024 bytes @ 16kHz 16bit mono = 32ms 音频
     // 目标间隔 40ms（80% 实时率），给 WiFi 半双工留出接收 ACK 的时间窗口
     int64_t cycle_start = esp_timer_get_time();
-    const int64_t target_interval_us = MIC_TARGET_INTERVAL_US;  // 40ms
+    const int64_t target_interval_us = MIC_TARGET_INTERVAL_US;  // 20ms（见定义处说明）
 
     // ── 打断预缓冲回灌 ──
     // 打断触发到开麦之间差了 0.4~0.5 秒，而用户那句话早就在说了：判据本身要攒满
-    // 一个能量窗才敢确认"这不是自家回声"。不把这 1.5 秒补发出去，服务端收到的
+    // 一个能量窗才敢确认"这不是自家回声"。不把这 2.5 秒补发出去，服务端收到的
     // 就只是打断之后的静音（实测采集统计"人声帧 0"→"5s 无有效语音"）。
     // 只有 VAD 实时打断会话取得到内容，正常唤醒/普通采集一律返回 0。
     {
@@ -978,10 +985,39 @@ static void mic_task(void *arg)
             }
             if (peak > mic_peak) mic_peak = peak;
             if (peak >= 2000) loud_frames++;
-            vTaskDelay(pdMS_TO_TICKS(MIC_PREROLL_INTERVAL_MS));  // 3.2× 实时：别把 TCP 灌爆
+            vTaskDelay(pdMS_TO_TICKS(MIC_PREROLL_INTERVAL_MS));  // 小帧快发：别把 TCP 灌爆
         }
         if (preroll_samples > 0) {
             ESP_LOGI(TAG, "打断预缓冲已回灌: %d 样本(约 %dms)", preroll_samples, preroll_samples / 16);
+        }
+        // 回灌期间没有读 live 麦克风，RX DMA 里积的正是这段时间的现场语音
+        // （扬声器已在触发瞬间静音，这段是纯人声），和刚回灌的尾段首尾相接。
+        // 这里不限速地补发出去：留在 DMA 里等主循环按 20ms 节流慢慢读，只会让
+        // ASR 的音频时间线越拖越远（旧实现 3.2× 回灌时这段直接溢出丢失）。
+        // 注意不是丢弃——这些样本 afe_task 已经停止读取，不在预缓冲里。
+        {
+            size_t caught = 0, cbytes = 0;
+            int guard = 0;
+            while (s_mic_running && websocket_is_connected() && guard++ < 32
+                   && i2s_channel_read(s_mic_handle, buffer, MIC_CHUNK_SIZE, &cbytes, 0) == ESP_OK
+                   && cbytes > 0) {
+                if (websocket_send_binary(buffer, cbytes) != ESP_OK) break;
+                caught += cbytes;
+                sent_frames++;
+                // 与主循环同口径的采集统计
+                const int16_t *pcm = (const int16_t *)buffer;
+                int n = (int)(cbytes / sizeof(int16_t));
+                int peak = 0;
+                for (int i = 0; i < n; i++) {
+                    int v = pcm[i] < 0 ? -pcm[i] : pcm[i];
+                    if (v > peak) peak = v;
+                }
+                if (peak > mic_peak) mic_peak = peak;
+                if (peak >= 2000) loud_frames++;
+            }
+            if (caught > 0) {
+                ESP_LOGW(TAG, "回灌后补发 RX 积压: %d 字节(约 %dms)", (int)caught, (int)(caught / 32));
+            }
         }
     }
 
@@ -1345,6 +1381,14 @@ bool audio_spk_is_playing(void)
 
 esp_err_t audio_spk_play(void)
 {
+    // 打断静音闩锁：从检测到打断到 handle_wakeup 完成清理之间，旧 TTS 的
+    // play_audio 还可能陆续到达。这里直接忽略，避免"刚静音又冒出半句"。
+    // 闩锁由 audio_spk_hard_stop() 解除（handle_wakeup 里紧接着调用）。
+    if (s_spk_muted) {
+        ESP_LOGW(TAG, "打断静音未解除，忽略本次播放请求");
+        return ESP_OK;
+    }
+
     ESP_LOGI(TAG, "开始音频播放...");
 
     // 通知板级扩展组件（extras）：音频播放开始
@@ -1435,6 +1479,7 @@ esp_err_t audio_spk_hard_stop(void)
 
     // 1. 关闭播放闸门
     s_spk_ing = false;
+    s_spk_muted = false;      // 打断静音闩锁到此解除：完整清理已完成，后续 play_audio 属于新回合
     s_spk_wait_drain = false;
     s_spk_drain_done = false;
     s_spk_prebuffer = false;  // 硬停止时清除预缓冲，避免残留
@@ -1458,6 +1503,33 @@ esp_err_t audio_spk_hard_stop(void)
     //    下一次循环顶部检测并安全地释放/重建解码器。
     if (s_audio_mutex) xSemaphoreGive(s_audio_mutex);
 
+    return ESP_OK;
+}
+
+// 打断瞬间的"快静音"（在检测任务里直接调用，见 config.h 声明）。
+// 只做两件事：关播放闸门、请求 spk_task 清 TX DMA。流缓冲/解码器/待播放数据
+// 的完整清理仍由随后的 audio_spk_hard_stop() 负责，两处都不改对方的状态机。
+// 关闸门后 spk_task 顶部的 !s_spk_ing 分支会把新到的 play_audio 直接丢弃，
+// 所以这中间即使服务端还在推旧 TTS，也不会有声音漏出来。
+esp_err_t audio_spk_mute_now(void)
+{
+    bool was_playing = false;
+    if (s_audio_mutex) xSemaphoreTake(s_audio_mutex, portMAX_DELAY);
+    was_playing = s_spk_ing;
+    s_spk_ing = false;
+    s_spk_wait_drain = false;
+    s_spk_prebuffer = false;
+    if (s_spk_pending_buf != NULL) s_spk_pending_len = 0;
+    // 只有确实在播才需要闩锁/清 DMA：思考窗调用时本来就没有音频在路上，
+    // 挂闩锁反而要靠后续 hard_stop 才能解开，没必要。
+    if (was_playing) {
+        s_spk_muted = true;      // 拦住 mute_now → hard_stop 之间到达的旧 play_audio
+        s_spk_need_reset = true; // spk_task 看到 need_reset+!ing 会 disable/enable I2S 清 DMA
+    }
+    if (s_audio_mutex) xSemaphoreGive(s_audio_mutex);
+    if (was_playing) {
+        ESP_LOGW(TAG, "打断快静音: 播放闸门已关，等待 spk_task 清 DMA");
+    }
     return ESP_OK;
 }
 

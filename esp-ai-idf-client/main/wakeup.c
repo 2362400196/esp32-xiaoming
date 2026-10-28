@@ -1249,9 +1249,13 @@ static void wakenet_task(void *arg)
 static bool afe_window_open(void)
 {
     if (!s_wakenet_paused) return true;   // 空闲唤醒检测
-    // 打断窗口 / 交接窗：会话中 + ASR 未在采集 + （正在播放 或 打断后等开麦）
-    return !audio_mic_is_running()
-           && (audio_spk_is_playing() || s_bargein_handoff);
+    // 会话中：只要 ASR 没在采集，AFE 就该继续听。三个窗口共用这一条口径：
+    //   1) TTS 播放中 —— VAD 打断 + 唤醒词打断
+    //   2) 交接窗 —— 打断已触发、等 iat_start
+    //   3) 思考窗 —— ASR 已停、TTS 还没起播（LLM 生成中）
+    // 旧实现只放行 1)2)（还额外要求"正在播放"）：思考那 1~3 秒整段没人读麦克风，
+    // 用户插话必然丢失，表现为"说完想改口，它完全没反应"。
+    return !audio_mic_is_running();
 }
 
 // ==================== RX 积压：把麦克风拉回最新采样 ====================
@@ -1318,10 +1322,19 @@ static void afe_task(void *arg)
     int vad_echo_leaks = 0;   // 能量够但判定为自家回声漏出、被拦下的帧数（诊断）
     bool prev_playing = false;
     TickType_t spk_play_start_tick = 0;
-#define VAD_BARGE_IN_ARM_MS     600   // 播放起始保护期（AEC 收敛窗口）
+#define VAD_BARGE_IN_ARM_MS     600   // 播放起始保护期（AEC 尚未收敛时的窗口）
+// 【AEC 已锁定时不需要等满 600ms】保护期的物理意义只是"等滤波器收敛 + 学本底"。
+// 本流已锁定（lag_valid && !diverged）时这两件事早就完成了，再压 600ms 只会让
+// "好的/嗯"这类 1~2 秒的短回复整段不可打断。实测锁定后 300ms 内本底已稳定。
+#define VAD_BARGE_IN_ARM_MS_LOCKED 300
 #define VAD_BARGE_IN_MIN_FRAMES 5     // 开闸后连续人声帧数（每帧约 32ms，5 帧 ≈ 160ms）
 #define VAD_BARGE_IN_MIN_DBFS   (-35.0f)  // AEC 后能量门限：真人近讲约 -25~-15dBFS，
                                           // 收敛后残余回声约 -45~-35dBFS，低于门限不打断
+// ── 思考窗（ASR 已停、TTS 未起播）──
+// 这段没有自家回声，不需要 AEC 判据；但必须防"用户刚说完的尾音"把本轮回答打断：
+// 开窗后先静默 VAD_THINK_GUARD_MS，且要求更长的连续人声（8 帧 ≈ 256ms）。
+#define VAD_THINK_GUARD_MS   800
+#define VAD_THINK_MIN_FRAMES 8
     // 循环单帧耗时（不含阻塞读）：>32ms 就意味着麦克风会积压，AEC 的滞后会跟着漂。
     // 只做诊断，打在 16 帧一次的"回声对齐"行里（serial28 判读全靠这个数）。
     int64_t s_work_sum_us = 0;
@@ -1485,8 +1498,30 @@ static void afe_task(void *arg)
             (xTaskGetTickCount() - s_bargein_handoff_tick) * portTICK_PERIOD_MS > WAKEUP_PREROLL_MS) {
             s_bargein_handoff = false;
         }
+
+        // ── 思考窗：ASR 已停、TTS 还没起播（等服务端 LLM）──
+        // 提前算出来：预缓冲（下方 push）和打断判据（VAD 分支）用同一口径。
+        // 这段没有自家回声，是唯一能安全用纯 VAD 判打断的窗口。旧实现只在
+        // playing 时放行判据，思考那 1~3 秒用户改口/插话完全没人理（S3 上
+        // 只有唤醒词能打断，C3 上连 WakeNet 都没恢复 = 整段聋）。
+        // 用 websocket 的"ASR 已结束、会话未结束"标志界定，避免待机时
+        // 随便说话就被当成打断。
+        static TickType_t s_think_win_tick = 0;
+        TickType_t now_think = xTaskGetTickCount();
+        bool think_window = !playing && !audio_mic_is_running()
+                            && websocket_is_awaiting_reply()
+                            && !s_barge_in_pending
+                            && !s_bargein_handoff;   // 交接窗内别重复触发
+        if (think_window) {
+            if (s_think_win_tick == 0) s_think_win_tick = now_think;
+        } else {
+            s_think_win_tick = 0;
+        }
+        int think_ms = think_window
+                           ? (int)((now_think - s_think_win_tick) * portTICK_PERIOD_MS) : 0;
         if (!playing) {
-            vad_consec = 0;
+            // 思考窗要累计连续人声帧数，不能被这里的复位清掉（否则永远到不了 8 帧）
+            if (!think_window) vad_consec = 0;
             if (prev_playing) margin_report();   // 本轮播放结束：交出余量分布
         } else if (!prev_playing) {
             // 播放刚开始：记录起始时间并重置计数（进入 AEC 收敛保护期）
@@ -1620,10 +1655,12 @@ static void afe_task(void *arg)
                 s_work_sum_us = 0;
                 s_work_n = 0;
             }
-        } else if (s_bargein_handoff && res->data != NULL) {
+        } else if ((s_bargein_handoff || think_window) && res->data != NULL) {
             // 打断已触发、iat_start 还没到：扬声器已硬停（参考归零，AEC 这段近似直通），
             // 继续攒的就是他正在说的这句话。此前采集只在 if (playing) 里做，实测
             // 交接那 0.55 秒没人读麦克风——serial15 第二轮服务端整场 5s 无有效语音。
+            // 思考窗同样要攒：VAD 判据要先攒 8 帧（256ms）才敢触发，触发时用户已经
+            // 说了一截，不回灌就只剩"嗯"后面的半句。
             wakeup_preroll_push(res->data, chunksize);
         }
 
@@ -1673,6 +1710,9 @@ static void afe_task(void *arg)
             TickType_t now = xTaskGetTickCount();
             int play_ms = (int)((now - spk_play_start_tick) * portTICK_PERIOD_MS);
             bool speech = playing && vad_speech;
+            // 保护期动态化：AEC 已锁定就不必再等滤波器收敛/学本底。
+            bool aec_locked = s_aec_lag_valid && !s_aec_diverged;
+            int arm_ms = aec_locked ? VAD_BARGE_IN_ARM_MS_LOCKED : VAD_BARGE_IN_ARM_MS;
             bool over_floor = aec_margin * 100.0f >= AEC_VOICE_MARGIN_PCT;
             bool win_fresh = s_aec_win_ratio > 0.0f
                              && (now - s_aec_win_ratio_tick) * portTICK_PERIOD_MS <= AEC_WIN_HOLD_MS;
@@ -1698,7 +1738,39 @@ static void afe_task(void *arg)
             // 开关来自管理后台 vad_barge_in_enabled，NVS 持久化，见 wakeup_load_barge_in_enabled。
             if (!s_barge_in_enabled) {
                 vad_consec = 0;
-            } else if (!playing || play_ms < VAD_BARGE_IN_ARM_MS) {
+            } else if (think_window) {
+                // 无回声，判据只剩三条：人声 + 能量够 + 连续够长。
+                // 开窗初期静默，防"用户刚说完的尾音"把本轮回答打断。
+                if (think_ms < VAD_THINK_GUARD_MS) {
+                    vad_consec = 0;
+                } else if (vad_speech && res->data_volume > VAD_BARGE_IN_MIN_DBFS) {
+                    if (++vad_consec >= VAD_THINK_MIN_FRAMES) {
+                        if (gif_download_is_busy() || ota_is_updating()) {
+                            static TickType_t s_last_think_ignored = 0;
+                            if ((now - s_last_think_ignored) * portTICK_PERIOD_MS > 5000) {
+                                s_last_think_ignored = now;
+                                ESP_LOGW(TAG, "表情下载/OTA升级中，忽略思考窗打断（完成后自动恢复）");
+                            }
+                        } else {
+                            ESP_LOGI(TAG, "=========================================");
+                            ESP_LOGI(TAG, "思考窗实时打断! (ASR 已停 %dms, vol=%.1f dBFS, 连续 %d 帧)",
+                                     think_ms, res->data_volume, vad_consec);
+                            ESP_LOGI(TAG, "=========================================");
+                            audio_spk_mute_now();   // 通常没在播，幂等兜底
+                            wakeup_preroll_mark_onset(vad_consec);
+                            s_last_wakeup_trigger_tick = now;
+                            s_barge_in_pending = true;
+                            s_bargein_handoff = true;
+                            s_bargein_handoff_tick = now;
+                            xEventGroupSetBits(s_wakeup_event_group, WAKEUP_TRIGGERED_BIT);
+                            s_wakenet_paused = true;
+                        }
+                        vad_consec = 0;
+                    }
+                } else {
+                    vad_consec = 0;
+                }
+            } else if (!playing || play_ms < arm_ms) {
                 vad_consec = 0;
                 if (speech && (++vad_protect_hits % 16 == 0)) {
                     // 保护期内的 VAD 命中只打日志（data_volume 为 AEC 后能量，用于校准阈值）
@@ -1785,6 +1857,11 @@ static void afe_task(void *arg)
                         ESP_LOGI(TAG, "  回灌起点: 语音起点前 %dms（连续人声 %d 帧 ≈ %dms）",
                                  WAKEUP_PREROLL_LEAD_MS, vad_consec,
                                  vad_consec * 32);
+                        // 【快静音】停播不能等 app_main（prio 1）去跑 handle_wakeup：
+                        // 实测那条路要 545ms，这半秒扬声器还在响，用户听到的是
+                        // "我说话它还在念"，而且双讲让 AEC 更难压。这里在检测任务
+                        // （prio 7）直接关闸门，spk_task（prio 8）随即清 DMA。
+                        audio_spk_mute_now();
                         s_last_wakeup_trigger_tick = now;
                         s_barge_in_pending = true;
                         s_bargein_handoff = true;          // 开麦前的采集交接窗（见上文预缓冲回灌）
@@ -1842,6 +1919,8 @@ static void afe_task(void *arg)
                         ESP_LOGI(TAG, "检测到语音唤醒!");
                     }
                     ESP_LOGI(TAG, "=========================================");
+                    // 播放中喊唤醒词打断：同样要立刻静音，别等 app_main（prio 1）。
+                    if (spk_now) audio_spk_mute_now();
                     xEventGroupSetBits(s_wakeup_event_group, WAKEUP_TRIGGERED_BIT);
                     s_wakenet_paused = true;
                     ESP_LOGI(TAG, "语音唤醒已暂停，等待会话结束");
@@ -2646,7 +2725,7 @@ bool wakeup_is_paused(void)
 // 正确），但他那句从 225900 就在说；开麦后 4.9 秒采到的全是静音（采集统计
 // "人声帧 0、峰值 791"），服务端只能报"5s 无有效语音"——这就是"打断后我说话它
 // 收不到音"。所以播放期间把 AEC 输出（回声已被压掉，可直接喂 ASR）滚动存下
-// 1.5 秒，开麦时先回灌这一段，再开始采新数据。
+// WAKEUP_PREROLL_MS（2.5 秒），开麦时先回灌这一段，再开始采新数据。
 // 【只有 VAD 实时打断允许回灌】正常唤醒时这段里全是自家 TTS，喂进识别等于让它
 // "听见自己"，所以 armed 标志由 wakeup_take_barge_in() 决定。
 static int16_t *s_preroll = NULL;
@@ -2681,10 +2760,18 @@ void wakeup_preroll_push(const int16_t *samples, int num)
     }
     portENTER_CRITICAL(&s_preroll_mux);
     s_preroll_frame_num = num;
-    for (int i = 0; i < num; i++) {
-        s_preroll[s_preroll_pos] = samples[i];
-        if (++s_preroll_pos >= WAKEUP_PREROLL_MAX_SAMPLES) s_preroll_pos = 0;
+    // 环形写用两段 memcpy 代替逐样本循环：push 在 afe_task 的每帧热路径上，
+    // 逐样本写 512 个 int16 要关中断几十 µs，会拉长 I2S 读取/中断延迟。
+    int first = num;
+    if (s_preroll_pos + num > WAKEUP_PREROLL_MAX_SAMPLES) {
+        first = WAKEUP_PREROLL_MAX_SAMPLES - s_preroll_pos;
     }
+    memcpy(&s_preroll[s_preroll_pos], samples, (size_t)first * sizeof(int16_t));
+    if (first < num) {
+        memcpy(&s_preroll[0], samples + first, (size_t)(num - first) * sizeof(int16_t));
+    }
+    s_preroll_pos += num;
+    if (s_preroll_pos >= WAKEUP_PREROLL_MAX_SAMPLES) s_preroll_pos -= WAKEUP_PREROLL_MAX_SAMPLES;
     s_preroll_total += (uint64_t)num;
     if (s_preroll_len + num > WAKEUP_PREROLL_MAX_SAMPLES) {
         s_preroll_len = WAKEUP_PREROLL_MAX_SAMPLES;   // 满了：最旧的一段被覆盖

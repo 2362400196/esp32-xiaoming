@@ -165,6 +165,11 @@ esp_err_t websocket_send_text(const char *text);
 esp_err_t websocket_send_text_nb(const char *text);
 esp_err_t websocket_send_binary(const uint8_t *data, size_t len);
 bool websocket_is_connected(void);
+// 当前是否处于"ASR 已结束、会话还没结束"的思考窗（iat_end → session_end）。
+// 这段没有 TTS 在播，设备端可以只用 VAD 判打断（无回声）。
+// 不能用 wakeup_is_paused() 代替：S3 在 iat_end 就 wakeup_resume() 了，
+// 思考和播放期间 paused 都是 false。
+bool websocket_is_awaiting_reply(void);
 bool websocket_is_music_streaming(void);
 void websocket_cache_clear(void);
 bool websocket_cache_get_tone(const uint8_t **data, size_t *len);
@@ -196,6 +201,10 @@ bool audio_spk_is_playing(void);
 uint32_t audio_spk_tx_epoch(void);
 esp_err_t audio_spk_stop(void);
 esp_err_t audio_spk_hard_stop(void);
+// 打断瞬间的"快静音"：只关播放闸门 + 让 spk_task 清 TX DMA，不做完整清理。
+// 必须由检测到打断的那个任务（afe_task，prio 7）直接调用——把停播留给
+// app_main（prio 1）去跑 handle_wakeup 实测要 545ms，扬声器会继续响半秒。
+esp_err_t audio_spk_mute_now(void);
 esp_err_t audio_spk_wait_drain(void);
 bool audio_spk_check_drain_done(void);
 // 音量控制（移植自 Arduino esp_ai.setVolume）
@@ -225,7 +234,10 @@ bool wakeup_take_barge_in(void);    // 取走并清零"本次唤醒来自 VAD �
 // 打断预缓冲：播放期间滚动保存 AEC 输出，VAD 实时打断开麦时先回灌这一段
 // （判据攒满能量窗要 0.8 秒以上，不回灌就必然丢掉用户那句话的开头）。
 // 只有打断会话能取，正常唤醒取到 0。见 wakeup.c 本节说明。
-#define WAKEUP_PREROLL_MS 1500
+// 【缓冲要覆盖"语音起点 → 开麦"整段】判据要攒 0.16~0.5 秒才敢确认，服务端
+// iat_start 还可能再晚几百 ms；1.5 秒在 onset 靠前时会退化成"从最旧处开始"，
+// 话头直接被截。2.5 秒（80KB PSRAM）留出余量，正常只回灌需要的部分。
+#define WAKEUP_PREROLL_MS 2500
 #define WAKEUP_PREROLL_MAX_SAMPLES (16 * WAKEUP_PREROLL_MS)   // 16kHz 单声道
 // 回灌起点 = 本段连续人声的第一帧，再往前推这么多毫秒。
 // 旧实现固定回灌"最后 1.5 秒"：起点落在整段语音之前，把自家 TTS 尾音一起喂给 ASR
