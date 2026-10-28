@@ -1,0 +1,14 @@
+[
+  {
+    "time": 1793145596.346308,
+    "admin": "admin@test.local",
+    "action": "adjust_balance",
+    "detail": "用户 u1 余额调整 -3.50 元 -> 11.50 元"
+  },
+  {
+    "time": 1793145596.31189,
+    "admin": "admin@test.local",
+    "action": "adjust_balance",
+    "detail": "用户 u1 余额调整 +10.00 元 -> 15.00 元"
+  }
+]

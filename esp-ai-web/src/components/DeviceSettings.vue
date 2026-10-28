@@ -1,4 +1,4 @@
-﻿﻿﻿﻿<template>
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿<template>
   <div class="settings-mask" @click.self="$emit('close')">
     <div class="settings-panel">
       <div class="settings-head">
