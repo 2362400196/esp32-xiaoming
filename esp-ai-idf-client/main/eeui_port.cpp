@@ -89,6 +89,7 @@ static lv_obj_t *s_emo_dl_overlay = NULL;   // 全屏遮罩
 static lv_obj_t *s_emo_dl_label = NULL;     // "表情下载中..." 文字
 static lv_obj_t *s_emo_dl_bar = NULL;        // 下载进度条（0→100 往复）
 static lv_timer_t *s_emo_dl_timer = NULL;    // 进度条驱动定时器（不用 lv_anim，见下）
+static uint32_t s_emo_dl_ticks = 0;          // 进度条定时器实际执行次数（诊断用）
 
 static int s_screen_width = 240;
 static int s_screen_height = 240;
@@ -1259,6 +1260,7 @@ static void emo_dl_bar_tick(lv_timer_t *t)
 {
     (void)t;
     if (s_emo_dl_bar == NULL || !lv_obj_is_valid(s_emo_dl_bar)) return;
+    s_emo_dl_ticks++;
     static int phase = 0;
     phase = (phase + 6) % 200;                       // 0..199 三角波
     int value = (phase <= 100) ? phase : (200 - phase);
@@ -1305,6 +1307,7 @@ void eeui_port_show_emo_downloading(void)
         lv_obj_set_style_radius(s_emo_dl_bar, 6, LV_PART_INDICATOR);
 
         // 用 lv_timer 驱动扫描（lv_anim 依赖同一套刷新节拍，timer 更可控）
+        s_emo_dl_ticks = 0;
         s_emo_dl_timer = lv_timer_create(emo_dl_bar_tick, 80, NULL);
 
         // 创建提示文字
@@ -1340,7 +1343,8 @@ void eeui_port_hide_emo_downloading(void)
     // 恢复默认表情状态（内部自己加锁，不在锁内调用）
     eeui_port_render_emotion("休息中");
     eeui_port_set_status_text("休息中", true, "top_left");
-    ESP_LOGI(TAG, "隐藏表情下载中提示，恢复表情状态");
+    ESP_LOGI(TAG, "隐藏表情下载中提示，恢复表情状态（进度条定时器执行 %u 次）",
+             (unsigned)s_emo_dl_ticks);
 
     // 预解码关键表情（"聆听中"、"说话中"），消除首次唤醒时的黑框
     // 原理：首次 GIF 解码需要 LZW 解压 + PSRAM 分配 + 首帧渲染，耗时较长
