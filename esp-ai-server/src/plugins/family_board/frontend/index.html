@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>家庭留言板</title>
+<link rel="stylesheet" href="/api/v1/plugins/theme.css">
+<style>
+/* ── 基础 ─────────────────────────────── */
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  background:var(--bg);color:var(--text-main);
+  font-family:'PingFang SC','HarmonyOS Sans SC','Microsoft YaHei',system-ui,sans-serif;
+  min-height:100vh;padding:28px 32px;
+}
+/* ── 顶部 ─────────────────────────────── */
+.hero{margin-bottom:22px}
+.hero-title{font-size:26px;font-weight:700;letter-spacing:.5px}
+.hero-title .highlight{color:var(--accent)}
+.hero-sub{margin-top:6px;font-size:13px;color:var(--text-sub)}
+/* ── 设备卡片 ─────────────────────────── */
+.device-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:16px}
+.device-card{
+  background:var(--glass);border:1px solid var(--glass-border);
+  border-radius:14px;padding:16px 18px;box-shadow:var(--shadow);
+  backdrop-filter:blur(10px);transition:transform .18s ease,box-shadow .18s ease;
+}
+.device-card:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg)}
+.d-head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.d-name{font-size:16px;font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.d-dot{width:8px;height:8px;border-radius:50%;flex:none}
+.d-dot.on{background:var(--accent);box-shadow:0 0 6px var(--accent)}
+.d-dot.off{background:#c2c8cc}
+.d-status{font-size:12px;color:var(--text-sub);flex:none}
+.badge{
+  flex:none;font-size:11px;font-weight:600;color:#fff;background:var(--accent);
+  border-radius:999px;padding:2px 8px;
+}
+.badge.zero{background:#d7dde1;color:#6b767f}
+/* ── 留言条目 ─────────────────────────── */
+.msg-list{display:flex;flex-direction:column;gap:8px}
+.msg-item{
+  border-radius:10px;padding:10px 12px;background:rgba(255,255,255,.55);
+  border:1px solid rgba(0,0,0,.05);
+}
+.msg-item.unread{border-left:3px solid var(--accent)}
+.msg-top{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.msg-from{font-size:13px;font-weight:600}
+.msg-time{font-size:11px;color:var(--text-sub);flex:1}
+.msg-tag{font-size:10px;color:var(--accent);border:1px solid var(--accent);border-radius:4px;padding:0 4px}
+.msg-content{font-size:13px;line-height:1.6;color:var(--text-main);word-break:break-all}
+.msg-ops{margin-top:6px;text-align:right}
+/* ── 按钮（小尺寸）───────────────────── */
+.btn{
+  border:none;border-radius:8px;padding:5px 12px;font-size:12px;cursor:pointer;
+  background:var(--accent);color:#fff;transition:filter .15s ease,transform .1s ease;
+}
+.btn:hover{filter:brightness(1.08)}
+.btn:active{transform:scale(.96)}
+.btn.ghost{background:transparent;color:var(--text-sub);border:1px solid rgba(0,0,0,.12)}
+.btn.ghost:hover{color:var(--accent);border-color:var(--accent);background:rgba(0,0,0,.02)}
+.btn.danger-ghost{background:transparent;color:#c0564f;border:1px solid rgba(192,86,79,.3)}
+.btn.danger-ghost:hover{background:rgba(192,86,79,.06)}
+/* ── 空状态 ───────────────────────────── */
+.empty{
+  grid-column:1/-1;text-align:center;padding:70px 0;color:var(--text-sub);font-size:14px;
+}
+.empty .big{font-size:44px;margin-bottom:12px;opacity:.35}
+/* ── toast（替代原生弹窗）────────────── */
+#toast{
+  position:fixed;left:50%;bottom:36px;transform:translateX(-50%) translateY(20px);
+  background:rgba(30,40,48,.88);color:#fff;font-size:13px;border-radius:10px;
+  padding:9px 18px;opacity:0;pointer-events:none;transition:all .25s ease;z-index:99;
+}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+/* ── 行内删除确认 ─────────────────────── */
+.confirm-bar{display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:6px}
+.confirm-bar span{font-size:12px;color:#c0564f}
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h2 class="hero-title">家庭<span class="highlight">留言板</span></h2>
+  <p class="hero-sub">设备之间互留语音留言 · 对方唤醒时自动播报 · 在线设备即时播送</p>
+</div>
+
+<div class="device-grid" id="grid">
+  <div class="empty"><div class="big">···</div>加载中…</div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const API = '/api/v1/plugins/family_board/exec';
+
+function toast(text){
+  const t = document.getElementById('toast');
+  t.textContent = text;
+  t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(()=>t.classList.remove('show'), 1800);
+}
+
+async function exec(method, args = {}){
+  const headers = {'Content-Type':'application/json'};
+  const token = localStorage.getItem('espai_token') || '';
+  if(token) headers['Authorization'] = 'Bearer ' + token;
+  const res = await fetch(API, {method:'POST', headers, body: JSON.stringify({method, args})});
+  const json = await res.json();
+  if(json.code !== 0) throw new Error(json.message || '请求失败');
+  return json.data;
+}
+
+function fmtTime(ts){
+  if(!ts) return '';
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2,'0');
+  return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function esc(s){
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function render(data){
+  const grid = document.getElementById('grid');
+  const devices = (data && data.devices) || [];
+  if(!devices.length){
+    grid.innerHTML = '<div class="empty"><div class="big">···</div>还没有绑定任何设备，先去添加设备吧</div>';
+    return;
+  }
+  grid.innerHTML = devices.map(d => {
+    const msgs = d.messages || [];
+    const badge = d.unread > 0
+      ? `<span class="badge">${d.unread} 条未读</span>`
+      : `<span class="badge zero">无未读</span>`;
+    const items = msgs.length
+      ? msgs.map(m => `
+        <div class="msg-item ${m.read ? '' : 'unread'}" data-key="${esc(d.device_key)}" data-id="${esc(m.id)}">
+          <div class="msg-top">
+            <span class="msg-from">${esc(m.from_name || '有人')}</span>
+            ${m.read ? '' : '<span class="msg-tag">未读</span>'}
+            <span class="msg-time">${fmtTime(m.ts)}</span>
+          </div>
+          <div class="msg-content">${esc(m.content)}</div>
+          <div class="msg-ops"><button class="btn danger-ghost btn-del">删除</button></div>
+        </div>`).join('')
+      : '<div style="font-size:12px;color:var(--text-sub);padding:8px 2px">收件箱是空的</div>';
+    const clearBtn = msgs.length
+      ? `<button class="btn ghost btn-clear" data-key="${esc(d.device_key)}">清空</button>`
+      : '';
+    return `
+      <div class="device-card">
+        <div class="d-head">
+          <span class="d-dot ${d.online ? 'on' : 'off'}"></span>
+          <span class="d-status">${d.online ? '在线' : '离线'}</span>
+          <span class="d-name">${esc(d.name)}</span>
+          ${badge}
+          ${clearBtn}
+        </div>
+        <div class="msg-list">${items}</div>
+      </div>`;
+  }).join('');
+}
+
+async function refresh(){
+  try{
+    render(await exec('summary'));
+  }catch(e){
+    document.getElementById('grid').innerHTML =
+      `<div class="empty"><div class="big">···</div>${esc(e.message)}</div>`;
+  }
+}
+
+/* 事件委托：删除 / 清空（删除走行内二次确认，不用原生弹窗） */
+document.getElementById('grid').addEventListener('click', async e => {
+  const del = e.target.closest('.btn-del');
+  const clr = e.target.closest('.btn-clear');
+  try{
+    if(del){
+      // 行内确认：按钮临时变成「确认删除」
+      if(del.dataset.confirming !== '1'){
+        del.dataset.confirming = '1';
+        del.textContent = '确认删除';
+        setTimeout(()=>{ del.dataset.confirming = ''; del.textContent = '删除'; }, 2500);
+        return;
+      }
+      const item = del.closest('.msg-item');
+      await exec('delete_message', {device_key: item.dataset.key, msg_id: item.dataset.id});
+      toast('已删除');
+      refresh();
+    }else if(clr){
+      if(clr.dataset.confirming !== '1'){
+        clr.dataset.confirming = '1';
+        clr.textContent = '确认清空';
+        setTimeout(()=>{ clr.dataset.confirming = ''; clr.textContent = '清空'; }, 2500);
+        return;
+      }
+      await exec('clear_inbox', {device_key: clr.dataset.key});
+      toast('收件箱已清空');
+      refresh();
+    }
+  }catch(err){
+    toast(err.message || '操作失败');
+  }
+});
+
+refresh();
+setInterval(refresh, 15000);  // 轻刷新：在线状态与未读数保持新鲜
+</script>
+</body>
+</html>

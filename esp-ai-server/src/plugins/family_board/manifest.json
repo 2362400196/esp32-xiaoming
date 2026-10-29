@@ -1,0 +1,22 @@
+{
+    "id": "family_board",
+    "name": "家庭留言板",
+    "version": "1.0.0",
+    "author": "system",
+    "description": "设备之间互留语音留言：给家里的另一台设备留言，对方唤醒时自动播报；对方在线时立即播送。支持留言查看与管理",
+    "api_version": "1.0",
+    "optional": true,
+    "permissions": ["file_read", "file_write"],
+    "frontend": true,
+    "frontend_config": {
+        "nav_label": "留言板",
+        "nav_icon": "message",
+        "width": "full"
+    },
+    "tools": [
+        "family_board_list_devices",
+        "family_board_send",
+        "family_board_read",
+        "family_board_manage"
+    ]
+}
