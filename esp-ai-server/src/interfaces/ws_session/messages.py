@@ -223,7 +223,8 @@ class MessageLoopMixin:
                                 self._new_wake_pending = False
                                 await fsm.set(SessionState.ASR)
                                 self._start_asr_session()
-                                await asyncio.sleep(0.1)
+                                # 打断路径不额外等待：设备端此刻已经静音并在回灌预缓冲，
+                                # 这 100ms 纯粹推迟开麦，用户感知为"打断后半天没反应"。
                                 await channel.send_json({"type": "session_status", "status": "iat_start"})
                                 logger.info(f"[Session:{session.session_id}] iat_start sent (no wake audio)")
 
