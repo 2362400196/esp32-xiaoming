@@ -160,6 +160,11 @@ static void IRAM_ATTR lv_tick_cb(void *arg)
 }
 
 // ==================== LVGL 主任务 ====================
+// 【优先级为什么是 3】LVGL 原来用 1，和 gif_down(1)、spiffs(2) 同在 core 1。
+// 下载表情时 gif_downloader 会用内部 RAM 栈的一次性任务("spiffs"，优先级 2)
+// 同步写 SPIFFS，写盘期间不让出 CPU，把优先级 1 的 LVGL 整段饿死——现场表现为
+// 下载提示页只画出白底+空进度条、文字和进度条 5 秒不动，下载结束才"活"过来。
+// 提到 3：高于所有后台工作线程(1~2)，仍低于音频/唤醒(5)，UI 始终能刷新。
 static void lvgl_task(void *arg)
 {
     ESP_LOGI(TAG, "LVGL 任务启动");
@@ -394,7 +399,7 @@ esp_err_t eeui_port_init(void)
     ESP_ERROR_CHECK(esp_timer_start_periodic(s_signal_timer, 1000000));
 
     // LVGL 任务（双核 Core 1 / 单核 Core 0, 优先级 1, 16384 栈——GIF 渲染 + LVGL 刷新管线需要大栈）
-    BaseType_t ret = xTaskCreatePinnedToCore(lvgl_task, "LVGL", 16384, NULL, 1, NULL, BOARD_TASK_CORE_1);
+    BaseType_t ret = xTaskCreatePinnedToCore(lvgl_task, "LVGL", 16384, NULL, 3, NULL, BOARD_TASK_CORE_1);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "创建 LVGL 任务失败");
         // 清理已创建的资源：timers、display buffers、LCD panel、mutex
@@ -1247,9 +1252,9 @@ void eeui_port_music_destroy(void)
 // ==================== 表情下载中提示 ====================
 
 // 进度条扫描：用 lv_timer 直接改 value，不走 lv_anim。
-// 【为什么不用 lv_anim】现场"进度条没走就下载完了"——动画没被驱动（这块板 +
-// 这个 LVGL 版本上 lv_anim 在这段页面里不生效），timer 回调是 LVGL 任务里
-// 每 80ms 必定执行的路径，最稳。
+// 【为什么不用 lv_anim】现场"进度条没走就下载完了"——LVGL 任务被下载/写盘任务
+// 饿死（见 lvgl_task 里的优先级说明），动画自然不推进；timer 回调是每 80ms
+// 必定执行的路径，且不依赖动画插值，最稳。
 static void emo_dl_bar_tick(lv_timer_t *t)
 {
     (void)t;
@@ -1299,7 +1304,7 @@ void eeui_port_show_emo_downloading(void)
         lv_obj_set_style_bg_color(s_emo_dl_bar, lv_color_hex(0x4A90D9), LV_PART_INDICATOR);
         lv_obj_set_style_radius(s_emo_dl_bar, 6, LV_PART_INDICATOR);
 
-        // 用 lv_timer 驱动扫描（lv_anim 在这段页面里不生效，实测"条一动没动"）
+        // 用 lv_timer 驱动扫描（lv_anim 依赖同一套刷新节拍，timer 更可控）
         s_emo_dl_timer = lv_timer_create(emo_dl_bar_tick, 80, NULL);
 
         // 创建提示文字
@@ -1308,28 +1313,6 @@ void eeui_port_show_emo_downloading(void)
         lv_obj_set_style_text_font(s_emo_dl_label, &font_puhui_16_4, 0);
         lv_obj_set_style_text_color(s_emo_dl_label, lv_color_hex(0x333333), 0);
         lv_obj_align(s_emo_dl_label, LV_ALIGN_CENTER, 0, 20);
-
-        // 【诊断】先把布局跑一遍再读坐标，否则刚创建的对象坐标还是无效值
-        // (0,0)-(-1,-1)，看不出到底画在哪。
-        {
-            lv_obj_update_layout(s_emo_dl_overlay);
-            lv_area_t oa, ba, la;
-            lv_obj_get_coords(s_emo_dl_overlay, &oa);
-            lv_obj_get_coords(s_emo_dl_bar, &ba);
-            lv_obj_get_coords(s_emo_dl_label, &la);
-            lv_font_glyph_dsc_t gd = {};
-            bool has_glyph = lv_font_get_glyph_dsc(&font_puhui_16_4, &gd, 0x8868 /* 表 */, 0);
-            ESP_LOGI(TAG, "下载提示布局: 屏幕=%dx%d overlay=(%d,%d)-(%d,%d) "
-                          "bar=(%d,%d)-(%d,%d) label=(%d,%d)-(%d,%d) "
-                          "子对象=%d 字形'表'=%d(w=%d) 条值=%d",
-                     s_screen_width, s_screen_height,
-                     (int)oa.x1, (int)oa.y1, (int)oa.x2, (int)oa.y2,
-                     (int)ba.x1, (int)ba.y1, (int)ba.x2, (int)ba.y2,
-                     (int)la.x1, (int)la.y1, (int)la.x2, (int)la.y2,
-                     (int)lv_obj_get_child_count(s_emo_dl_overlay),
-                     (int)has_glyph, has_glyph ? (int)gd.box_w : -1,
-                     (int)lv_bar_get_value(s_emo_dl_bar));
-        }
 
         lvgl_unlock();
     }

@@ -448,20 +448,30 @@ esp-ai-server/
 │   ├── domain/                 # 领域层（最内层，零依赖）
 │   │   ├── entities.py         #   实体：Session, Device, Conversation, Message
 │   │   ├── exceptions.py       #   异常层级
-│   │   ├── repositories.py     #   仓储接口（预留）
+│   │   ├── repositories.py     #   仓储接口
 │   │   ├── services.py         #   领域服务接口
 │   │   └── value_objects.py    #   值对象：EmotionType, ASRProvider 等
 │   ├── use_cases/              # 用例层（核心业务逻辑）
 │   │   ├── session.py          #   会话核心：ASR 流式循环 + Watchdog
-│   │   ├── pipeline.py         #   4-Worker 流水线（LLM→Splitter→TTS→Sender）
+│   │   ├── pipeline/           #   4-Worker 流水线（LLM→Splitter→TTS→Sender）
+│   │   │   ├── core.py         #     类组装、中断与 create_pipeline 工厂
+│   │   │   ├── runner.py       #     主流程 run()：prompt 组装 + 启动 4 个 Worker
+│   │   │   ├── workers/        #     llm / splitter / tts / sender 四个 Worker
+│   │   │   ├── emotion.py      #     情绪标签解析与表情下发
+│   │   │   ├── splitter.py     #     流式 token 句子分割器
+│   │   │   ├── mp3.py          #     MP3 时长解析与字级时间戳估算
+│   │   │   ├── prompt_cache.py #     prompt 组装素材的模块级缓存
+│   │   │   ├── signals.py      #     流内控制信号与错误 token 约定
+│   │   │   └── types.py        #     PipelineState / Config / Result
 │   │   ├── session_fsm.py      #   会话状态机 + WSChannel
 │   │   ├── tools_system.py     #   工具框架：@tool 装饰器 + ToolManager + MCP
 │   │   ├── builtin_tools.py    #   内置工具（音量/音乐/待机/时间...）
 │   │   ├── custom/             #   自定义工具目录
+│   │   ├── sdk/                #   插件 SDK（tools/storage/http/device/events...）
 │   │   ├── queues.py           #   三级背压队列
 │   │   ├── voice_generator.py  #   TTS 音频帧生成器
 │   │   ├── device_registry.py  #   设备注册表（MAC + key 双向索引）
-│   │   ├── device_config.py    #   设备配置模型 + users.json 加载
+│   │   ├── device_config.py    #   设备配置模型
 │   │   ├── wake_audio.py       #   唤醒音频管理器
 │   │   ├── emotion.py          #   情绪检测与渲染
 │   │   ├── image_sender.py     #   图片发送
@@ -469,42 +479,56 @@ esp-ai-server/
 │   │   ├── audio_processor.py  #   音频处理
 │   │   ├── speaker.py          #   语音播报（speak / wakeup / stop）
 │   │   ├── auth_service.py     #   认证服务
+│   │   ├── billing.py          #   计费统计
 │   │   ├── ports.py            #   端口接口（ConfigPort / LoggerPort）
 │   │   └── dtos.py             #   数据传输对象
 │   ├── interfaces/             # 接口适配层（外部服务适配器）
-│   │   ├── websocket_handler.py #   WebSocket 连接处理器
-│   │   ├── asr/                #   ASR 网关（火山/腾讯/阿里/讯飞）
+│   │   ├── websocket_handler.py #   WebSocket 连接鉴权与入口
+│   │   ├── ws_session/         #   设备会话处理器（按职责拆分）
+│   │   │   ├── setup.py        #     连接初始化：网关/Session/设备注册
+│   │   │   ├── messages.py     #     设备消息主循环
+│   │   │   ├── asr.py          #     ASR 文本、VAD 与轮次启动
+│   │   │   ├── tts.py          #     TTS 完成回调
+│   │   │   ├── wake.py         #     唤醒流程
+│   │   │   ├── growth.py       #     成长任务
+│   │   │   ├── keepalive.py    #     心跳与待下发指令
+│   │   │   ├── wechat.py       #     微信回复
+│   │   │   └── core.py         #     类组装、状态广播与清理
+│   │   ├── gateways.py         #   ASR 网关（火山/腾讯/阿里/讯飞）
 │   │   ├── llm_gateways.py     #   LLM 网关（OpenAI 兼容）
-│   │   └── tts_gateways.py     #   TTS 网关（火山引擎）
+│   │   ├── tts_gateways.py     #   TTS 网关（火山引擎）
+│   │   └── plugin_gateways.py  #   服务插件网关（ASR/LLM/TTS）
 │   ├── infrastructure/         # 基础设施层（框架、配置、IO）
 │   │   ├── web.py              #   FastAPI 应用 + 路由注册 + 生命周期
 │   │   ├── config.py           #   配置管理（pydantic-settings）
 │   │   ├── logging.py          #   结构化日志（trace_id|session_id|device_id）
-│   │   ├── device_api.py       #   REST API 路由（设备管理/OTA/固件）
-│   │   ├── device_system_routes.py # 系统管理 API
-│   │   ├── security.py         #   REST API 认证依赖项（X-API-Key）
+│   │   ├── db/                 #   SQLAlchemy 模型 / 仓储 / 迁移
+│   │   ├── plugin_host/        #   插件沙箱（adjudicator/sandbox/supervisor）
 │   │   ├── routes/             #   按业务域拆分的路由模块
 │   │   │   ├── system.py       #     健康检查 / metrics / stats
 │   │   │   ├── devices.py      #     设备控制 / 工具查询
-│   │   │   ├── mcp.py          #     MCP 配置管理
+│   │   │   ├── auth.py         #     用户认证
 │   │   │   ├── skills.py       #     技能 CRUD
 │   │   │   ├── emos.py         #     表情包管理
-│   │   │   └── growth.py       #     AI 成长系统（日记/画像/情绪）
+│   │   │   ├── growth.py       #     AI 成长系统（日记/画像/情绪）
+│   │   │   ├── plugins.py      #     插件管理
+│   │   │   ├── marketplace.py  #     插件市场
+│   │   │   ├── admin.py        #     管理后台
+│   │   │   └── wechat.py       #     微信绑定
 │   │   ├── config_adapter.py   #   ConfigPort 实现
 │   │   ├── logger_adapter.py   #   LoggerPort 实现
 │   │   ├── connection_pool.py  #   通用连接池
 │   │   ├── concurrency.py      #   并发控制
 │   │   ├── monitoring.py       #   Prometheus 监控指标
 │   │   └── remote_config.py    #   远程配置
-│   ├── data/                   # 运行时数据（日记/记忆/用户画像）
+│   ├── plugins/                # 内置插件（闹钟/天气/音乐/记忆/微信...）
+│   ├── data/                   # 运行时设备数据
 │   ├── emos/                   # 表情包资源
 │   ├── firmware/               # 固件文件
-│   ├── skills/                 # 技能定义
 │   └── docs/                   # 开发文档
-├── tests/                      # 测试（191+ 个用例）
+├── tests/                      # 测试（2800+ 个用例）
 ├── .env.example                # 环境变量模板
-├── users.example.json          # 多设备配置模板
-├── users.json                  # 设备配置文件（运行时生成）
+├── users.json                  # 旧版设备配置（运行时生成，兼容用）
 ├── pyproject.toml              # 项目依赖
 ├── Dockerfile                  # 多阶段构建镜像
 └── docker-compose.yml          # 容器编排

@@ -1,5 +1,5 @@
 """
-ws_session_handler.py 单元测试
+ws_session 子包（WebSocket 会话处理器）单元测试
 
 覆盖范围：
 - WebSocketSessionHandler.__init__：状态初始化
@@ -176,12 +176,8 @@ def _make_handler(websocket=None, **kwargs):
     """构造 WebSocketSessionHandler 实例，mock 全部外部依赖"""
     ws = websocket or _make_websocket()
     settings = _make_settings()
-    app = _make_app()
-    registry = _make_registry()
 
-    with patch("src.interfaces.ws_session_handler.get_settings", return_value=settings), \
-         patch("src.interfaces.ws_session_handler.get_app", return_value=app), \
-         patch("src.interfaces.ws_session_handler.get_device_registry", return_value=registry):
+    with patch("src.interfaces.ws_session.core.get_settings", return_value=settings):
         handler = WebSocketSessionHandler(
             websocket=ws,
             device_key="test_device_key_123",
@@ -198,28 +194,28 @@ def _init_patches(asr_error=False, llm_error=False, tts_error=False):
     """构造 initialize() 所需的所有 patch 上下文管理器列表"""
     from contextlib import ExitStack
     stack = ExitStack()
-    stack.enter_context(patch("src.interfaces.ws_session_handler.get_app", return_value=_make_app()))
-    stack.enter_context(patch("src.interfaces.ws_session_handler.get_device_registry", return_value=_make_registry()))
+    stack.enter_context(patch("src.interfaces.ws_session.setup.get_app", return_value=_make_app()))
+    stack.enter_context(patch("src.interfaces.ws_session.setup.get_device_registry", return_value=_make_registry()))
     if asr_error:
-        stack.enter_context(patch("src.interfaces.ws_session_handler.create_asr_gateway", side_effect=Exception("ASR fail")))
+        stack.enter_context(patch("src.interfaces.ws_session.setup.create_asr_gateway", side_effect=Exception("ASR fail")))
     else:
-        stack.enter_context(patch("src.interfaces.ws_session_handler.create_asr_gateway", return_value=MagicMock()))
+        stack.enter_context(patch("src.interfaces.ws_session.setup.create_asr_gateway", return_value=MagicMock()))
     if llm_error:
-        stack.enter_context(patch("src.interfaces.ws_session_handler.create_llm_gateway", side_effect=Exception("LLM fail")))
+        stack.enter_context(patch("src.interfaces.ws_session.setup.create_llm_gateway", side_effect=Exception("LLM fail")))
     else:
-        stack.enter_context(patch("src.interfaces.ws_session_handler.create_llm_gateway", return_value=MagicMock()))
+        stack.enter_context(patch("src.interfaces.ws_session.setup.create_llm_gateway", return_value=MagicMock()))
     if tts_error:
-        stack.enter_context(patch("src.interfaces.ws_session_handler.create_tts_gateway", side_effect=Exception("TTS fail")))
+        stack.enter_context(patch("src.interfaces.ws_session.setup.create_tts_gateway", side_effect=Exception("TTS fail")))
     else:
-        stack.enter_context(patch("src.interfaces.ws_session_handler.create_tts_gateway", return_value=MagicMock()))
-    stack.enter_context(patch("src.interfaces.ws_session_handler.SqlShortTermMemoryRepository"))
-    stack.enter_context(patch("src.interfaces.ws_session_handler.Session"))
-    stack.enter_context(patch("src.interfaces.ws_session_handler.VoiceGenerator"))
+        stack.enter_context(patch("src.interfaces.ws_session.setup.create_tts_gateway", return_value=MagicMock()))
+    stack.enter_context(patch("src.interfaces.ws_session.setup.SqlShortTermMemoryRepository"))
+    stack.enter_context(patch("src.interfaces.ws_session.setup.Session"))
+    stack.enter_context(patch("src.interfaces.ws_session.setup.VoiceGenerator"))
     stack.enter_context(patch("src.use_cases.skill_system.render_skills_catalog", return_value=""))
     stack.enter_context(patch("asyncio.create_task", side_effect=_swallow_coro))
     # 后台任务统一走 task_manager.background_task，同样 mock 掉避免真实调度
     stack.enter_context(patch(
-        "src.interfaces.ws_session_handler.background_task",
+        "src.interfaces.ws_session.setup.background_task",
         side_effect=_swallow_coro,
     ))
     return stack
@@ -742,7 +738,7 @@ class TestDoWakeStart:
         handler.settings.wakeup.enable_audio = False
 
         app = _make_app()
-        with patch("src.interfaces.ws_session_handler.get_app", return_value=app):
+        with patch("src.interfaces.ws_session.wake.get_app", return_value=app):
             await handler._do_wake_start()
         handler.fsm.set.assert_called_with(SessionState.ASR)
 
@@ -762,7 +758,7 @@ class TestDoWakeStart:
         wam._get_wakeup_cfg = MagicMock(return_value=False)
         app = _make_app()
         app.state.wake_audio_manager = wam
-        with patch("src.interfaces.ws_session_handler.get_app", return_value=app):
+        with patch("src.interfaces.ws_session.wake.get_app", return_value=app):
             await handler._do_wake_start()
 
         # audio_play_enabled=False 时应直接 set _wake_audio_played
@@ -787,7 +783,7 @@ class TestDoWakeStart:
         app = _make_app()
         app.state.wake_audio_manager = wam
 
-        with patch("src.interfaces.ws_session_handler.get_app", return_value=app):
+        with patch("src.interfaces.ws_session.wake.get_app", return_value=app):
             await handler._do_wake_start()
 
         # 会话关闭后应直接返回，不应调用 fsm.set
@@ -870,7 +866,7 @@ class TestIdleKeepalive:
             handler.session._closed = True
 
         close_task = asyncio.ensure_future(_close_after_delay())
-        with patch("src.interfaces.ws_session_handler.get_device_registry", return_value=None):
+        with patch("src.interfaces.ws_session.keepalive.get_device_registry", return_value=None):
             await asyncio.wait_for(handler.idle_keepalive(), timeout=5)
         close_task.cancel()
 
@@ -892,7 +888,7 @@ class TestIdleKeepalive:
             handler.session._closed = True
 
         close_task = asyncio.ensure_future(_close_after_delay())
-        with patch("src.interfaces.ws_session_handler.get_device_registry", return_value=registry):
+        with patch("src.interfaces.ws_session.keepalive.get_device_registry", return_value=registry):
             await asyncio.wait_for(handler.idle_keepalive(), timeout=5)
         close_task.cancel()
 
@@ -915,7 +911,7 @@ class TestIdleKeepalive:
             handler.session._closed = True
 
         close_task = asyncio.ensure_future(_close_after_delay())
-        with patch("src.interfaces.ws_session_handler.get_device_registry", return_value=registry):
+        with patch("src.interfaces.ws_session.keepalive.get_device_registry", return_value=registry):
             await asyncio.wait_for(handler.idle_keepalive(), timeout=5)
         close_task.cancel()
 
@@ -1069,7 +1065,7 @@ class TestRun:
             {"type": "websocket.disconnect"},
         ])
 
-        with patch("src.interfaces.ws_session_handler.get_device_registry", return_value=registry):
+        with patch("src.interfaces.ws_session.messages.get_device_registry", return_value=registry):
             await handler.run()
 
         registry.update_ota_progress.assert_called_once_with("test_device_key_123", 50.0)
@@ -1086,7 +1082,7 @@ class TestRun:
             {"type": "websocket.disconnect"},
         ])
 
-        with patch("src.interfaces.ws_session_handler.get_device_registry", return_value=registry):
+        with patch("src.interfaces.ws_session.messages.get_device_registry", return_value=registry):
             await handler.run()
 
         registry.set_ota_updating.assert_called_once_with("test_device_key_123", False)
@@ -1296,7 +1292,7 @@ class TestRun:
             {"type": "websocket.disconnect"},
         ])
 
-        with patch("src.interfaces.ws_session_handler.background_task", side_effect=_fake_bg):
+        with patch("src.interfaces.ws_session.messages.background_task", side_effect=_fake_bg):
             await handler.run()
 
         assert "wake_start" in scheduled
@@ -1370,7 +1366,7 @@ class TestRun:
             {"type": "websocket.disconnect"},
         ])
 
-        with patch("src.interfaces.ws_session_handler.get_device_registry", return_value=registry):
+        with patch("src.interfaces.ws_session.messages.get_device_registry", return_value=registry):
             await handler.run()
 
         assert device["firmware_version"] == "2.0"
@@ -1414,7 +1410,7 @@ class TestCleanup:
         handler.channel.close = AsyncMock()
         handler.session = _make_session()
 
-        with patch("src.interfaces.ws_session_handler.get_device_registry", return_value=_make_registry()):
+        with patch("src.infrastructure.web.get_device_registry", return_value=_make_registry()):
             await handler.cleanup()
 
         assert handler.pipeline_task.cancelled() or handler.pipeline_task.cancel()
@@ -1432,7 +1428,7 @@ class TestCleanup:
         handler.channel.close = AsyncMock()
         handler.session = _make_session()
 
-        with patch("src.interfaces.ws_session_handler.get_device_registry", return_value=_make_registry()):
+        with patch("src.infrastructure.web.get_device_registry", return_value=_make_registry()):
             await handler.cleanup()
 
         handler.fsm.set.assert_called_with(SessionState.IDLE)
@@ -1445,7 +1441,7 @@ class TestCleanup:
         handler.channel.close = AsyncMock()
         handler.session = _make_session()
 
-        with patch("src.interfaces.ws_session_handler.get_device_registry", return_value=_make_registry()):
+        with patch("src.infrastructure.web.get_device_registry", return_value=_make_registry()):
             await handler.cleanup()
 
         handler.channel.close.assert_called_once()
@@ -1475,7 +1471,7 @@ class TestCleanup:
         handler.channel.close = AsyncMock()
         handler.session = _make_session()
 
-        with patch("src.interfaces.ws_session_handler.get_device_registry", return_value=_make_registry()):
+        with patch("src.infrastructure.web.get_device_registry", return_value=_make_registry()):
             await handler.cleanup()
 
         handler.session.close.assert_called_once()
@@ -1493,7 +1489,7 @@ class TestCleanup:
         handler.channel = None
         handler.session = None
 
-        with patch("src.interfaces.ws_session_handler.get_device_registry", return_value=None):
+        with patch("src.infrastructure.web.get_device_registry", return_value=None):
             await handler.cleanup()
 
     async def test_cleanup_no_tasks(self):
@@ -1507,7 +1503,7 @@ class TestCleanup:
         handler.pipeline_task = None
         handler.tts_done_waiter = None
 
-        with patch("src.interfaces.ws_session_handler.get_device_registry", return_value=_make_registry()):
+        with patch("src.infrastructure.web.get_device_registry", return_value=_make_registry()):
             await handler.cleanup()
 
         handler.fsm.set.assert_called_with(SessionState.IDLE)

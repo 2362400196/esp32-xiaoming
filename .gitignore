@@ -38,6 +38,9 @@ wheels/
 .venv
 .mypy_cache/
 .pytest_cache/
+# pytest 运行产生的临时目录/文件（曾误提交 324 个文件，勿再入库）
+pytest-of-*/
+esp-ai-server/tmp*
 .env
 users.json
 **/data/*
@@ -45,6 +48,7 @@ users.json
 **/data/plugins/alarm/
 **/data/plugins/backup/
 **/data/plugins/cache/
+**/data/plugins/installed/
 **/data/plugins/kv/
 **/data/plugins/state/
 *.db
