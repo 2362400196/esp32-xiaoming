@@ -59,6 +59,46 @@ const gif_map_entry_t g_gif_files[] = {
 };
 const int g_gif_files_count = sizeof(g_gif_files) / sizeof(g_gif_files[0]);
 
+// ==================== 下载进度上报 ====================
+// 全屏提示里的进度条显示真实百分比：已完成文件数 + 当前文件已读字节占比。
+// 只增不减，避免现场出现"进度条往回走"。
+static int s_dl_file_total = 0;   // 本轮要处理的文件总数（0 = 当前没有进度可报）
+static int s_dl_file_index = 0;   // 当前正在处理的文件序号（0 起，等于已完成数）
+
+/** 开始一轮下载：把进度归零（列表请求等辅助下载不算，避免进度乱跳） */
+static void dl_progress_begin(int total_files)
+{
+    s_dl_file_total = total_files > 0 ? total_files : 1;
+    s_dl_file_index = 0;
+    eeui_port_set_emo_download_progress(0);
+}
+
+/** 上报进度：index=已完成文件数，read/total=当前文件已读字节（可为 0/0） */
+static void dl_progress_report(int index, size_t read_bytes, size_t total_bytes)
+{
+    if (s_dl_file_total <= 0) return;
+    long long units = (long long)index * 1000;   // 每个文件占 1000 个单位
+    if (total_bytes > 0 && read_bytes > 0) {
+        long long frac = (long long)read_bytes * 1000 / (long long)total_bytes;
+        if (frac > 1000) frac = 1000;
+        units += frac;
+    }
+    int percent = (int)(units / ((long long)s_dl_file_total * 10));
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    eeui_port_set_emo_download_progress(percent);
+}
+
+/** 结束一轮下载：成功则补到 100，失败则清零，然后清空本轮状态 */
+static void dl_progress_finish(bool completed)
+{
+    if (s_dl_file_total > 0) {
+        eeui_port_set_emo_download_progress(completed ? 100 : 0);
+    }
+    s_dl_file_total = 0;
+    s_dl_file_index = 0;
+}
+
 // 下载的 GIF 数据存储（PSRAM）
 static lv_img_dsc_t *s_downloaded_descs = NULL;
 static uint8_t **s_downloaded_data = NULL;
@@ -176,6 +216,7 @@ static uint8_t *download_file(const char *url, size_t *out_size)
             break;
         }
         total_read += read_len;
+        dl_progress_report(s_dl_file_index, total_read, (size_t)content_length);
     }
 
     esp_http_client_close(client);
@@ -425,6 +466,7 @@ static void download_all_from(const char *base_url);
  */
 static bool download_from_api(const char *http_base, const char *device_id)
 {
+    dl_progress_finish(false);   // 清掉上一轮残留：列表请求本身不计入进度
     char api_url[512];
     snprintf(api_url, sizeof(api_url), "%s/api/v1/emos/%s", http_base, device_id);
     ESP_LOGI(TAG, "请求表情列表: %s", api_url);
@@ -473,8 +515,11 @@ static bool download_from_api(const char *http_base, const char *device_id)
     }
 
     // 遍历本地映射表，从 API 返回的列表中找对应文件下载
+    dl_progress_begin(g_gif_files_count);
     int success = 0;
     for (int i = 0; i < g_gif_files_count; i++) {
+        s_dl_file_index = i;          // 已处理 i 个，当前是第 i+1 个
+        dl_progress_report(i, 0, 0);
         const char *target_file = g_gif_files[i].filename;
         const char *download_url = NULL;
         int expected_size = 0;
@@ -683,6 +728,7 @@ static void download_gifs_task(void *arg)
     if (!ok) {
         // 所有重试均失败，回退到固定 URL 前缀模式（默认表情包）
         ESP_LOGW(TAG, "API 模式 3 次重试均失败，回退到静态 URL 模式");
+        dl_progress_finish(false);   // 连通性测试不计入进度
 
         // 先测试连通性，每 3 秒重试
         char test_url[512];
@@ -713,8 +759,9 @@ static void download_gifs_task(void *arg)
         }
     }
 
-    // 隐藏全屏下载提示，恢复表情状态
+    // 隐藏全屏下载提示，恢复表情状态（先把进度补到 100，避免页面停在半路）
     if (show_ui) {
+        dl_progress_finish(s_download_done);
         eeui_port_hide_emo_downloading();
     }
 
@@ -741,7 +788,10 @@ static void download_all_from(const char *base_url)
     }
 
     int success = 0;
+    dl_progress_begin(g_gif_files_count);
     for (int i = 0; i < g_gif_files_count; i++) {
+        s_dl_file_index = i;
+        dl_progress_report(i, 0, 0);
         char url[512];
         snprintf(url, sizeof(url), "%s%s", base_url, g_gif_files[i].filename);
 

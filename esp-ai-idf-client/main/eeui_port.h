@@ -147,6 +147,14 @@ void eeui_port_music_destroy(void);
 void eeui_port_show_emo_downloading(void);
 
 /**
+ * 设置表情下载进度（0-100），下载线程每下完一个文件调用一次。
+ * 只写一个 volatile 变量，真正的 UI 刷新由 LVGL 任务里的定时器完成，
+ * 因此可以安全地在下载任务里调用。
+ * @param percent 0-100，只增不减
+ */
+void eeui_port_set_emo_download_progress(int percent);
+
+/**
  * 隐藏表情下载中提示，恢复之前的表情状态
  */
 void eeui_port_hide_emo_downloading(void);

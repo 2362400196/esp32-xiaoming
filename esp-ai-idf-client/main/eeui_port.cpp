@@ -87,9 +87,10 @@ static lv_obj_t *s_ota_status_label = NULL;  // "正在升级" 文字
 // 表情下载中提示 UI
 static lv_obj_t *s_emo_dl_overlay = NULL;   // 全屏遮罩
 static lv_obj_t *s_emo_dl_label = NULL;     // "表情下载中..." 文字
-static lv_obj_t *s_emo_dl_bar = NULL;        // 下载进度条（0→100 往复）
+static lv_obj_t *s_emo_dl_bar = NULL;        // 下载进度条（真实进度，0→100 单向）
 static lv_timer_t *s_emo_dl_timer = NULL;    // 进度条驱动定时器（不用 lv_anim，见下）
 static uint32_t s_emo_dl_ticks = 0;          // 进度条定时器实际执行次数（诊断用）
+static volatile int s_emo_dl_progress = 0;   // 真实下载进度 0-100（下载线程写，LVGL 任务读）
 
 static int s_screen_width = 240;
 static int s_screen_height = 240;
@@ -1252,19 +1253,29 @@ void eeui_port_music_destroy(void)
 
 // ==================== 表情下载中提示 ====================
 
-// 进度条扫描：用 lv_timer 直接改 value，不走 lv_anim。
-// 【为什么不用 lv_anim】现场"进度条没走就下载完了"——LVGL 任务被下载/写盘任务
-// 饿死（见 lvgl_task 里的优先级说明），动画自然不推进；timer 回调是每 80ms
-// 必定执行的路径，且不依赖动画插值，最稳。
+// 进度条：直接显示下载线程上报的真实进度。
+// 【为什么不用 lv_anim / 三角波】之前的实现是 0→100→0 来回扫的"假进度"，
+// 现场看着像"没进度还倒着走"。现在进度由 gif_downloader 按"已完成文件数 +
+// 当前文件已读字节比例"算好写进 s_emo_dl_progress，只增不减。
+// 定时器只负责把新值搬到控件上（LVGL 只能在 LVGL 任务里改控件）。
 static void emo_dl_bar_tick(lv_timer_t *t)
 {
     (void)t;
     if (s_emo_dl_bar == NULL || !lv_obj_is_valid(s_emo_dl_bar)) return;
     s_emo_dl_ticks++;
-    static int phase = 0;
-    phase = (phase + 6) % 200;                       // 0..199 三角波
-    int value = (phase <= 100) ? phase : (200 - phase);
+    int value = s_emo_dl_progress;
+    if (value == lv_bar_get_value(s_emo_dl_bar)) return;
     lv_bar_set_value(s_emo_dl_bar, value, LV_ANIM_OFF);
+    if (s_emo_dl_label != NULL && lv_obj_is_valid(s_emo_dl_label)) {
+        lv_label_set_text_fmt(s_emo_dl_label, "表情下载中... %d%%", value);
+    }
+}
+
+void eeui_port_set_emo_download_progress(int percent)
+{
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    s_emo_dl_progress = percent;
 }
 
 void eeui_port_show_emo_downloading(void)
@@ -1291,7 +1302,7 @@ void eeui_port_show_emo_downloading(void)
         lv_obj_remove_flag(s_emo_dl_overlay, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_move_foreground(s_emo_dl_overlay);
 
-        // 进度条（0→100 往复扫动）。
+        // 进度条（显示真实下载进度，0→100 单向）
         // 【为什么不用圆弧】现场两次都只画出半圈：弧的绘制/局部刷新在这块屏+
         // 这个 LVGL 版本上不可靠（改起止角、改 rotation 都试过）。bar 是纯矩形，
         // 刷新逻辑简单，用户要的"进度条"本来也更适合用 bar 表达。
@@ -1306,13 +1317,14 @@ void eeui_port_show_emo_downloading(void)
         lv_obj_set_style_bg_color(s_emo_dl_bar, lv_color_hex(0x4A90D9), LV_PART_INDICATOR);
         lv_obj_set_style_radius(s_emo_dl_bar, 6, LV_PART_INDICATOR);
 
-        // 用 lv_timer 驱动扫描（lv_anim 依赖同一套刷新节拍，timer 更可控）
+        // 定时器只做"把下载线程写好的百分比搬到控件上"（LVGL 控件只能在 LVGL 任务里改）
         s_emo_dl_ticks = 0;
+        s_emo_dl_progress = 0;
         s_emo_dl_timer = lv_timer_create(emo_dl_bar_tick, 80, NULL);
 
         // 创建提示文字
         s_emo_dl_label = lv_label_create(s_emo_dl_overlay);
-        lv_label_set_text(s_emo_dl_label, "表情下载中...");
+        lv_label_set_text(s_emo_dl_label, "表情下载中... 0%");
         lv_obj_set_style_text_font(s_emo_dl_label, &font_puhui_16_4, 0);
         lv_obj_set_style_text_color(s_emo_dl_label, lv_color_hex(0x333333), 0);
         lv_obj_align(s_emo_dl_label, LV_ALIGN_CENTER, 0, 20);
