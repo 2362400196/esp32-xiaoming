@@ -1,14 +1,14 @@
 {
     "id": "skill_system",
-    "name": "技能系统",
+    "name": "本领库",
     "version": "1.0.0",
     "author": "system",
-    "description": "技能目录管理、创建、更新、删除，控制设备可用技能",
+    "description": "教语音助手新本领：管理它会的玩法（猜数字、讲故事等），支持创建、安装、发布",
     "api_version": "1.0",
     "optional": true,
     "frontend": true,
     "frontend_config": {
-        "nav_label": "技能",
+        "nav_label": "本领库",
         "nav_icon": "chart",
         "width": "full"
     },
