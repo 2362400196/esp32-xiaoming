@@ -759,9 +759,10 @@ static void download_gifs_task(void *arg)
         }
     }
 
-    // 隐藏全屏下载提示，恢复表情状态（先把进度补到 100，避免页面停在半路）
+    // 隐藏全屏下载提示，恢复表情状态（先把进度补到 100，留 200ms 让 LVGL 画出来）
     if (show_ui) {
         dl_progress_finish(s_download_done);
+        vTaskDelay(pdMS_TO_TICKS(200));
         eeui_port_hide_emo_downloading();
     }
 
