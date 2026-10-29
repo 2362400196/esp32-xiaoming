@@ -1266,6 +1266,7 @@ static void emo_dl_bar_tick(lv_timer_t *t)
     int value = s_emo_dl_progress;
     if (value == lv_bar_get_value(s_emo_dl_bar)) return;
     lv_bar_set_value(s_emo_dl_bar, value, LV_ANIM_OFF);
+    ESP_LOGI(TAG, "下载进度 %d%%", value);
     if (s_emo_dl_label != NULL && lv_obj_is_valid(s_emo_dl_label)) {
         lv_label_set_text_fmt(s_emo_dl_label, "表情下载中... %d%%", value);
     }
