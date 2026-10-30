@@ -988,7 +988,7 @@ static void mic_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(MIC_PREROLL_INTERVAL_MS));  // 小帧快发：别把 TCP 灌爆
         }
         if (preroll_samples > 0) {
-            ESP_LOGI(TAG, "打断预缓冲已回灌: %d 样本(约 %dms)", preroll_samples, preroll_samples / 16);
+            ESP_LOGI(TAG, "预缓冲已回灌: %d 样本(约 %dms)", preroll_samples, preroll_samples / 16);
         }
         // 回灌期间没有读 live 麦克风，RX DMA 里积的正是这段时间的现场语音
         // （扬声器已在触发瞬间静音，这段是纯人声），和刚回灌的尾段首尾相接。
