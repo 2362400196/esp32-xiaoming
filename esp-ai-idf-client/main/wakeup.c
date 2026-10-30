@@ -1913,14 +1913,30 @@ static void afe_task(void *arg)
                     s_last_wakeup_trigger_tick = now;
 
                     ESP_LOGI(TAG, "=========================================");
-                    if (s_wakenet_paused) {
+                    if (spk_now) {
                         ESP_LOGI(TAG, "检测到语音唤醒! (TTS 播放中打断)");
                     } else {
                         ESP_LOGI(TAG, "检测到语音唤醒!");
                     }
                     ESP_LOGI(TAG, "=========================================");
                     // 播放中喊唤醒词打断：同样要立刻静音，别等 app_main（prio 1）。
-                    if (spk_now) audio_spk_mute_now();
+                    if (spk_now) {
+                        audio_spk_mute_now();
+                        // 【必须按"打断"上报，否则用户这句话会被问候语吃掉】
+                        // 旧实现只置 WAKEUP_TRIGGERED_BIT：服务端当普通唤醒处理，先播
+                        // "我在呢"（1.4~2.1s）再开麦；等开麦时用户已经说完了，而预缓冲
+                        // 又被 wakeup_take_barge_in() 的 else 分支清空——现场表现就是
+                        // "打断了，但说什么它都没听见"（服务端 5s 无有效语音）。
+                        // 现在：置 barge_in → start 带 source=vad_barge_in（服务端跳过
+                        // 问候语直接开麦），并把触发点前 512ms 的 AEC 输出留给回灌。
+                        // 已有 VAD 打断挂着时不要覆盖它的语音起点。
+                        if (!s_barge_in_pending) {
+                            wakeup_preroll_mark_onset(16);   // 16 帧 = 512ms
+                            s_barge_in_pending = true;
+                            s_bargein_handoff = true;
+                            s_bargein_handoff_tick = now;
+                        }
+                    }
                     xEventGroupSetBits(s_wakeup_event_group, WAKEUP_TRIGGERED_BIT);
                     s_wakenet_paused = true;
                     ESP_LOGI(TAG, "语音唤醒已暂停，等待会话结束");
