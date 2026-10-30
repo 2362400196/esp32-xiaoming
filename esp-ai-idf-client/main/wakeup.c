@@ -96,16 +96,6 @@ static volatile bool s_barge_in_enabled = true;
 static volatile bool s_bargein_handoff = false;
 static volatile TickType_t s_bargein_handoff_tick = 0;
 
-// 普通语音唤醒的"提示音交接窗"：服务端唤醒问候语（"我在呢"，实测 1.8 秒）播放期间
-// 麦克风还没开（要等 client_out_audio_over 之后才下发 iat_start），用户紧跟着唤醒词
-// 说的那句话整段没人收——远场唤醒尤其明显：唤醒很快，但说完设备没反应，服务端只能
-// 报"5s 无有效语音"（10:24:39、05:41:31 两次实测都是这个形态）。
-// 这段窗口里 afe_task 仍在跑 AEC，把 AEC 输出攒进预缓冲，开麦时补发，等于把提示音
-// 期间的用户语音补回来（回声已被 AEC 压掉，不会让 ASR"听见自己"）。
-// 由 WakeNet 普通唤醒分支置位，预缓冲取空或超时后清零。
-static volatile bool s_wake_handoff = false;
-static volatile TickType_t s_wake_handoff_tick = 0;
-
 #if defined(WAKEUP_USE_AFE)
 // ==================== AFE 管线状态（S3：AEC+VAD+WakeNet）====================
 static const esp_afe_sr_iface_t *s_afe_handle = NULL;  // AFE 接口
@@ -1508,12 +1498,6 @@ static void afe_task(void *arg)
             (xTaskGetTickCount() - s_bargein_handoff_tick) * portTICK_PERIOD_MS > WAKEUP_PREROLL_MS) {
             s_bargein_handoff = false;
         }
-        // 普通唤醒的交接窗：问候语正常 1.4~2.1 秒，这里留 3 倍预缓冲长度兜异常
-        // （问候语合成失败/服务端不回 iat_start 时别一直攥着预缓冲）。
-        if (s_wake_handoff &&
-            (xTaskGetTickCount() - s_wake_handoff_tick) * portTICK_PERIOD_MS > (WAKEUP_PREROLL_MS * 3)) {
-            s_wake_handoff = false;
-        }
 
         // ── 思考窗：ASR 已停、TTS 还没起播（等服务端 LLM）──
         // 提前算出来：预缓冲（下方 push）和打断判据（VAD 分支）用同一口径。
@@ -1952,11 +1936,6 @@ static void afe_task(void *arg)
                             s_bargein_handoff = true;
                             s_bargein_handoff_tick = now;
                         }
-                    } else {
-                        // 普通语音唤醒：服务端会先播"我在呢"（1.8 秒）再开麦，这段
-                        // 用户紧跟着说的话必须靠预缓冲补回来，见 s_wake_handoff 声明处。
-                        s_wake_handoff = true;
-                        s_wake_handoff_tick = now;
                     }
                     xEventGroupSetBits(s_wakeup_event_group, WAKEUP_TRIGGERED_BIT);
                     s_wakenet_paused = true;
@@ -2651,10 +2630,6 @@ static void wakenet_rebuild_task(void *arg)
 
 void wakeup_resume(void)
 {
-    // 会话结束：普通唤醒的提示音交接窗到此作废（本轮没开麦/开麦后已补发完）。
-    // 不清掉的话，下一次 TTS 起播的 clear() 会重新武装预缓冲，把回复音频当人声
-    // 回灌进下一轮 ASR。
-    s_wake_handoff = false;
     if (s_wakenet_paused) {
         s_wakenet_paused = false;
         // 仅当代持标志有效时释放（TTS 窗口可能已提前释放，避免重复 give）
@@ -2767,10 +2742,8 @@ bool wakeup_is_paused(void)
 // "人声帧 0、峰值 791"），服务端只能报"5s 无有效语音"——这就是"打断后我说话它
 // 收不到音"。所以播放期间把 AEC 输出（回声已被压掉，可直接喂 ASR）滚动存下
 // WAKEUP_PREROLL_MS（2.5 秒），开麦时先回灌这一段，再开始采新数据。
-// 【回灌时机】VAD 实时打断必须回灌；普通语音唤醒现在也回灌——服务端唤醒问候语
-// 播放期间麦克风没开，用户紧跟唤醒词说的话全靠这段补回来（见 s_wake_handoff）。
-// armed 标志由 wakeup_take_barge_in() 决定，并在问候语起播的 clear() 里按
-// s_wake_handoff 重新置位。
+// 【只有 VAD 实时打断允许回灌】正常唤醒时这段里全是自家 TTS，喂进识别等于让它
+// "听见自己"，所以 armed 标志由 wakeup_take_barge_in() 决定。
 static int16_t *s_preroll = NULL;
 static int s_preroll_len = 0;                    // 缓冲区里尚未被取走的样本数
 static int s_preroll_pos = 0;                    // 下一个写入位置（环形）
@@ -2846,9 +2819,7 @@ void wakeup_preroll_clear(void)
     s_preroll_onset_valid = false;
     s_preroll_read_abs = 0;
     s_preroll_read_started = false;
-    // 普通语音唤醒的交接窗里，这里清掉的是"上一轮的旧音频"，本轮提示音期间的人声
-    // 还要继续攒：armed 必须跟着 s_wake_handoff 一起重新置位，否则开麦时不会回灌。
-    s_preroll_armed = s_wake_handoff;
+    s_preroll_armed = false;
     portEXIT_CRITICAL(&s_preroll_mux);
 }
 
@@ -2892,7 +2863,6 @@ int wakeup_preroll_take(int16_t *dst, int max_samples)
         s_preroll_armed = false;
         s_preroll_onset_valid = false;
         s_preroll_read_started = false;
-        s_wake_handoff = false;   // 本轮补发结束：下一轮 TTS 起播不再自动回灌
         portEXIT_CRITICAL(&s_preroll_mux);
         if (dbg_first) {
             ESP_LOGI(TAG, "预缓冲定位: 起点=%llu 最旧=%llu 总数=%llu 语音起点=%llu(有效=%d) 可发=0",
@@ -2916,7 +2886,6 @@ int wakeup_preroll_take(int16_t *dst, int max_samples)
         s_preroll_armed = false;
         s_preroll_onset_valid = false;
         s_preroll_read_started = false;
-        s_wake_handoff = false;   // 本轮补发结束：下一轮 TTS 起播不再自动回灌
     }
     portEXIT_CRITICAL(&s_preroll_mux);
 
