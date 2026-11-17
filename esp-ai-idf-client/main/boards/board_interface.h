@@ -142,7 +142,9 @@ typedef struct {
 typedef struct {
     const char *name;           // 板型名称
     const char *description;    // 描述
-    const char *bin_id;         // 固件ID（OTA 升级用，每块板型独立）
+    // 注：固件 ID 不再放进板型配置（原为 md5(板卡+git commit)）。
+    // 现在由 board_get_bin_id() 在运行时取 app_elf_sha256（内容哈希），
+    // 任何来源的源码编译都一样，不依赖 git 仓库。
 
     // 唤醒按钮
     int wake_button_gpio;       // -1 表示无按钮唤醒
@@ -216,6 +218,15 @@ typedef struct {
 const board_config_t *board_get_config(void);
 
 /**
+ * 获取固件 ID（32 位十六进制字符串）
+ *
+ * 取 ESP-IDF 写入 app 镜像的 app_elf_sha256 前 16 字节：内容哈希，
+ * 与 git 仓库无关。同一份源码重复编译 ID 不变，代码改动则 ID 变化，
+ * 服务端 OTA 用它判断设备固件是否需要升级。
+ */
+const char *board_get_bin_id(void);
+
+/**
  * 初始化当前板级包
  * 根据配置自动初始化：
  * - 显示屏驱动（LCD/OLED/UART）
@@ -227,7 +238,7 @@ esp_err_t board_init(void);
 /**
  * 获取板型信息的 JSON 字符串（用于服务端识别设备能力）
  * 返回静态缓冲区，无需释放
- * 格式: {"name":"...","bin_id":"...","display":"st7789","display_w":240,"display_h":240,"audio_codec":"i2s_direct"}
+ * 格式: {"name":"...","bin_id":"<app_elf_sha256 前 16 字节>","display":"st7789","display_w":240,"display_h":240,"audio_codec":"i2s_direct"}
  */
 const char *board_get_info_json(void);
 

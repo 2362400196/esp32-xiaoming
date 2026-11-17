@@ -19,7 +19,6 @@
 static const board_config_t BOARD_CONFIG = {
     .name        = "esp32s3_breadboard_1.54_lcd",
     .description = "ESP32-S3 面包板 (1.54寸 LCD)",
-    .bin_id      = BOARD_BIN_ID,
 
     BOARD_BASE_ESP32S3(0),
     BOARD_DISPLAY_ST7789_240_BL(9, 13, 38, 39, 16),   // cs, dc, clk, mosi, 背光 GPIO16

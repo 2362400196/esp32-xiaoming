@@ -124,10 +124,10 @@ add_custom_target(gen_boards DEPENDS
 )
 add_dependencies(${COMPONENT_LIB} gen_boards)
 
-# ==================== bin_id 自动生成 ====================
-# bin_id = md5(板卡名 + git commit 短哈希)，编译期注入 BOARD_BIN_ID 宏：
-# - 不同板卡 / 不同 commit → 不同 bin_id（OTA 能识别新版本）
-# - 同一板卡同一 commit 重复编译 → bin_id 稳定（避免 OTA 无限升级）
+# ==================== 固件版本串（仅用于展示）====================
+# git 只用于生成固件签名里的 ver= 展示串（仓库不可用时回退 unknown）。
+# 固件 ID（bin_id）不再和 git 绑定：改为取 ESP-IDF 写入镜像的
+# app_elf_sha256（内容哈希），见 board_get_bin_id()。
 execute_process(
     COMMAND git rev-parse --short=12 HEAD
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
@@ -154,17 +154,13 @@ foreach(_def ${BOARD_DEF_FILES})
     endif()
 endforeach()
 
-# 配网类型参与 bin_id 生成：BLE / WiFi(AP) 版固件 bin_id 不同，
+# 配网类型参与固件签名：BLE / WiFi(AP) 版固件分别登记，
 # 服务端 OTA 按类型分槽激活，互不干扰
 if(CONFIG_PROV_TYPE_AP)
     set(PROV_TAG "wifi")
 else()
     set(PROV_TAG "ble")
 endif()
-
-string(MD5 BOARD_BIN_ID "${ACTIVE_BOARD_NAME}_${PROV_TAG}_${GIT_COMMIT_SHORT}")
-message(STATUS "固件 bin_id (自动生成): ${BOARD_BIN_ID} (板卡=${ACTIVE_BOARD_NAME}, 配网=${PROV_TAG}, commit=${GIT_COMMIT_SHORT})")
-add_definitions(-DBOARD_BIN_ID="${BOARD_BIN_ID}")
 
 # ==================== 固件结构化签名（esp-ai-fw:）====================
 # 编译期注入签名串 "esp-ai-fw:prov=wifi;board=xxx;display=st7789_240;ver=062438e-dirty"，

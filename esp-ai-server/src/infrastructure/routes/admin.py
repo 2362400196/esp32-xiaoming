@@ -556,12 +556,26 @@ def _auto_bin_id(filename: str, meta: dict) -> str:
     return f"{stem}-{int(_t.time())}"
 
 
-# 板卡 bin_id：32 位十六进制字符串（board_config_t.bin_id，编译进固件的 C 字符串常量）
+# 固件 ID：直接取 ESP-IDF 写入 app 描述符的 app_elf_sha256（内容哈希）前 16 字节，
+# 与 git 仓库无关——任何人用同一份源码编译出的固件 ID 相同，代码改动则 ID 变化。
+_APP_DESC_MAGIC = b"\x32\x54\xcd\xab"   # esp_app_desc_t.magic_word = 0xABCD5432（小端）
+_APP_DESC_SHA_OFFSET = 144              # app_elf_sha256 相对描述符起点的偏移
+# 旧固件兜底：bin_id 是编译期注入的 32 位十六进制字符串（md5(板卡+commit)）
 _BIN_ID_RE = re.compile(rb"(?<![0-9a-fA-F])([0-9a-fA-F]{32})(?![0-9a-fA-F])")
 
 
 def _extract_bin_id_from_firmware(content: bytes) -> str:
-    """从固件二进制中提取 bin_id（板卡编译 ID），提取不到返回空串"""
+    """从固件二进制中提取 bin_id，提取不到返回空串
+
+    新固件：app 描述符里的 app_elf_sha256 前 16 字节（32 位十六进制）。
+    旧固件（无描述符或旧格式）：回退扫描 32 位十六进制字符串。
+    """
+    idx = content.find(_APP_DESC_MAGIC, 0, 256 * 1024)
+    if idx >= 0:
+        sha_start = idx + _APP_DESC_SHA_OFFSET
+        sha = content[sha_start:sha_start + 32]
+        if len(sha) == 32 and any(sha):
+            return sha[:16].hex()
     m = _BIN_ID_RE.search(content)
     if m:
         return m.group(1).decode("ascii")

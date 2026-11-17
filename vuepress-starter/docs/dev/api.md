@@ -339,7 +339,7 @@ curl -X POST http://localhost:8088/api/v1/devices/5d47bb925ea440b3b/ota \
 | `bin_id` | string | 否 | 自定义 bin_id（`bin_id_mode=custom` 时必填）|
 | `version` | string | 否 | 版本号 |
 
-- **自动识别（auto）**：从固件二进制中提取板卡编译的 bin_id（32 位十六进制，即 `board_config_t.bin_id`，与设备 OTA 上报的 ID 一致）；提取不到时回退为文件名主干（冲突追加时间戳）。
+- **自动识别（auto）**：从固件 app 描述符中提取 `app_elf_sha256` 的前 16 字节（32 位十六进制，即固件内容哈希，与设备 OTA 上报的 ID 一致，不依赖 git 仓库）；旧格式固件回退扫描二进制里的 32 位十六进制串；仍提取不到时回退为文件名主干（冲突追加时间戳）。
 - **自定义输入（custom）**：使用 `bin_id` 字段传入的值。
 
 ```bash

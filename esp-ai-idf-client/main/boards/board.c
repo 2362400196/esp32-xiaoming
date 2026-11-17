@@ -11,6 +11,8 @@
 #include "displays/display_lcd.h"
 #include "displays/display_uart.h"
 #include "esp_log.h"
+#include "esp_app_desc.h"
+#include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "board";
@@ -84,12 +86,31 @@ const board_config_t *board_get_config(void)
     return ACTIVE_BOARD_CONFIG;
 }
 
+const char *board_get_bin_id(void)
+{
+    // 固件 ID = ESP-IDF 写入 app 镜像的 app_elf_sha256（内容哈希）前 16 字节。
+    // 好处：不依赖 git 仓库/commit——任何人拿到源码编译出的同一份固件 ID 相同，
+    // 代码一改 ID 就变，服务端据此判断是否需要用 OTA 升级。
+    static char s_bin_id[33];
+    if (s_bin_id[0] == '\0') {
+        const esp_app_desc_t *desc = esp_app_get_description();
+        if (desc) {
+            for (int i = 0; i < 16; i++) {
+                snprintf(s_bin_id + i * 2, 3, "%02x", desc->app_elf_sha256[i]);
+            }
+        } else {
+            snprintf(s_bin_id, sizeof(s_bin_id), "unknown");
+        }
+    }
+    return s_bin_id;
+}
+
 esp_err_t board_init(void)
 {
     const board_config_t *cfg = ACTIVE_BOARD_CONFIG;
     ESP_LOGI(TAG, "初始化板级包: %s", cfg->name);
     ESP_LOGI(TAG, "  描述: %s", cfg->description);
-    ESP_LOGI(TAG, "  bin_id: %s", cfg->bin_id);
+    ESP_LOGI(TAG, "  bin_id: %s", board_get_bin_id());
 
     // 1. 通过注册表查找并注册显示驱动
     esp_err_t ret = ESP_ERR_NOT_FOUND;
@@ -216,14 +237,14 @@ const char *board_get_info_json(void)
         int n = snprintf(s_board_info_json, sizeof(s_board_info_json),
             "{\"name\":\"%s\",\"bin_id\":\"%s\",\"display\":\"%s\",\"display_w\":%d,\"display_h\":%d,"
             "\"audio_codec\":\"%s\",\"extras\":%s}",
-            cfg->name, cfg->bin_id, disp_str,
+            cfg->name, board_get_bin_id(), disp_str,
             cfg->display_width, cfg->display_height, codec_str, extras_buf);
         if (n < 0 || (size_t)n >= sizeof(s_board_info_json)) {
             // 极端情况下（超长板名等）JSON 被截断：退化为不含 extras 的最小信息
             ESP_LOGW(TAG, "板型信息 JSON 截断 (%d)，退化为最小信息", n);
             snprintf(s_board_info_json, sizeof(s_board_info_json),
                 "{\"name\":\"board\",\"bin_id\":\"%s\",\"audio_codec\":\"%s\",\"extras\":[]}",
-                cfg->bin_id, codec_str);
+                board_get_bin_id(), codec_str);
         }
     }
     return s_board_info_json;

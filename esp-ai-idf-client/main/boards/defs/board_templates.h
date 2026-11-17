@@ -11,7 +11,6 @@
  *
  *   static const board_config_t BOARD_CONFIG = {
  *       .name = "my_board",
- *       .bin_id = "...",
  *       BOARD_BASE_ESP32S3(0),                   // 唤醒 + 音频
  *       BOARD_DISPLAY_ST7789_240(9, 13, 38, 39), // 显示
  *       BOARD_SERVICE_SELF_HOSTED(),             // 服务模式
@@ -33,14 +32,6 @@
 
 #include "boards/board_interface.h"
 #include "boards/extras/extras_led.h"  // BOARD_EXTRAS_LED 组件接口
-
-// ==================== bin_id 自动生成 ====================
-// 编译时由 CMake 注入 BOARD_BIN_ID（md5(板卡名 + git commit)），
-// 不同板卡/不同版本 bin_id 不同，同一板卡同一 commit 重复编译 bin_id 稳定；
-// 直接编译（无 CMake 注入）时使用默认值
-#ifndef BOARD_BIN_ID
-#define BOARD_BIN_ID "5d47bb925ea440b3b615f4ed6e4d2263"
-#endif
 
 // ==================== ES8311 默认配置 ====================
 
@@ -265,7 +256,6 @@ static const es8311_config_t ES8311_CFG = {
  * 使用示例：
  *   static const board_config_t BOARD_CONFIG = {
  *       .name = "my_board",
- *       .bin_id = "...",
  *       BOARD_BASE_ESP32S3(0),
  *       BOARD_DISPLAY_ST7789_240(9, 13, 38, 39),
  *       BOARD_SERVICE_SELF_HOSTED(),
@@ -284,7 +274,6 @@ static const es8311_config_t ES8311_CFG = {
  * 使用示例：
  *   static const board_config_t BOARD_CONFIG = {
  *       .name = "esp32c3_supermini",
- *       .bin_id = "...",
  *       BOARD_BASE_ESP32C3(9),
  *       BOARD_DISPLAY_NONE(),
  *       BOARD_SERVICE_SELF_HOSTED(),

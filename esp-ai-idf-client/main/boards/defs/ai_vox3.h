@@ -59,7 +59,6 @@ static const es8311_config_t ES8311_CFG = {
 static const board_config_t BOARD_CONFIG = {
     .name        = "ai_vox3",
     .description = "AI-VOX3 (ESP32-S3 + ES8311 + 240x240 LCD)",
-    .bin_id      = BOARD_BIN_ID,
 
     .wake_button_gpio = 0,      // BOOT 键（B2）
     // bck=10, ws=8, spk_tx=7, mic_rx=9

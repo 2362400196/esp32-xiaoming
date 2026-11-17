@@ -16,7 +16,6 @@
 static const board_config_t BOARD_CONFIG = {
     .name        = "esp32s3_breadboard",
     .description = "ESP32-S3 面包板 (无屏幕)",
-    .bin_id      = BOARD_BIN_ID,
 
     BOARD_BASE_ESP32S3(0),
     BOARD_DISPLAY_NONE(),

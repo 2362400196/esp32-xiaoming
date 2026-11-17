@@ -8,8 +8,7 @@ gen_boards.py - 板型自动生成脚本（1000+ 板型架构）
 
 功能：
 - 从 @meta 注释提取芯片/厂商/系列元数据
-- 校验必填字段（name, description, bin_id）
-- 检查 bin_id 唯一性
+- 校验必填字段（name, description）
 - 按芯片分组生成 Kconfig（单芯片时为 flat choice）
 
 注意：音频编解码器（ES8311 等）的选择由 Kconfig.projbuild 中的
@@ -70,13 +69,8 @@ def extract_board_info(filepath):
     desc_match = re.search(r'\.description\s*=\s*"([^"]+)"', content)
     desc = desc_match.group(1) if desc_match else name
 
-    # 提取 .bin_id = "xxx"；或 .bin_id = MACRO（如 BOARD_BIN_ID，编译时自动生成）
-    bin_id_match = re.search(r'\.bin_id\s*=\s*"([^"]+)"', content)
-    bin_id = bin_id_match.group(1) if bin_id_match else ""
-    if not bin_id:
-        macro_match = re.search(r'\.bin_id\s*=\s*([A-Za-z_][A-Za-z0-9_]*)', content)
-        if macro_match:
-            bin_id = "AUTO"  # 宏引用：编译期自动生成，跳过唯一性校验
+    # 注：不再从板型定义里提取 bin_id——固件 ID 已改为运行时取 app_elf_sha256
+    #（board_get_bin_id），与 git 仓库、板型文件都无关。
 
     # 提取 @meta 元数据
     meta = extract_meta(content)
@@ -93,7 +87,6 @@ def extract_board_info(filepath):
         "kconfig_name": kconfig_name,
         "name": name,
         "description": desc,
-        "bin_id": bin_id,
         "chip": chip,
         "vendor": vendor,
         "series": series,
@@ -105,7 +98,6 @@ def validate_boards(boards):
     """校验板型定义，返回错误和警告列表"""
     errors = []
     warnings = []
-    bin_ids = {}
 
     for b in boards:
         # 检查必填字段
@@ -113,16 +105,6 @@ def validate_boards(boards):
             errors.append("{}: 缺少 .name 字段".format(b["basename"]))
         if not b["description"]:
             warnings.append("{}: 缺少 .description 字段".format(b["basename"]))
-        if not b["bin_id"]:
-            errors.append("{}: 缺少 .bin_id 字段（OTA 升级必需）".format(b["basename"]))
-
-        # 检查 bin_id 唯一性（AUTO=编译时自动生成，跳过）
-        if b["bin_id"] and b["bin_id"] != "AUTO":
-            if b["bin_id"] in bin_ids:
-                errors.append("{}: bin_id '{}' 与 {} 重复".format(
-                    b["basename"], b["bin_id"], bin_ids[b["bin_id"]]))
-            else:
-                bin_ids[b["bin_id"]] = b["basename"]
 
         # 检查 @meta 是否存在
         if not b["chip"]:
@@ -264,12 +246,7 @@ def main():
     print("\n板型列表：")
     for b in boards:
         chip_tag = "[{}]".format(b["chip"].upper())
-        if b["bin_id"] == "AUTO":
-            bin_id_short = "AUTO(编译期自动生成)"
-        else:
-            bin_id_short = b["bin_id"][:8] + "..." if len(b["bin_id"]) > 8 else b["bin_id"]
-        print("  - {:40s} {} bin_id={}".format(
-            b["name"], chip_tag, bin_id_short))
+        print("  - {:40s} {}".format(b["name"], chip_tag))
 
     if warnings:
         print("\n{} 个警告（不影响生成）".format(len(warnings)))

@@ -1284,7 +1284,7 @@ esp_err_t websocket_init(void)
              device_mac, FIRMWARE_VERSION,
              SPK_STREAM_BUF_SIZE, SPK_SAMPLE_RATE, AUDIO_CHANNELS, 64,
              display_has_graphic() ? 1 : 0,
-             board_get_config()->bin_id);
+             board_get_bin_id());
 
     ESP_LOGI(TAG, "WebSocket URL: %s", url);
 

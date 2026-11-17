@@ -65,7 +65,6 @@ main/boards/
 static const board_config_t BOARD_CONFIG = {
     .name        = "your_board",
     .description = "我的开发板",
-    .bin_id      = BOARD_BIN_ID,   // 编译期自动生成（md5(板卡名 + git commit)），无需手动填写
 
     BOARD_BASE_ESP32S3(0),                        // 唤醒按钮 + 音频（引脚见下方说明）
     BOARD_DISPLAY_ST7789_240(9, 13, 38, 39),      // 显示（无屏幕用 BOARD_DISPLAY_NONE()）
@@ -76,8 +75,8 @@ static const board_config_t BOARD_CONFIG = {
 
 要点：
 
-- **宏展开顺序必须固定**：`name/description/bin_id` → `BOARD_BASE_*`（音频）→ `BOARD_DISPLAY_*` → `BOARD_SERVICE_*` → `BOARD_EXTRAS_*`。这是因为 C++ 指定初始化器要求按 `board_config_t` 字段声明顺序赋值，且禁止同一字段重复赋值（`-Werror=override-init`）。
-- **`bin_id` 由编译期自动生成**：`main/CMakeLists.txt` 在编译时计算 `md5(板卡名 + git commit 短哈希)` 并注入 `BOARD_BIN_ID` 宏，板卡定义只需写 `.bin_id = BOARD_BIN_ID`。不同板卡 / 不同 commit 会得到不同 bin_id（OTA 能识别新版本），同一板卡同一 commit 重复编译 bin_id 稳定（避免 OTA 无限升级）。`gen_boards.py` 识别到宏引用后跳过唯一性校验。
+- **宏展开顺序必须固定**：`name/description` → `BOARD_BASE_*`（音频）→ `BOARD_DISPLAY_*` → `BOARD_SERVICE_*` → `BOARD_EXTRAS_*`。这是因为 C++ 指定初始化器要求按 `board_config_t` 字段声明顺序赋值，且禁止同一字段重复赋值（`-Werror=override-init`）。
+- **`bin_id` 由运行时自动得到，板卡定义无需填写**：固件 ID 取 ESP-IDF 写入镜像的 `app_elf_sha256` 前 16 字节（`board_get_bin_id()`），是固件内容哈希——不依赖 git 仓库/commit，同一份源码重复编译 ID 不变（避免 OTA 无限升级），代码改动则 ID 变化（OTA 能识别新版本）。服务端上传固件时从 app 描述符里解析同一个值。
 - **可选 `@meta` 注释**：控制 Kconfig 按芯片分组显示（多芯片工程时需要）：
 
 ```c
@@ -128,7 +127,6 @@ static const es8311_config_t ES8311_CFG = {
 static const board_config_t BOARD_CONFIG = {
     .name        = "your_board",
     .description = "我的开发板",
-    .bin_id      = BOARD_BIN_ID,   // 编译期自动生成
 
     BOARD_BASE_ESP32S3(0),
     BOARD_AUDIO_ES8311_CUSTOM(6, 4, 15, 17, &ES8311_CFG),  // bck, ws, spk_tx, mic_rx, cfg
@@ -148,7 +146,6 @@ static const board_config_t BOARD_CONFIG = {
 static const board_config_t BOARD_CONFIG = {
     .name        = "esp32c3_supermini",
     .description = "ESP32-C3 SuperMini (ES8311 全双工, 无屏)",
-    .bin_id      = BOARD_BIN_ID,   // 编译期自动生成
     BOARD_BASE_ESP32C3(9),
     BOARD_DISPLAY_NONE(),
     BOARD_SERVICE_SELF_HOSTED(),
@@ -401,7 +398,7 @@ const display_driver_t *display_driver_oled_get(void)
 
 ## 板型信息上报
 
-固件通过 `board_get_info_json()` 向服务端上报板型能力（`{"name","bin_id","display","display_w","display_h","audio_codec"}`），服务端据此下发匹配的表情包与配置。`bin_id` 由编译期自动生成（`md5(板卡名 + git commit)`），不同板卡名天然产生不同 bin_id，无需人工维护唯一性。
+固件通过 `board_get_info_json()` 向服务端上报板型能力（`{"name","bin_id","display","display_w","display_h","audio_codec"}`），服务端据此下发匹配的表情包与配置。`bin_id` 是固件内容哈希（`app_elf_sha256` 前 16 字节），编译时自动写入、运行时读取，无需人工维护唯一性，也不依赖 git 仓库。
 
 ## 常见问题
 

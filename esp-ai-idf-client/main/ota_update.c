@@ -290,10 +290,10 @@ esp_err_t ota_check_and_update(const char *server_base_url)
     // 获取设备 MAC 地址，用于 OTA 进度上报（与 Arduino device_id 一致）
     device_id_get(s_device_id, sizeof(s_device_id));
 
-    // 获取板级 bin_id，用于服务端判断是否需要升级
-    const char *device_bin_id = board_get_config() ? board_get_config()->bin_id : "";
-    if (!device_bin_id || device_bin_id[0] == '\0') {
-        ESP_LOGW(TAG, "板级 bin_id 为空，跳过 OTA 检查（避免无限升级循环）");
+    // 固件 ID（app_elf_sha256 内容哈希），用于服务端判断是否需要升级
+    const char *device_bin_id = board_get_bin_id();
+    if (!device_bin_id || device_bin_id[0] == '\0' || strcmp(device_bin_id, "unknown") == 0) {
+        ESP_LOGW(TAG, "固件 ID 不可用，跳过 OTA 检查（避免无限升级循环）");
         return ESP_ERR_INVALID_ARG;
     }
 
