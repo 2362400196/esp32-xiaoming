@@ -1223,13 +1223,20 @@ GET /api/v1/system/metrics
 ### 6.1 SDK 查询新固件
 
 ```
-GET /api/v1/sdk/query_new_ota?mac=AA:BB:CC:DD:EE:01&version=1.0
+GET /api/v1/sdk/query_new_ota?mac=AA:BB:CC:DD:EE:01&version=1.0&bin_id=xxx&prov_type=wifi&board=ai_vox3
 ```
 
 | 参数 | 位置 | 说明 |
 |------|------|------|
 | `mac` | Query | 设备 MAC |
 | `version` | Query | 当前固件版本 |
+| `bin_id` | Query | 当前固件 ID（app_elf_sha256 内容哈希，前 16 字节） |
+| `prov_type` | Query | 配网类型：`wifi`（AP 热点）/ `ble`（蓝牙） |
+| `board` | Query | 板卡名（编译期板型，如 `ai_vox3`） |
+
+服务端按 **板卡 + 配网类型** 分槽匹配「启用中」固件：不同板卡的引脚/外设不同，
+固件互不覆盖。设备只匹配自己板卡的同配网类型槽位；该板卡还没上传过固件时，
+才回退到无板卡标识的老固件。旧固件不上报 `prov_type` / `board` 时保持原有行为。
 
 ```json
 {

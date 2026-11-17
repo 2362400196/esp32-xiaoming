@@ -1330,62 +1330,118 @@ def firmware_type_from_signature_or_filename(sig: dict, filename: str) -> str:
     return firmware_type_from_filename(filename)
 
 
+def firmware_board(m: dict) -> str:
+    """固件所属板卡名（取自内嵌签名 board=xxx）；老固件无此标识返回空串。"""
+    sig = m.get("fw_sig") or {}
+    return (sig.get("board") or m.get("fw_board") or "").strip()
+
+
+def firmware_slot_key(m: dict, filename: str) -> str:
+    """固件槽位键：板卡 + 配网类型，例如 "ai_vox3|wifi"。
+
+    同一槽位内只允许一个"启用中"固件——不同板卡引脚/外设各不相同，
+    固件必须按板卡分槽，否则多板型会被互相覆盖。
+    老固件（无 board 签名）退化为 "wifi"/"ble"，仍按配网类型分槽。
+    """
+    fw_type = m.get("fw_type") or firmware_type_from_signature_or_filename(
+        m.get("fw_sig") or {}, filename
+    )
+    board = firmware_board(m)
+    return f"{board}|{fw_type}" if board else fw_type
+
+
 def pick_active_slot_for_bin(device_bin_id: str) -> Optional[str]:
-    """根据设备上报的 bin_id 推断其固件类型槽位（ble/wifi）。
+    """根据设备上报的 bin_id 推断其固件配网类型（ble/wifi）。
 
     设备 bin_id 与某固件登记的 bin_id 一致 → 返回该固件类型（同类型旧版本也算命中）；
     匹配不到（bin_id 为空 / 新编译未登记的固件）→ 返回 None，调用方按需兜底。
     """
+    slot = pick_slot_for_bin(device_bin_id)
+    return slot.get("fw_type") or None
+
+
+def pick_slot_for_bin(device_bin_id: str) -> dict:
+    """根据设备上报的 bin_id 推断完整槽位 {fw_type, board}；匹配不到返回空 dict。"""
     if not device_bin_id:
-        return None
+        return {}
     meta = load_firmware_meta()
     for filename, m in meta.items():
         if m.get("bin_id") and m.get("bin_id") == device_bin_id:
-            return m.get("fw_type", firmware_type_from_filename(filename))
-    return None
+            return {
+                "fw_type": m.get("fw_type") or firmware_type_from_signature_or_filename(
+                    m.get("fw_sig") or {}, filename
+                ),
+                "board": firmware_board(m),
+            }
+    return {}
 
 
-def get_active_firmware(fw_type: Optional[str] = None) -> Optional[dict]:
+def get_active_firmware(fw_type: Optional[str] = None, board: Optional[str] = None) -> Optional[dict]:
     """获取"启用中"的固件（OTA 无显式配置时的回退目标）。
 
-    fw_type="wifi"/"ble" 时只返回该配网类型的激活固件（BLE/WiFi 版固件分槽激活，互不干扰）；
-    fw_type=None 保持旧行为：返回任意激活固件（管理员强制升级等场景）。
+    槽位 = 板卡 + 配网类型：
+      - 指定 board 时优先返回该板卡该配网类型的激活固件；
+      - 该板卡还没上传过固件时，回退到"无板卡标识"的同类型固件（老版本兼容）；
+      - board=None 时按配网类型匹配（含任意板卡），fw_type=None 时退回"任意激活固件"。
 
-    返回 {filename, bin_id, version, download_url, size, fw_type}，无启用固件返回 None。
+    返回 {filename, bin_id, version, download_url, size, fw_type, board}，无启用固件返回 None。
     """
     meta = load_firmware_meta()
+    candidates = []
     for filename, m in meta.items():
         if not m.get("active"):
             continue
-        if fw_type and m.get("fw_type", "ble") != fw_type:
+        m_type = m.get("fw_type") or firmware_type_from_filename(filename)
+        if fw_type and m_type != fw_type:
             continue
         info = get_firmware_info(filename)
         if not info:
             continue  # 文件已被手动删除，元数据悬空
-        return {
-            "filename": filename,
-            "bin_id": m.get("bin_id", ""),
-            "version": m.get("version", ""),
-            "download_url": info.download_url,
-            "size": info.size,
-            "fw_type": m.get("fw_type", "ble"),
-        }
-    return None
+        candidates.append((filename, m, info, m_type, firmware_board(m)))
+
+    if not candidates:
+        return None
+
+    board = (board or "").strip()
+    chosen = None
+    if board:
+        # 1) 板卡 + 类型完全匹配
+        chosen = next((c for c in candidates if c[4] == board), None)
+        # 2) 该板卡没有专属固件 → 回退到无板卡标识的老固件（避免多板型场景下串刷）
+        if chosen is None:
+            chosen = next((c for c in candidates if not c[4]), None)
+    if chosen is None:
+        chosen = candidates[0]
+
+    filename, m, info, m_type, m_board = chosen
+    return {
+        "filename": filename,
+        "bin_id": m.get("bin_id", ""),
+        "version": m.get("version", ""),
+        "download_url": info.download_url,
+        "size": info.size,
+        "fw_type": m_type,
+        "board": m_board,
+    }
 
 
 def set_active_firmware(filename: str) -> bool:
-    """设置启用中的固件（按配网类型分槽单选：激活 wifi 固件只取消其他 wifi 固件的激活，
-    ble 槽不受影响）。文件不存在返回 False。"""
+    """设置启用中的固件（按槽位单选：槽位 = 板卡 + 配网类型）。
+
+    激活 ai_vox3 的 WiFi 固件只取消同槽位（同一板卡的 WiFi 版）固件的激活，
+    其他板卡、BLE 槽都不受影响。文件不存在返回 False。
+    """
     if not (FIRMWARE_DIR / filename).exists():
         return False
     meta = load_firmware_meta()
-    fw_type = firmware_type_from_filename(filename)
-    meta.setdefault(filename, {})["fw_type"] = fw_type
+    entry = meta.setdefault(filename, {})
+    entry["fw_type"] = entry.get("fw_type") or firmware_type_from_filename(filename)
+    slot = firmware_slot_key(entry, filename)
     for name, m in meta.items():
-        # 只取消同类型固件的激活，另一类型槽位保持
-        if m.get("active") and m.get("fw_type", firmware_type_from_filename(name)) == fw_type:
+        # 只取消同槽位固件的激活：不同板卡/不同配网类型互不影响
+        if m.get("active") and firmware_slot_key(m, name) == slot:
             m["active"] = False
-    meta[filename]["active"] = True
+    entry["active"] = True
     save_firmware_meta(meta)
     return True
 
@@ -1428,9 +1484,18 @@ async def upload_firmware(
         if info and version:
             info.version = version
 
-        # 记录固件配网类型（从文件名识别，build_firmware.py 对 WiFi 版输出 -wifi- 标识）
+        # 记录固件配网类型/板卡（优先内嵌签名 esp-ai-fw:prov=...;board=...，回退文件名 -wifi- 标识）
+        # 板卡标识决定固件槽位，多板型场景下互不覆盖
         meta = load_firmware_meta()
-        meta.setdefault(safe_filename, {})["fw_type"] = firmware_type_from_filename(safe_filename)
+        entry = meta.setdefault(safe_filename, {})
+        try:
+            with open(filepath, "rb") as rf:
+                sig = extract_fw_signature(rf.read(2 * 1024 * 1024))
+        except OSError:
+            sig = {}
+        if sig:
+            entry["fw_sig"] = sig
+        entry["fw_type"] = firmware_type_from_signature_or_filename(sig, safe_filename)
         save_firmware_meta(meta)
 
         logger.info(f"[Firmware] Uploaded: {safe_filename}, size: {info.size if info else 0} bytes")
@@ -2225,17 +2290,19 @@ async def sdk_query_new_ota(
     is_official: str = Query("0"),
     mac: str = Query(""),
     prov_type: str = Query(""),
+    board: str = Query(""),
 ):
     """
     设备 OTA 更新查询接口
 
     ESP 客户端 auto_update() 调用此接口检查是否有新固件。
-    请求: GET /sdk/query_new_ota?version=1.0.0&bin_id=xxx&is_official=0&mac=xx:xx:xx:xx&prov_type=ble
+    请求: GET /sdk/query_new_ota?version=1.0.0&bin_id=xxx&is_official=0&mac=xx:xx:xx:xx&prov_type=wifi&board=ai_vox3
     响应: {"success": true, "data": {"latest": false, "bin_url": "http://..."}}
 
     prov_type: 设备固件的配网类型（ble=蓝牙配网版 / wifi=AP热点配网版）。
-    服务端固件按类型分槽激活，BLE 版设备只匹配 BLE 槽激活固件，WiFi 版只匹配 WiFi 槽，
-    两种固件的升级检测互不干扰。旧固件不上报此参数时保持旧行为。
+    board: 设备板卡名（编译期板型，如 ai_vox3）。
+    服务端固件按「板卡 + 配网类型」分槽激活：不同板卡引脚/外设不同，固件互不覆盖；
+    设备只匹配自己板卡的同配网类型槽位。老固件不上报这些参数时保持旧行为。
 
     判断优先级（从高到低）：
       1. 设备级 ota_bin_id（数据库中每设备独立）与客户端 bin_id 比对
@@ -2306,7 +2373,9 @@ async def sdk_query_new_ota(
     # 旧固件未上报 → fw_type=None，保持旧行为（任意激活固件）
     prov_norm = prov_type.strip().lower()
     matched_fw_type = prov_norm if prov_norm in ("ble", "wifi") else None
-    active = get_active_firmware(matched_fw_type)
+    # 板卡名：设备上报优先；老固件不上报时用 bin_id 反查登记过的固件所属板卡
+    matched_board = board.strip() or pick_slot_for_bin(bin_id).get("board", "")
+    active = get_active_firmware(matched_fw_type, matched_board)
     active_bin_id = (active or {}).get("bin_id", "")
     active_bin_url = (active or {}).get("download_url", "")
     active_version = (active or {}).get("version", "")
@@ -2324,9 +2393,16 @@ async def sdk_query_new_ota(
     # 已知设备固件类型时只兜底同类型固件，避免把 BLE 版推给 WiFi 版设备（反之亦然）
     if not effective_bin_url:
         firmwares = list_firmwares()
+        fw_meta = load_firmware_meta()
         if matched_fw_type:
             firmwares = [f for f in firmwares
-                         if firmware_type_from_filename(f.filename) == matched_fw_type]
+                         if firmware_type_from_signature_or_filename(
+                             fw_meta.get(f.filename, {}).get("fw_sig", {}), f.filename) == matched_fw_type]
+        # 多板型场景：只兜底同板卡固件；该板卡还没上传过固件时才退回无板卡标识的老固件
+        if matched_board:
+            exact = [f for f in firmwares if firmware_board(fw_meta.get(f.filename, {})) == matched_board]
+            legacy = [f for f in firmwares if not firmware_board(fw_meta.get(f.filename, {}))]
+            firmwares = exact or legacy
         if firmwares:
             effective_bin_url = firmwares[0].download_url
             logger.info(f"[SDK OTA] 使用本地固件: {firmwares[0].filename} -> {effective_bin_url}")

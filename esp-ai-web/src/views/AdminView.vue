@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿<template>
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿<template>
   <div class="admin-layout">
     <!-- 左侧边栏 -->
     <aside class="admin-sidebar">
@@ -638,7 +638,7 @@
                     <td data-label="固件">
                       <strong>{{ f.filename }}</strong>
                       <span class="fw-type-badge" :class="f.fw_type === 'wifi' ? 'fw-wifi' : 'fw-ble'">{{ f.fw_type === 'wifi' ? 'WiFi 版' : '蓝牙版' }}</span>
-                      <span v-if="f.fw_sig?.board" class="fw-type-badge fw-board" :title="`板卡：${f.fw_sig.board}，屏幕：${f.fw_sig.display || '未知'}`">{{ f.fw_sig.display && f.fw_sig.display !== 'none' ? f.fw_sig.display : '无屏' }}</span>
+                      <span v-if="f.fw_sig?.board" class="fw-type-badge fw-board" :title="`板卡：${f.fw_sig.board}，屏幕：${f.fw_sig.display || '未知'}`">{{ f.fw_sig.board }}<template v-if="f.fw_sig.display && f.fw_sig.display !== 'none'"> · {{ f.fw_sig.display }}</template></span>
                     </td>
                     <td data-label="bin_id"><span class="cell-sub">{{ f.bin_id || '—' }}</span></td>
                     <td data-label="版本">{{ f.version || '—' }}</td>
@@ -646,11 +646,11 @@
                     <td data-label="上传者">{{ f.uploaded_by || '—' }}</td>
                     <td data-label="上传时间" class="cell-muted">{{ formatDate(f.uploaded_at || f.created_time) }}</td>
                     <td data-label="状态">
-                      <span class="badge" :class="f.active ? 'badge-mint' : 'badge-sub'">{{ f.active ? (f.fw_type === 'wifi' ? 'WiFi 槽启用中' : '蓝牙槽启用中') : '备用' }}</span>
+                      <span class="badge" :class="f.active ? 'badge-mint' : 'badge-sub'">{{ f.active ? fwSlotLabel(f) + ' 启用中' : '备用' }}</span>
                     </td>
                     <td data-label="操作">
                       <div class="row-actions">
-                        <button v-if="!f.active" class="btn btn-ghost btn-xs" :title="`启用到${f.fw_type === 'wifi' ? 'WiFi' : '蓝牙'}槽（不影响另一槽）`" @click="setFirmwareActive(f)">设为启用</button>
+                        <button v-if="!f.active" class="btn btn-ghost btn-xs" :title="`启用 ${fwSlotLabel(f)} 槽（不影响其他板卡/类型）`" @click="setFirmwareActive(f)">设为启用</button>
                         <a class="btn btn-ghost btn-xs" :href="f.download_url" target="_blank">下载</a>
                         <button class="btn btn-danger btn-xs" @click="deleteFirmware(f)">删除</button>
                       </div>
@@ -2479,6 +2479,13 @@ function formatSize(bytes) {
   if (bytes < 1024) return bytes + ' B'
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
   return (bytes / 1024 / 1024).toFixed(1) + ' MB'
+}
+
+// 固件槽位标签：板卡 + 配网类型（每个槽位只保留一个启用固件）
+function fwSlotLabel(f) {
+  const board = f.fw_board || f.fw_sig?.board || ''
+  const type = f.fw_type === 'wifi' ? 'WiFi' : '蓝牙'
+  return board ? `${board} · ${type}` : `${type}（老固件）`
 }
 
 function downloadBackup(name) {

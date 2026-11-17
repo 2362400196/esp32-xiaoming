@@ -306,10 +306,13 @@ esp_err_t ota_check_and_update(const char *server_base_url)
 #else
     const char *prov_type = "ble";
 #endif
-    char query_url[600];
+    // 板卡名：服务端按「板卡 + 配网类型」分槽匹配固件，避免多板型固件互相覆盖
+    const board_config_t *bcfg = board_get_config();
+    const char *board_name = (bcfg && bcfg->name) ? bcfg->name : "unknown";
+    char query_url[700];
     snprintf(query_url, sizeof(query_url),
-             "%s/sdk/query_new_ota?version=%s&bin_id=%s&is_official=0&mac=%s&prov_type=%s",
-             server_base_url, FIRMWARE_VERSION, device_bin_id, s_device_id, prov_type);
+             "%s/sdk/query_new_ota?version=%s&bin_id=%s&is_official=0&mac=%s&prov_type=%s&board=%s",
+             server_base_url, FIRMWARE_VERSION, device_bin_id, s_device_id, prov_type, board_name);
 
     ESP_LOGI(TAG, "OTA 查询: %s", query_url);
 
