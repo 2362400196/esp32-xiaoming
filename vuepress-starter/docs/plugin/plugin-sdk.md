@@ -193,7 +193,7 @@ from src.use_cases.sdk.utils import json_dumps, get_device_key
 普通指令"发出即成功"，但有些指令需要设备**执行后回传结果**：
 
 - `execute_lua`：设备执行 Lua 后把返回值发回来（如 GPIO 读取、传感器数值）
-- `get_volume` / `get_brightness`：设备上报当前状态
+- `get_volume` / `get_brightness` / `get_battery`：设备上报当前状态
 
 ### 推荐用法：三个高层封装（无需理解 future 机制）
 

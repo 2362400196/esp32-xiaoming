@@ -112,3 +112,36 @@ async def get_brightness(tool_manager=None) -> str:
     if result.startswith("brightness="):
         return f"当前屏幕亮度是 {result[len('brightness='):]}%"
     return result
+
+
+@tool()
+async def get_battery(tool_manager=None) -> str:
+    """获取设备当前的电池状态（电量百分比、电压、是否在充电、是否已充满）。
+    当用户问"还有多少电"、"电量剩多少"、"是不是在充电"、"充满了没有"时调用。"""
+    result = await _query_device_state(tool_manager, "get_battery")
+    if result == "battery=unknown":
+        return "这台设备没有电池，或当前板型不支持电池检测"
+    if not result.startswith("battery="):
+        return result
+    # 设备回复格式: battery=88,voltage=4227,charging=1,full=0
+    parts = result[len("battery="):].split(",")
+    try:
+        percent = int(parts[0])
+    except ValueError:
+        return result
+    fields = {}
+    for part in parts[1:]:
+        if "=" in part:
+            key, value = part.split("=", 1)
+            fields[key.strip()] = value.strip()
+    charging = fields.get("charging") == "1"
+    full = fields.get("full") == "1"
+    if full:
+        state = "已充满（接着充电器）"
+    elif charging:
+        state = "正在充电"
+    else:
+        state = "正在使用电池供电"
+    voltage = fields.get("voltage", "")
+    voltage_text = f"，电压 {voltage} mV" if voltage.isdigit() else ""
+    return f"当前电量 {percent}%{voltage_text}，{state}"

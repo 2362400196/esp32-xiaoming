@@ -66,10 +66,9 @@ const int g_gif_files_count = sizeof(g_gif_files) / sizeof(g_gif_files[0]);
 static int s_dl_file_total = 0;   // 本轮要处理的文件总数（0 = 当前没有进度可报）
 static int s_dl_last_percent = -1; // 上次上报的百分比（去重，避免频繁刷新 LVGL）
 
-// 刷新模式：服务器已切换表情包，本地缓存全部视为过期，本次强制重新下载。
-// 不再预删缓存文件（SPIFFS 删除 13 个文件实测要 18 秒，且会拖慢 ACK），
-// 新文件直接 fopen("wb") 覆盖旧缓存即可。
-static volatile bool s_force_download = false;
+// 切换表情包时不再预删缓存文件（SPIFFS 删除 13 个文件实测要 18 秒，且会拖慢 ACK）。
+// 缓存是否可用由「文件名 + 服务器声明的大小」判定：大小一致说明还是同一个文件，
+// 直接复用；只有真正变化的槽位才走网络。新文件会覆盖同名缓存。
 static int s_dl_file_index = 0;   // 当前正在处理的文件序号（0 起，等于已完成数）
 
 /** 开始一轮下载：把进度归零（列表请求等辅助下载不算，避免进度乱跳） */
@@ -544,7 +543,7 @@ static void cancel_pending_cache(void)
 }
 
 // 前向声明
-static void download_all_from(const char *base_url, bool force);
+static void download_all_from(const char *base_url);
 
 // ==================== API 获取表情列表 ====================
 
@@ -555,7 +554,7 @@ static void download_all_from(const char *base_url, bool force);
  * @param device_id 设备 ID
  * @return true=成功 false=失败（调用方应回退到静态 URL 模式）
  */
-static bool download_from_api(const char *http_base, const char *device_id, bool force)
+static bool download_from_api(const char *http_base, const char *device_id)
 {
     dl_progress_finish(false);   // 清掉上一轮残留：列表请求本身不计入进度
     char api_url[512];
@@ -630,7 +629,6 @@ static bool download_from_api(const char *http_base, const char *device_id, bool
             }
         }
 
-        bool from_default_pack = false;
         if (!download_url) {
             // 当前表情包中缺少此文件，从默认包补充
             // 避免使用内置 GIF 导致表情显示不一致，确保所有表情都有对应 GIF
@@ -638,16 +636,13 @@ static bool download_from_api(const char *http_base, const char *device_id, bool
             snprintf(fallback_url, sizeof(fallback_url), "%s/emos/packs/default/%s", http_base, target_file);
             download_url = fallback_url;
             expected_size = 0;
-            from_default_pack = true;
             ESP_LOGI(TAG, "当前包中缺少 %s，从默认包补充", target_file);
         }
 
-        // SPIFFS 缓存：优先读本地（存在且大小与服务器一致 → 跳过下载）
-        // 刷新模式下丢弃新表情包里的旧缓存（属于上一个包），但从默认包补齐的文件
-        // 与表情包无关、内容不变，仍然可以用缓存，省掉这部分下载
-        bool allow_cache = !force || from_default_pack;
+        // 本地缓存：大小与服务器声明一致（默认包补齐的文件没有大小信息，只校验 GIF 头）
+        // 就认为还是同一个文件，直接复用——切换表情包时只有真正变化的槽位才下载
         size_t dsize = 0;
-        uint8_t *data_buf = allow_cache ? load_gif_from_cache(target_file, &dsize) : NULL;
+        uint8_t *data_buf = load_gif_from_cache(target_file, &dsize);
         bool from_cache = false;
         if (data_buf) {
             bool size_ok = (expected_size <= 0 || (int)dsize == expected_size);
@@ -822,15 +817,11 @@ static void download_gifs_task(void *arg)
     char device_id[64];
     device_id_get(device_id, sizeof(device_id));
 
-    // 刷新标记：本次是切换表情包触发的，缓存全部过期，必须重新下载
-    bool force = s_force_download;
-    s_force_download = false;
-
     // 先尝试从 API 获取表情列表（最多重试 3 次）
     // 每次重试间隔 3 秒，避免服务器短暂繁忙/网络抖动导致立即 fallback 到默认表情包
     bool ok = false;
     for (int retry = 0; retry < 3; retry++) {
-        ok = download_from_api(http_base, device_id, force);
+        ok = download_from_api(http_base, device_id);
         if (ok) {
             break;
         }
@@ -867,7 +858,7 @@ static void download_gifs_task(void *arg)
         if (reachable) {
             char base_url[512];
             snprintf(base_url, sizeof(base_url), "%s/emos/packs/default/", http_base);
-            download_all_from(base_url, force);
+            download_all_from(base_url);
         } else {
             ESP_LOGW(TAG, "服务器不可达，使用内置 GIF");
             s_download_started = false;  // 复位，避免唤醒被永久禁用
@@ -899,7 +890,7 @@ static void download_gifs_task(void *arg)
 }
 
 /** 回退方案：从固定 URL 前缀下载所有 GIF */
-static void download_all_from(const char *base_url, bool force)
+static void download_all_from(const char *base_url)
 {
     // 使用局部变量，下载完成后再加锁发布到全局，避免与渲染任务竞态
     uint8_t **new_data = (uint8_t **)calloc(g_gif_files_count, sizeof(uint8_t *));
@@ -919,9 +910,9 @@ static void download_all_from(const char *base_url, bool force)
         char url[512];
         snprintf(url, sizeof(url), "%s%s", base_url, g_gif_files[i].filename);
 
-        // SPIFFS 缓存：优先读本地（静态模式无 size 信息，仅校验 GIF 头）
+        // 本地缓存：静态模式无 size 信息，仅校验 GIF 头
         size_t dsize = 0;
-        uint8_t *data_buf = force ? NULL : load_gif_from_cache(g_gif_files[i].filename, &dsize);
+        uint8_t *data_buf = load_gif_from_cache(g_gif_files[i].filename, &dsize);
         bool from_cache = false;
         if (data_buf) {
             bool header_ok = (dsize >= 6) &&
@@ -1123,10 +1114,9 @@ void refresh_gifs(void)
         return;
     }
 
-    // 标记强制重新下载：旧缓存属于上一个表情包，不能再用。
-    // 这里不再预删缓存文件——SPIFFS 删除 13 个 GIF 实测要 18 秒，会把刷新指令的
-    // ACK 和界面切换一起拖到 20 秒以上；新文件会直接覆盖同名缓存。
-    s_force_download = true;
+    // 不预删缓存：SPIFFS 删除 13 个 GIF 实测要 18 秒，会把 ACK 和界面切换一起
+    // 拖到 20 秒以上。每个槽位按「文件名 + 服务器声明大小」判断缓存是否还能用，
+    // 只有真正变化的槽位才重新下载，新文件覆盖同名缓存。
     // 放弃上一轮（开机下载）还没写完的缓存：它会和本次下载抢 flash/NAND，
     // 之前实测把一次 2KB 的列表请求拖到 15 秒
     s_cache_flush_abort = true;

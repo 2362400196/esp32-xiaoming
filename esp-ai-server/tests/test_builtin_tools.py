@@ -31,6 +31,7 @@ from src.plugins.memory.plugin import (
     memory_update,
 )
 from src.plugins.system_basic.plugin import (
+    get_battery,
     get_brightness,
     get_current_date,
     get_current_time,
@@ -287,6 +288,56 @@ class TestGetBrightness:
                       AsyncMock(return_value=("brightness=60", "ok", ""))):
             result = await get_brightness(tool_manager=tm)
         assert "60%" in result
+
+
+class TestGetBattery:
+    """get_battery：获取设备电池状态"""
+
+    async def test_discharging(self):
+        tm = _make_tool_manager_with_channel()
+        with _plugin_ctx("system_basic", ["device"]), \
+                patch("src.plugins.system_basic.plugin.request_device_result",
+                      AsyncMock(return_value=(
+                          "battery=88,voltage=4227,charging=0,full=0", "ok", ""))):
+            result = await get_battery(tool_manager=tm)
+        assert "88%" in result
+        assert "4227 mV" in result
+        assert "电池供电" in result
+
+    async def test_charging(self):
+        tm = _make_tool_manager_with_channel()
+        with _plugin_ctx("system_basic", ["device"]), \
+                patch("src.plugins.system_basic.plugin.request_device_result",
+                      AsyncMock(return_value=(
+                          "battery=42,voltage=3860,charging=1,full=0", "ok", ""))):
+            result = await get_battery(tool_manager=tm)
+        assert "42%" in result
+        assert "正在充电" in result
+
+    async def test_full(self):
+        tm = _make_tool_manager_with_channel()
+        with _plugin_ctx("system_basic", ["device"]), \
+                patch("src.plugins.system_basic.plugin.request_device_result",
+                      AsyncMock(return_value=(
+                          "battery=100,voltage=4200,charging=1,full=1", "ok", ""))):
+            result = await get_battery(tool_manager=tm)
+        assert "100%" in result
+        assert "已充满" in result
+
+    async def test_unknown(self):
+        tm = _make_tool_manager_with_channel()
+        with _plugin_ctx("system_basic", ["device"]), \
+                patch("src.plugins.system_basic.plugin.request_device_result",
+                      AsyncMock(return_value=("battery=unknown", "ok", ""))):
+            result = await get_battery(tool_manager=tm)
+        assert "没有电池" in result
+
+    async def test_offline(self):
+        tm = _make_tool_manager_with_channel()
+        with patch("src.plugins.system_basic.plugin.request_device_result",
+                   AsyncMock(return_value=("", "offline", "设备未连接"))):
+            result = await get_battery(tool_manager=tm)
+        assert "设备未连接" in result
 
 
 # ============================================================

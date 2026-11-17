@@ -368,3 +368,29 @@ void battery_init(void)
     xTaskCreate(battery_task, "battery", 4096, NULL, 2, NULL);
     ESP_LOGI(TAG, "电池检测已启动: GPIO%d, 分压比 %.1f", cfg->battery_adc_gpio, s_ratio);
 }
+
+// ==================== 状态查询（供 get_battery 指令/工具使用）====================
+int battery_get_percent(void)
+{
+    return s_pct;
+}
+
+int battery_get_voltage_mv(void)
+{
+    return s_has_state ? (int)(s_ema_mv + 0.5f) : -1;
+}
+
+bool battery_is_charging(void)
+{
+    return s_charging;
+}
+
+bool battery_is_full(void)
+{
+    return s_full;
+}
+
+bool battery_is_supported(void)
+{
+    return s_adc != NULL;
+}

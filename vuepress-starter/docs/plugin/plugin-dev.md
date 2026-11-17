@@ -275,6 +275,7 @@ await tool_manager.channel.send_json({
 |---|---|
 | `set_volume` / `add_volume` / `subtract_volume` / `get_volume` | 音量控制 |
 | `set_brightness` / `get_brightness` | 亮度控制 |
+| `get_battery` | 电量查询（回复 `battery=88,voltage=4227,charging=1,full=0`） |
 | `play_music` / `stop_music` | 音乐播放/停止 |
 | `execute_lua` | 执行 Lua 脚本（见下文） |
 | `show_card` | 渲染卡片（见下文） |
