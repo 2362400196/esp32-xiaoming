@@ -15,10 +15,15 @@
   --sky: #38bdf8;
   --amber: #f59e0b;
 
+  /* 页面布局：导航条与内容区共用，保证两者宽度完全一致 */
+  --page-max: 1400px;
+  --page-gutter: 20px;
+  --page-gutter-wide: 32px;
+
   /* 渐变 */
   --grad-mint: linear-gradient(135deg, #34d399 0%, #10b981 100%);
   --grad-brand: linear-gradient(135deg, #34d399 0%, #10b981 45%, #0ea5e9 100%);
-  --grad-card: linear-gradient(155deg, rgba(255, 255, 255, 0.72) 0%, rgba(255, 255, 255, 0.38) 100%);
+  --grad-card: linear-gradient(155deg, rgba(255, 255, 255, 0.94) 0%, rgba(255, 255, 255, 0.84) 100%);
   --grad-panel: linear-gradient(155deg, rgba(255, 255, 255, 0.96) 0%, rgba(255, 255, 255, 0.9) 100%);
   --grad-hero: radial-gradient(120% 90% at 20% 0%, rgba(52, 211, 153, 0.16) 0%, rgba(56, 189, 248, 0.07) 45%, transparent 72%);
 
@@ -48,7 +53,7 @@
 
   /* 阴影 · 柔和分层 */
   --shadow-xs: 0 1px 2px rgba(23, 52, 74, 0.05);
-  --shadow: 0 2px 10px rgba(23, 52, 74, 0.06);
+  --shadow: 0 6px 20px rgba(23, 52, 74, 0.09);
   --shadow-md: 0 10px 32px rgba(23, 52, 74, 0.10);
   --shadow-hover: 0 18px 48px rgba(23, 52, 74, 0.15);
   --shadow-mint: 0 10px 28px rgba(16, 185, 129, 0.28);

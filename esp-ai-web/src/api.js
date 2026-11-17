@@ -121,6 +121,7 @@ export const api = {
   emoPacks: () => request('/api/v1/emos/packs/list'),
   emoPackDetail: (name) => request('/api/v1/emos/packs/' + encodeURIComponent(name)),
   createEmoPack: (name) => request('/api/v1/emos/packs/create?name=' + encodeURIComponent(name), 'POST'),
+  updateEmoPack: (name, data) => request('/api/v1/emos/packs/' + encodeURIComponent(name), 'PATCH', data),
   deleteEmoPack: (name) => request('/api/v1/emos/packs/' + encodeURIComponent(name), 'DELETE'),
   uploadEmo: (packName, file, gifName, size) => {
     const fd = new FormData()
@@ -180,6 +181,7 @@ getActiveEmoPack: (deviceId) => request('/api/v1/emos/active/' + encodeURICompon
   setDisplayConfig: (mac, config) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/display_config', 'POST', config),
   setWakeSensitivity: (mac, value) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/wake_sensitivity', 'POST', { value }),
   setVadBargeIn: (mac, enabled) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/vad_barge_in_enabled', 'POST', { enabled }),
+  setServerUrl: (mac, serverUrl) => request('/api/v1/devices/' + encodeURIComponent(mac) + '/server_url', 'POST', { server_url: serverUrl }),
     // 管理员后台
     adminStats: () => request('/api/v1/admin/stats'),
     adminUsers: () => request('/api/v1/admin/users'),
@@ -241,6 +243,8 @@ getActiveEmoPack: (deviceId) => request('/api/v1/emos/active/' + encodeURICompon
     adminHealth: () => request('/api/v1/admin/health'),
     adminOpLogs: (params = {}) => { const qs = new URLSearchParams(params).toString(); return request('/api/v1/admin/operation-logs' + (qs ? '?' + qs : '')) },
     adminEmojis: () => request('/api/v1/admin/emojis'),
+  adminCreateEmoji: (name) => request('/api/v1/admin/emojis/create?name=' + encodeURIComponent(name), 'POST'),
+  adminUpdateEmoji: (name, data) => request('/api/v1/admin/emojis/' + encodeURIComponent(name), 'PATCH', data),
     adminDeleteEmoji: (name) => request('/api/v1/admin/emojis/' + encodeURIComponent(name), 'DELETE'),
     adminScheduledTasks: () => request('/api/v1/admin/scheduled-tasks'),
     adminCreateScheduledTask: (data) => request('/api/v1/admin/scheduled-tasks', 'POST', data),

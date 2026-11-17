@@ -238,6 +238,8 @@ PRAGMA 的挂载通过 `event.listens_for(sync_engine, "connect")` 实现，即�
 |---|---|---|---|
 | `pack_name` | `String(128)` | PK | 表情包名 |
 | `display_name` | `String(256)` | NOT NULL | 显示名 |
+| `owner_user_id` | `String(36)` | INDEX，可空 | 归属用户；NULL = 公共包（default、管理员创建），所有用户可见 |
+| `cover` | `String(128)` | 可空 | 封面 GIF 文件名（包内文件）；为空时按默认规则自动挑选 |
 
 ### wechat_bindings 表
 

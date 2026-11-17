@@ -1,15 +1,16 @@
 # 切换开发板
 
-本文介绍 esp-ai-idf-client 内置的 3 种板型、差异与切换方法。**同一块硬件(1.54 寸 LCD 板)可互刷不同板型固件,引脚完全一致**。
+本文介绍 esp-ai-idf-client 内置的 4 种板型、差异与切换方法。**同一块硬件(1.54 寸 LCD 板)可互刷不同板型固件,引脚完全一致**。
 
 ## 板型总览
 
-项目通过编译期配置选择板型,内置 3 种:
+项目通过编译期配置选择板型,内置 4 种:
 
 | 选项 | 说明 | 适用场景 |
 |------|------|---------|
 | `面包板无屏幕 (esp32s3_breadboard)` | ESP32-S3 面包板(无屏幕) | 低成本方案,无显示需求 |
 | `面包板 1.54寸 LCD (esp32s3_breadboard_1.54_lcd)` | ESP32-S3 面包板 + 1.54 寸 TFT 屏幕 | **连自建 esp-ai-server 推荐**,`sdkconfig.defaults` 默认选择 |
+| `AI-VOX3 (ai_vox3)` | 成品板:ESP32-S3R8 + ES8311 + NS4150B + 240x240 LCD + 电池(屏幕按 ST7789 适配) | 使用 AI-VOX3 整机时选择 |
 | `ESP32-C3 SuperMini (esp32c3_supermini)` | **不同芯片**(ESP32-C3),单核无 PSRAM,无屏,ES8311 全双工 | 低成本 C3 板,需先 `idf.py set-target esp32c3` |
 
 > **说明**:固件只支持连接自建 esp-ai-server（ESP-AI 官方节点 `node.espai.fun` 支持已移除）,连哪个服务器由配网时填写的地址决定,与板型无关。

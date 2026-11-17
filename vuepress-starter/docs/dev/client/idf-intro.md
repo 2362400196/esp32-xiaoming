@@ -1,4 +1,5 @@
-## 功能特性
+
+## 功能特性
 
 - **语音交互** — I2S 双路音频（INMP441 麦克风 + MAX98357A 喇叭），Helix MP3 软件解码，PCM 采样定点音量控制
 - **WiFi 联网** — WebSocket 长连接，心跳保活，断线自动重连
@@ -202,6 +203,7 @@ main/
 │   │   ├── tools/gen_boards.py # 板型自动生成脚本
 │   │   └── defs/               # ★ 板型定义（一个文件一个板型）
 │   │       ├── board_templates.h
+│   │       ├── ai_vox3.h
 │   │       ├── esp32s3_breadboard.h
 │   │       └── esp32s3_breadboard_1.54_lcd.h
 │

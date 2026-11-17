@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿<template>
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿<template>
   <div class="settings-mask" @click.self="$emit('close')">
     <div class="settings-panel">
       <div class="settings-head">
@@ -436,6 +436,27 @@
           </div>
         </section>
 
+        <!-- ============ 连接 ============ -->
+        <section v-else-if="activeTab === 'connection'" key="connection" class="tab-pane">
+          <div class="block">
+            <p class="block-label">服务器地址</p>
+            <input class="input" type="text" placeholder="ws://192.168.1.10:8088"
+              v-model="serverUrl" spellcheck="false" />
+            <p class="form-tip">
+              设备连接的服务器地址，支持 ws:// 或 wss://，例如 ws://192.168.1.10:8088。
+              保存后新地址会写入设备，设备将在约 3 秒后自动重启并连接新服务器。
+            </p>
+          </div>
+          <div class="block">
+            <button class="btn-ghost" :disabled="serverUrlSaving" @click="saveServerUrl">
+              {{ serverUrlSaving ? '下发中…' : '保存并应用' }}
+            </button>
+            <p class="form-tip" style="margin-top:10px;">
+              切换后设备将不再连接当前服务器，请确认新地址可正常访问后再操作。
+            </p>
+          </div>
+        </section>
+
         </transition>
       </div>
 
@@ -476,6 +497,8 @@ const screensaverEnabled = ref(true)
 const screensaverTimeout = ref(30)
 const wakeSensitivity = ref(0.55)
 const vadBargeIn = ref(true)
+const serverUrl = ref('')
+const serverUrlSaving = ref(false)
 const sensitivityLabel = computed(() => {
   const v = wakeSensitivity.value
   if (v <= 0.45) return '很灵敏'
@@ -492,6 +515,7 @@ const tabs = [
   { id: 'tts', label: '语音合成' },
   { id: 'wakeup', label: '唤醒' },
   { id: 'display', label: '显示' },
+  { id: 'connection', label: '连接' },
 ]
 const asrEngines = [
   { id: 'bytedance', name: '字节跳动' },
@@ -584,6 +608,7 @@ async function load() {
     wakeSensitivity.value = cfg.wake_sensitivity !== undefined && cfg.wake_sensitivity !== null
       ? parseFloat(cfg.wake_sensitivity) : 0.55
     vadBargeIn.value = cfg.vad_barge_in_enabled === undefined || cfg.vad_barge_in_enabled === 'true' || cfg.vad_barge_in_enabled === true
+    serverUrl.value = cfg.server_url || ''
     loadCloneVoices()
   }
   loading.value = false
@@ -673,6 +698,32 @@ async function toggleVadBargeIn() {
     emit('toast', '设置失败: ' + (res.data?.message || res.data?.detail || ''))
   } else {
     emit('toast', enabled ? '实时打断已开启' : '实时打断已关闭（仅唤醒词打断）')
+  }
+}
+
+async function saveServerUrl() {
+  const mac = props.device?.mac
+  if (!mac || serverUrlSaving.value) return
+  const url = (serverUrl.value || '').trim()
+  if (!url) {
+    emit('toast', '请输入服务器地址')
+    return
+  }
+  serverUrlSaving.value = true
+  const res = await api.setServerUrl(mac, url)
+  serverUrlSaving.value = false
+  if (res.status !== 200 || res.data?.code !== 0) {
+    emit('toast', '设置失败: ' + (res.data?.message || res.data?.detail || ''))
+    return
+  }
+  const data = res.data.data || {}
+  serverUrl.value = data.server_url || url
+  if (data.pushed) {
+    emit('toast', '已下发，设备将在数秒后重启并连接新地址')
+  } else if (data.changed) {
+    emit('toast', '已保存，但设备当前离线，请等设备上线后再次点击应用')
+  } else {
+    emit('toast', '设备当前离线，地址已保存；设备上线后再次点击应用即可下发')
   }
 }
 

@@ -152,7 +152,7 @@ const icons = {
   position: sticky;
   top: 12px;
   z-index: 100;
-  padding: 0 20px;
+  padding: 0 var(--page-gutter);
   height: 60px;
 }
 .nav-enter-active, .nav-leave-active {
@@ -165,7 +165,7 @@ const icons = {
   transform: translateY(-24px);
 }
 .nav-inner {
-  max-width: 1400px;
+  max-width: var(--page-max);
   margin: 0 auto;
   height: 60px;
   padding: 0 20px;
@@ -336,7 +336,7 @@ const icons = {
   .drop-enter-from, .drop-leave-to { transform: translateY(-6px); }
 }
 @media (min-width: 1600px) {
-  .navbar { padding: 0 32px; }
+  .navbar { padding: 0 var(--page-gutter-wide); }
   .nav-inner { padding: 0 28px; }
   .nav-item { padding: 8px 20px; font-size: 14px; }
 }

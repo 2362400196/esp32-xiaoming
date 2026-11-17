@@ -18,6 +18,7 @@ main/boards/
 │   ├── board_templates.h  # 板型配置模板宏（BASE/AUDIO/DISPLAY/SERVICE/EXTRAS）
 │   ├── esp32s3_breadboard.h            # 面包板无屏幕
 │   ├── esp32s3_breadboard_1.54_lcd.h   # 面包板 1.54寸 LCD
+│   ├── ai_vox3.h               # AI-VOX3 成品板（ES8311 + 240x240 LCD）
 │   └── your_board.h            # ← 你的板型定义（新建）
 ├── extras/                # ★ 板级扩展组件（LED/传感器等，见「板级扩展组件（Extras）」）
 │   └── extras_led.c/.h         # 示例组件：状态 LED

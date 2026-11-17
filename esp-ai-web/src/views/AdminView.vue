@@ -902,21 +902,31 @@
 <section v-else-if="section === 'emojis'" class="admin-section">
   <div class="action-bar">
     <div class="action-info"><p class="action-title">表情包管理</p><p class="action-sub">管理全局表情包库</p></div>
-    <button class="btn btn-ghost" :disabled="loadingEmojis" @click="loadEmojis()">刷新</button>
+    <div class="row-actions">
+      <button class="btn btn-mint btn-sm" @click="openEmoEditor(null)">新建表情包</button>
+      <button class="btn btn-ghost" :disabled="loadingEmojis" @click="loadEmojis()">刷新</button>
+    </div>
   </div>
   <div class="emo-grid">
     <div v-for="p in emojiPacks" :key="p.name" class="emo-card">
       <div class="emo-card-header">
         <span class="emo-pack-name">{{ p.display_name || p.name }}</span>
-        <span class="emo-pack-count">{{ p.count }} 个</span>
+        <div class="emo-card-head-right">
+          <span class="emo-pack-count">{{ p.count }} 个</span>
+          <button class="btn btn-ghost btn-xs" @click="openEmoEditor(p)">编辑</button>
+        </div>
       </div>
       <div class="emo-previews">
-        <div v-for="emo in (p.emos || [])" :key="emo.filename" class="emo-item-wrap">
-          <img :src="emo.url" :alt="emo.name" class="emo-thumb" @error="$event.target.style.display='none'" />
-          <button class="emo-del-btn" title="删除此表情" @click="deleteEmojiFile(p.name, emo.filename)">×</button>
-          <span class="emo-name-label">{{ emo.name }}</span>
+        <div v-for="s in packSlots(p)" :key="s.filename" class="emo-item-wrap">
+          <template v-if="s.emo">
+            <img :src="s.emo.url" :alt="s.label" class="emo-thumb" @error="$event.target.style.display='none'" />
+            <button class="emo-del-btn" title="删除此表情" @click="deleteEmojiFile(p.name, s.emo.filename)">×</button>
+          </template>
+          <button v-else class="emo-add-slot" title="点击上传该表情 GIF" @click="pickSlot(p.name, s.file)">
+            <span class="emo-add-plus">+</span>
+          </button>
+          <span class="emo-name-label" :title="s.filename">{{ s.label }}</span>
         </div>
-        <div v-if="!p.emos || !p.emos.length" class="emo-empty">无预览图</div>
       </div>
       <div class="emo-card-actions">
         <button class="btn btn-ghost btn-xs" style="color:var(--danger)" @click="deleteEmoji(p.name)">删除整个包</button>
@@ -924,7 +934,39 @@
     </div>
   </div>
   <div v-if="!emojiPacks.length" class="table-empty">暂无表情包</div>
+  <!-- 上传到指定表情槽位（GIF） -->
+  <input ref="emoFileInput" type="file" accept="image/gif" style="display:none" @change="onSlotFile" />
 </section>
+
+<!-- 新建 / 编辑表情包弹窗 -->
+<div v-if="emoEditorVisible" class="modal-overlay" @click.self="closeEmoEditor">
+  <div class="modal-card" style="max-width:560px;width:min(560px,92vw)">
+    <div class="modal-title">{{ emoEditing ? '编辑表情包' : '新建表情包' }}</div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div>
+        <label class="form-label">名称</label>
+        <input class="form-input" v-model="emoForm.name" placeholder="表情包名称" @keyup.enter="saveEmo" />
+      </div>
+      <div v-if="emoEditing">
+        <label class="form-label">封面（从表情包内选择）</label>
+        <div v-if="emoForm.gifs.length" class="emo-cover-picker">
+          <button v-for="emo in emoForm.gifs" :key="emo.filename"
+            class="emo-cover-option" :class="{ active: emoForm.cover === emo.filename }"
+            :title="emo.name" @click="emoForm.cover = emo.filename">
+            <img :src="emo.url" :alt="emo.name" />
+          </button>
+        </div>
+        <div v-else class="table-empty" style="padding:12px">该表情包还没有图片</div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" @click="closeEmoEditor">取消</button>
+      <button class="btn btn-mint" :disabled="emoSaving || !emoForm.name.trim()" @click="saveEmo">
+        {{ emoSaving ? '保存中…' : (emoEditing ? '保存' : '创建') }}
+      </button>
+    </div>
+  </div>
+</div>
 
         <!-- 定时任务 -->
 <section v-else-if="section === 'tasks'" class="admin-section">
@@ -2077,6 +2119,11 @@ const opTotal = ref(0)
 const opTotalPages = ref(1)
 const emojiPacks = ref([])
 const loadingEmojis = ref(false)
+// 新建 / 编辑表情包
+const emoEditorVisible = ref(false)
+const emoEditing = ref(false)
+const emoSaving = ref(false)
+const emoForm = ref({ name: '', cover: '', packName: '', gifs: [] })
 const scheduledTasks = ref([])
 	const loadingTasks = ref(false)
 	const showTaskModal = ref(false)
@@ -2578,8 +2625,118 @@ async function loadEmojis() {
   loadingEmojis.value = false
 }
 
-async function deleteEmoji(name) {
-  const ok = await showConfirm({ title: '删除表情包', message: `确定删除表情包「${name}」吗？`, confirmText: '确认删除', danger: true })
+// 打开新建 / 编辑表情包弹窗
+function openEmoEditor(p) {
+  if (p) {
+    emoEditing.value = true
+    emoForm.value = {
+      name: p.display_name || p.name,
+      cover: p.cover || '',
+      packName: p.name,
+      gifs: (p.emos || []).map(e => ({ filename: e.filename, name: e.name, url: e.url })),
+    }
+  } else {
+    emoEditing.value = false
+    emoForm.value = { name: '', cover: '', packName: '', gifs: [] }
+  }
+  emoEditorVisible.value = true
+}
+
+function closeEmoEditor() {
+  emoEditorVisible.value = false
+}
+
+async function saveEmo() {
+  const name = emoForm.value.name.trim()
+  if (!name || emoSaving.value) return
+  emoSaving.value = true
+  try {
+    const res = emoEditing.value
+      ? await api.adminUpdateEmoji(emoForm.value.packName, {
+          display_name: name,
+          ...(emoForm.value.cover ? { cover: emoForm.value.cover } : {}),
+        })
+      : await api.adminCreateEmoji(name)
+    if (res.status === 200 && res.data?.code === 0) {
+      emit('toast', emoEditing.value ? '已保存' : '创建成功')
+      closeEmoEditor()
+      loadEmojis()
+    } else {
+      emit('toast', res.data?.message || '保存失败')
+    }
+  } catch { emit('toast', '保存失败') }
+  emoSaving.value = false
+}
+
+// 标准表情槽位（与设备端 gif_downloader / 前台表情页对齐）
+const EMO_SLOTS = [
+  { file: 'wifi', label: '联网中' },
+  { file: 'wx_qrcode', label: '请配网' },
+  { file: 'error', label: '发生错误' },
+  { file: 'listen', label: '聆听中' },
+  { file: 'tts_ing', label: '说话中' },
+  { file: 'sleep', label: '休息中' },
+  { file: 'music', label: '唱歌中' },
+  { file: 'happy', label: '快乐' },
+  { file: 'sad', label: '伤心' },
+  { file: 'angry', label: '愤怒' },
+  { file: 'accident', label: '意外' },
+  { file: 'no', label: '否定' },
+]
+const EMO_SLOT_LABELS = Object.fromEntries(EMO_SLOTS.map(s => [s.file, s.label]))
+
+function emoLabel(emo) {
+  const key = String(emo.name || emo.filename || '').replace(/\.gif$/i, '')
+  return EMO_SLOT_LABELS[key] || emo.name || key
+}
+
+// 组合出该表情包的槽位：12 个标准槽位（缺失的显示为可上传占位）+ 已有自定义表情
+function packSlots(p) {
+  const emos = p.emos || []
+  const byFile = {}
+  emos.forEach(e => { byFile[e.filename || (e.name + '.gif')] = e })
+  const slots = EMO_SLOTS.map(s => ({
+    file: s.file,
+    label: s.label,
+    filename: s.file + '.gif',
+    emo: byFile[s.file + '.gif'] || null,
+  }))
+  const known = new Set(slots.map(s => s.filename))
+  emos.forEach(e => {
+    const fn = e.filename || (e.name + '.gif')
+    if (!known.has(fn)) slots.push({ file: e.name, label: emoLabel(e), filename: fn, emo: e })
+  })
+  return slots
+}
+
+// 上传到指定槽位
+const emoFileInput = ref(null)
+const pendingEmoSlot = ref(null)
+
+function pickSlot(pack, file) {
+  pendingEmoSlot.value = { pack, file }
+  emoFileInput.value?.click()
+}
+
+async function onSlotFile(e) {
+  const f = e.target.files?.[0]
+  e.target.value = ''
+  const slot = pendingEmoSlot.value
+  if (!f || !slot) return
+  if (!f.name.toLowerCase().endsWith('.gif')) {
+    emit('toast', '请选择 GIF 文件')
+    return
+  }
+  const res = await api.uploadEmo(slot.pack, f, slot.file, 0).catch(() => null)
+  if (res?.code === 0) {
+    emit('toast', '上传成功')
+    loadEmojis()
+  } else {
+    emit('toast', res?.message || '上传失败')
+  }
+}
+
+async function deleteEmoji(name) {  const ok = await showConfirm({ title: '删除表情包', message: `确定删除表情包「${name}」吗？`, confirmText: '确认删除', danger: true })
   if (!ok) return
   try {
     const res = await api.adminDeleteEmoji(name)
@@ -3493,6 +3650,36 @@ tbody tr:hover { background: var(--mint-softer); }
   font-size: 12px;
   color: var(--text-sub);
 }
+.emo-card-head-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.emo-cover-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(56px, 1fr));
+  gap: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--glass-border-soft);
+  border-radius: 8px;
+}
+.emo-cover-option {
+  aspect-ratio: 1 / 1;
+  padding: 4px;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+  transition: all 0.2s var(--ease, ease);
+}
+.emo-cover-option img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.emo-cover-option:hover { border-color: var(--mint-border, rgba(16,185,129,0.3)); }
+.emo-cover-option.active {
+  border-color: var(--mint);
+  box-shadow: 0 0 0 3px var(--mint-soft);
+}
 .emo-previews {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -3506,6 +3693,25 @@ tbody tr:hover { background: var(--mint-softer); }
   align-items: center;
   gap: 2px;
 }
+.emo-add-slot {
+  width: 100%;
+  aspect-ratio: 1;
+  border: 1.5px dashed var(--glass-border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.45);
+  color: var(--text-dim);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s var(--ease);
+}
+.emo-add-slot:hover {
+  border-color: var(--mint);
+  color: var(--mint);
+  background: var(--mint-soft);
+}
+.emo-add-plus { font-size: 20px; line-height: 1; }
 .emo-thumb {
   width: 100%;
   aspect-ratio: 1;

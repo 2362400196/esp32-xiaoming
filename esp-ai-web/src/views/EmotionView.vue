@@ -84,21 +84,27 @@
           </div>
         </div>
 
-        <!-- 表情包列表 -->
+        <!-- 表情包列表：卡片形式展示封面 -->
         <div v-if="packLoading" class="pack-loading">加载中...</div>
         <div v-else-if="!packs.length" class="pack-empty">暂无表情包</div>
-        <div v-else class="pack-list">
+        <div v-else class="pack-grid">
           <div v-for="p in packs" :key="p.name"
-            class="pack-item" :class="{ active: p.name === selectedPackName }">
-            <div class="pack-info" @click="selectPack(p)">
-              <span class="pack-name">{{ p.display_name || p.name }}</span>
-              <span class="pack-count" v-if="p.emo_count !== undefined">{{ p.emo_count }} 个表情</span>
+            class="pack-card" :class="{ active: p.name === selectedPackName }"
+            @click="selectPack(p)">
+            <div class="pack-cover">
+              <img v-if="p.cover_url" :src="p.cover_url" :alt="p.display_name || p.name" loading="lazy" />
+              <span v-else class="pack-cover-empty">无预览</span>
               <span v-if="p.name === activePack" class="pack-badge">当前使用</span>
             </div>
-            <div class="pack-ops">
+            <div class="pack-meta">
+              <span class="pack-name" :title="p.display_name || p.name">{{ p.display_name || p.name }}</span>
+              <span class="pack-count">{{ p.count ?? 0 }} 个表情</span>
+            </div>
+            <div class="pack-ops" @click.stop>
+              <button v-if="p.can_manage" class="btn-sm btn-ghost" @click="openEdit(p)">编辑</button>
               <button v-if="p.name !== activePack" class="btn-sm btn-mint" @click="activatePack(p.name)"
                 :disabled="!online">启用</button>
-              <button v-if="p.name !== 'default'" class="btn-sm btn-danger" @click="removePack(p.name)">删除</button>
+              <button v-if="p.name !== 'default' && p.can_manage" class="btn-sm btn-danger" @click="removePack(p.name)">删除</button>
             </div>
           </div>
         </div>
@@ -140,6 +146,41 @@
             <button class="btn-sm btn-ghost" @click="closeDialog">取消</button>
             <button class="btn-sm btn-mint" @click="confirmCreate" :disabled="packCreating">
               {{ packCreating ? '创建中' : '确认创建' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </transition>
+
+    <!-- 编辑表情包弹窗：改名 + 从包内选封面 -->
+    <transition name="modal-fade">
+      <div v-if="editVisible" class="modal-mask" @click.self="closeEdit">
+        <div class="modal-card modal-wide">
+          <div class="modal-head">
+            <span class="modal-title">编辑表情包</span>
+            <button class="modal-close" @click="closeEdit">×</button>
+          </div>
+          <div class="modal-body">
+            <label class="field-label">名称</label>
+            <input v-model="editName" class="modal-input" placeholder="表情包名称"
+              @keyup.enter="saveEdit" />
+            <label class="field-label cover-label">封面（从表情包内选择）</label>
+            <div v-if="editLoading" class="pack-loading">加载中...</div>
+            <div v-else-if="!editGifs.length" class="pack-empty">该表情包还没有图片</div>
+            <div v-else class="cover-picker">
+              <button v-for="g in editGifs" :key="g.filename || g.name"
+                class="cover-option"
+                :class="{ active: editCover === (g.filename || g.name + '.gif') }"
+                @click="editCover = g.filename || g.name + '.gif'">
+                <img :src="g.url" :alt="g.name" loading="lazy" />
+              </button>
+            </div>
+          </div>
+          <div class="modal-foot">
+            <button class="btn-sm btn-ghost" @click="closeEdit">取消</button>
+            <button class="btn-sm btn-mint" @click="saveEdit"
+              :disabled="editSaving || !editName.trim()">
+              {{ editSaving ? '保存中' : '保存' }}
             </button>
           </div>
         </div>
@@ -221,6 +262,14 @@ const pendingSlot = ref(null)
 const uploadingSlot = ref('')
 const makerVisible = ref(false)
 const packEmosVersion = ref(0)
+// 编辑表情包（改名 / 选封面）
+const editVisible = ref(false)
+const editPack = ref(null)
+const editName = ref('')
+const editCover = ref('')
+const editGifs = ref([])
+const editLoading = ref(false)
+const editSaving = ref(false)
 const uploadSize = ref(180)
 const sizeOptions = [
   { value: 0, label: '原图' },
@@ -351,9 +400,48 @@ async function removePack(name) {
   }
 }
 
+// 打开编辑弹窗：加载包内 GIF 作为封面候选
+async function openEdit(p) {
+  editPack.value = p
+  editName.value = p.display_name || p.name
+  editCover.value = p.cover || ''
+  editVisible.value = true
+  editGifs.value = []
+  editLoading.value = true
+  const res = await api.emoPackDetail(p.name).catch(() => null)
+  editLoading.value = false
+  if (res?.data?.code === 0) {
+    editGifs.value = res.data.data || []
+  }
+}
+
+function closeEdit() {
+  editVisible.value = false
+}
+
+// 保存名称与封面
+async function saveEdit() {
+  if (!editPack.value || editSaving.value) return
+  const name = editName.value.trim()
+  if (!name) return
+  editSaving.value = true
+  const payload = { display_name: name }
+  if (editCover.value) payload.cover = editCover.value
+  const res = await api.updateEmoPack(editPack.value.name, payload).catch(() => null)
+  editSaving.value = false
+  if (res?.data?.code === 0) {
+    emit('toast', '已保存')
+    const editedName = editPack.value.name
+    closeEdit()
+    await loadPacks()
+    if (selectedPackName.value === editedName) loadPackEmos()
+  } else {
+    emit('toast', res?.data?.message || '保存失败')
+  }
+}
+
 // 激活表情包（通知设备 refresh_emo）
-async function activatePack(name) {
-  if (!deviceId.value) return
+async function activatePack(name) {  if (!deviceId.value) return
   const res = await api.setActiveEmoPack(deviceId.value, name).catch(() => null)
   if (res?.data?.code === 0) {
     activePack.value = name
@@ -572,31 +660,64 @@ watch(() => props.currentDevice, async (d) => {
 
 .pack-loading, .pack-empty { padding: 24px; text-align: center; color: var(--text-dim); font-size: 13px; }
 
-.pack-list { display: flex; flex-direction: column; gap: 10px; }
-.pack-item {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 14px 18px;
-  border: 1px solid var(--glass-border);
+/* ===== 表情包卡片 ===== */
+.pack-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 14px;
+}
+.pack-card {
+  position: relative;
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(23, 52, 74, 0.07);
   border-radius: var(--radius-md);
-  background: var(--glass-bg-soft);
-  box-shadow: var(--glass-hi);
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: var(--shadow-xs), var(--glass-hi);
+  cursor: pointer;
   transition: all 0.25s var(--ease);
 }
-.pack-item:hover { border-color: var(--mint-border); background: var(--mint-softer); }
-.pack-item.active {
-  background: var(--mint-soft);
-  border-color: var(--mint);
+.pack-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--mint-border);
+  box-shadow: var(--shadow-md), var(--glass-hi);
 }
-.pack-info { display: flex; align-items: center; gap: 10px; cursor: pointer; flex: 1; }
-.pack-name { font-size: 13px; font-weight: 600; }
+.pack-card.active {
+  border-color: var(--mint);
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.16), var(--shadow);
+}
+.pack-cover {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+  background:
+    radial-gradient(circle at 30% 20%, rgba(52, 211, 153, 0.12), transparent 60%),
+    rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(23, 52, 74, 0.05);
+}
+.pack-cover img {
+  width: 100%; height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.pack-cover-empty { font-size: 12px; color: var(--text-dim); }
+.pack-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pack-name {
+  font-size: 13px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .pack-count { font-size: 11px; color: var(--text-dim); }
 .pack-badge {
+  position: absolute; top: 8px; left: 8px;
   font-size: 10px; padding: 2px 8px;
   border-radius: 999px;
   background: var(--grad-mint); color: #fff;
   box-shadow: 0 3px 8px rgba(16,185,129,0.25);
 }
 .pack-ops { display: flex; gap: 6px; }
+.pack-ops .btn-sm { flex: 1; padding: 6px 8px; }
 
 /* ===== GIF 上传区 ===== */
 .upload-area { margin-top: 8px; }
@@ -719,6 +840,43 @@ watch(() => props.currentDevice, async (d) => {
   box-sizing: border-box;
 }
 .modal-input:focus { border-color: var(--mint); box-shadow: 0 0 0 3px var(--mint-soft); }
+
+/* 编辑表情包弹窗 */
+.modal-wide { max-width: 560px; width: min(560px, 92vw); }
+.field-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-soft);
+  margin-bottom: 6px;
+}
+.cover-label { margin-top: 16px; }
+.cover-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+  gap: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.45);
+}
+.cover-option {
+  aspect-ratio: 1 / 1;
+  padding: 4px;
+  border: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+  transition: all 0.2s var(--ease);
+}
+.cover-option img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.cover-option:hover { border-color: var(--mint-border); transform: translateY(-1px); }
+.cover-option.active {
+  border-color: var(--mint);
+  box-shadow: 0 0 0 3px var(--mint-soft);
+}
 .modal-foot {
   display: flex; justify-content: flex-end; gap: 8px;
   padding: 0 20px 18px;
@@ -733,6 +891,7 @@ watch(() => props.currentDevice, async (d) => {
 /* ===== 响应式 ===== */
 @media (max-width: 600px) {
   .emo-grid { grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); }
+  .pack-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }
   .pack-actions { width: 100%; }
   .hero-title { font-size: 20px; }
   .hero-badge { top: 18px; right: 18px; }

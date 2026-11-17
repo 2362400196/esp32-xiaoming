@@ -6,26 +6,28 @@
     </Transition>
 
     <main class="stage">
-      <!-- 单个过渡包裹全部视图：登录/各标签间切换动画统一 -->
-      <transition name="view" mode="out-in">
-        <ProfileView v-if="!loggedIn" :key="'login'" :devices="devices" @login="onLogin" @toast="toast" />
-        <DevicesView v-else-if="tab === 'devices'" :key="'devices'" :devices="devices"
-          :selected="currentDevice" :loading="loading"
-          @select="selectDevice" @speak="speakToDevice" @stop="stopDevice" @settings="openDeviceSettings"
-          @unbind="onDeviceUnbind" @bound="onDeviceBound" @toast="toast" />
-        <StoreView v-else-if="tab === 'store'" :key="'store'" @toast="toast" @plugin-changed="syncPluginNav" />
-        <DeveloperView v-else-if="tab === 'developer'" :key="'developer'" :current-device="currentDevice" @toast="toast" @editor-change="onEditorChange" />
-        <ControlView v-else-if="tab === 'control'" :key="'control'" :current-device="currentDevice"
-          :devices="devices" :plugin-count="pluginCount"
-          @toast="toast" @select-device="selectDevice" />
-        <EmotionView v-else-if="tab === 'emotion'" :key="'emotion'" :current-device="currentDevice"
-          :devices="devices"
-          @toast="toast" @select-device="selectDevice" />
-        <ToolView v-else-if="tab === 'tool'" :key="'tool'" @toast="toast" />
-        <PluginPageView v-else-if="tab.startsWith('plugin_')" :key="tab" :plugin-name="currentPluginPage?.name || ''" :plugin-title="currentPluginPage?.title || ''" :plugin-entry="currentPluginPage?.entry || ''" :current-device="currentDevice" @toast="toast" />
-        <AdminView v-else-if="tab === 'admin'" :key="'admin'" @toast="toast" @back="switchTab('devices')" />
-        <ProfileView v-else :key="'profile'" :devices="devices" @login="onLogin" @toast="toast" />
-      </transition>
+      <div class="stage-inner">
+        <!-- 单个过渡包裹全部视图：登录/各标签间切换动画统一 -->
+        <transition name="view" mode="out-in">
+          <ProfileView v-if="!loggedIn" :key="'login'" :devices="devices" @login="onLogin" @toast="toast" />
+          <DevicesView v-else-if="tab === 'devices'" :key="'devices'" :devices="devices"
+            :selected="currentDevice" :loading="loading"
+            @select="selectDevice" @speak="speakToDevice" @stop="stopDevice" @settings="openDeviceSettings"
+            @unbind="onDeviceUnbind" @bound="onDeviceBound" @toast="toast" />
+          <StoreView v-else-if="tab === 'store'" :key="'store'" @toast="toast" @plugin-changed="syncPluginNav" />
+          <DeveloperView v-else-if="tab === 'developer'" :key="'developer'" :current-device="currentDevice" @toast="toast" @editor-change="onEditorChange" />
+          <ControlView v-else-if="tab === 'control'" :key="'control'" :current-device="currentDevice"
+            :devices="devices" :plugin-count="pluginCount"
+            @toast="toast" @select-device="selectDevice" />
+          <EmotionView v-else-if="tab === 'emotion'" :key="'emotion'" :current-device="currentDevice"
+            :devices="devices"
+            @toast="toast" @select-device="selectDevice" />
+          <ToolView v-else-if="tab === 'tool'" :key="'tool'" @toast="toast" />
+          <PluginPageView v-else-if="tab.startsWith('plugin_')" :key="tab" :plugin-name="currentPluginPage?.name || ''" :plugin-title="currentPluginPage?.title || ''" :plugin-entry="currentPluginPage?.entry || ''" :current-device="currentDevice" @toast="toast" />
+          <AdminView v-else-if="tab === 'admin'" :key="'admin'" @toast="toast" @back="switchTab('devices')" />
+          <ProfileView v-else :key="'profile'" :devices="devices" @login="onLogin" @toast="toast" />
+        </transition>
+      </div>
     </main>
 
     <!-- 设备设置弹窗（ASR/LLM/TTS/插件） -->
@@ -394,18 +396,28 @@ onBeforeUnmount(() => { clearInterval(pollTimer); clearTimeout(editorCloseTimer)
   display: flex;
   flex-direction: column;
   min-height: 0;
-  max-width: 1400px;
   width: 100%;
-  margin: 0 auto;
-  padding: 24px 32px 40px;
+  padding: 24px var(--page-gutter) 40px;
   position: relative;
   z-index: 1;
 }
-@media (max-width: 768px) {
-  .stage { padding: 16px 16px 40px; }
+/* 与 NavBar 同构的两级容器：外层留边距，内层 max-width。
+   内层不再加水平内边距——导航胶囊的边框就在外层边距上，
+   这样卡片左右边缘与导航胶囊外沿严格对齐，宽度完全一致。 */
+.stage-inner {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto;
+}
+@media (max-width: 720px) {
+  .stage { padding: 16px 12px 40px; }
 }
 @media (min-width: 1600px) {
-  .stage { padding: 32px 48px 60px; }
+  .stage { padding: 32px var(--page-gutter-wide) 60px; }
 }
 
 .toast {
