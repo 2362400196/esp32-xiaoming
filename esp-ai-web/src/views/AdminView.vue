@@ -613,12 +613,26 @@
             <div class="table-head">
               <div>
                 <h3 class="table-title">固件列表</h3>
-                <p class="table-sub">固件按配网方式分为「蓝牙版 / WiFi 版」两个独立槽位，各自可启用一个；设备 OTA 自检只与同类型槽位的固件比对，两种版本互不干扰</p>
+                <p class="table-sub">固件按「板卡 + 配网方式」分槽，每条槽位各自可启用一个；设备 OTA 自检只与同板卡同类型的固件比对，不同板型互不干扰</p>
               </div>
               <button class="btn btn-ghost" :disabled="loadingFirmwares" @click="loadFirmwares">刷新</button>
             </div>
+            <div class="fw-toolbar">
+              <select class="input input-sm" v-model="fwBoardFilter" style="width:200px">
+                <option value="">全部板卡</option>
+                <option v-for="b in firmwareBoards" :key="b" :value="b">{{ b || '未标注板卡' }}</option>
+              </select>
+              <select class="input input-sm" v-model="fwTypeFilter" style="width:140px">
+                <option value="">全部类型</option>
+                <option value="wifi">WiFi 版</option>
+                <option value="ble">蓝牙版</option>
+              </select>
+              <input class="input input-sm" v-model="fwSearch" placeholder="搜索文件名 / bin_id / 版本" style="width:260px" />
+              <span class="cell-sub">{{ filteredFirmwares.length }} 条</span>
+            </div>
             <div v-if="loadingFirmwares" class="table-empty">加载中…</div>
             <div v-else-if="!firmwares.length" class="table-empty">暂无固件，请先上传</div>
+            <div v-else-if="!filteredFirmwares.length" class="table-empty">没有匹配的固件</div>
             <div v-else class="table-wrap">
               <table>
                 <thead>
@@ -634,7 +648,7 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="f in firmwares" :key="f.filename">
+                  <tr v-for="f in pagedFirmwares" :key="f.filename">
                     <td data-label="固件">
                       <strong>{{ f.filename }}</strong>
                       <span class="fw-type-badge" :class="f.fw_type === 'wifi' ? 'fw-wifi' : 'fw-ble'">{{ f.fw_type === 'wifi' ? 'WiFi 版' : '蓝牙版' }}</span>
@@ -658,6 +672,11 @@
                   </tr>
                 </tbody>
               </table>
+            </div>
+            <div v-if="filteredFirmwares.length > fwPageSize" class="fw-pager">
+              <button class="btn btn-ghost btn-xs" :disabled="fwPage <= 1" @click="fwPage--">上一页</button>
+              <span class="cell-sub">第 {{ fwPage }} / {{ fwPageCount }} 页</span>
+              <button class="btn btn-ghost btn-xs" :disabled="fwPage >= fwPageCount" @click="fwPage++">下一页</button>
             </div>
           </div>
         </section>
@@ -1868,6 +1887,37 @@ const fwFile = ref(null)
 const fwBinIdMode = ref('auto')
 const fwBinId = ref('')
 const fwVersion = ref('')
+
+// 固件列表筛选/搜索/分页（板卡多了以后一次性渲染全部会很卡）
+const fwBoardFilter = ref('')
+const fwTypeFilter = ref('')
+const fwSearch = ref('')
+const fwPage = ref(1)
+const fwPageSize = 10
+
+const firmwareBoards = computed(() => {
+  const set = new Set(firmwares.value.map(f => f.fw_board || f.fw_sig?.board || ''))
+  return [...set].sort((a, b) => a.localeCompare(b))
+})
+
+const filteredFirmwares = computed(() => {
+  const kw = fwSearch.value.trim().toLowerCase()
+  return firmwares.value.filter(f => {
+    if (fwBoardFilter.value !== '' && (f.fw_board || f.fw_sig?.board || '') !== fwBoardFilter.value) return false
+    if (fwTypeFilter.value && f.fw_type !== fwTypeFilter.value) return false
+    if (kw) {
+      const hay = `${f.filename} ${f.bin_id || ''} ${f.version || ''}`.toLowerCase()
+      if (!hay.includes(kw)) return false
+    }
+    return true
+  })
+})
+
+const fwPageCount = computed(() => Math.max(1, Math.ceil(filteredFirmwares.value.length / fwPageSize)))
+const pagedFirmwares = computed(() => filteredFirmwares.value.slice((fwPage.value - 1) * fwPageSize, fwPage.value * fwPageSize))
+
+// 筛选条件变化或数据刷新后回到第一页，避免停在越界页码
+watch([fwBoardFilter, fwTypeFilter, fwSearch, () => firmwares.value.length], () => { fwPage.value = 1 })
 
 async function loadFirmwares() {
   loadingFirmwares.value = true
@@ -3225,6 +3275,9 @@ tbody tr:hover { background: var(--mint-softer); }
 .fw-type-badge.fw-wifi { background: rgba(102,192,244,.12); color: #2b8bc0; border: 1px solid rgba(102,192,244,.3); }
 /* 板卡/屏幕型号徽标（来自固件内嵌签名 esp-ai-fw:） */
 .fw-type-badge.fw-board { background: rgba(52,211,153,.1); color: var(--mint-deep, #0d9488); border: 1px solid rgba(52,211,153,.3); }
+/* 固件列表筛选栏 / 分页 */
+.fw-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 0 20px 14px; }
+.fw-pager { display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding: 12px 20px; }
 .badge .dot {
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--text-dim);

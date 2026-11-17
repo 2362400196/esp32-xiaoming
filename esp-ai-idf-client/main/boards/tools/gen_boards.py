@@ -99,6 +99,9 @@ def validate_boards(boards):
     errors = []
     warnings = []
 
+    # 板卡名（.name）是服务端固件槽位的键，必须全局唯一：
+    # 重名会导致两种板型共用一个固件槽，OTA 时互相覆盖刷错固件
+    name_owner = {}
     for b in boards:
         # 检查必填字段
         if not b["name"]:
@@ -109,6 +112,15 @@ def validate_boards(boards):
         # 检查 @meta 是否存在
         if not b["chip"]:
             warnings.append("{}: 未设置 @meta chip，默认 esp32s3".format(b["basename"]))
+
+        name = b["name"]
+        if name:
+            if name in name_owner and name_owner[name] != b["basename"]:
+                errors.append(
+                    "板卡名 '{}' 重复：{} 与 {}（板卡名决定固件槽位，必须唯一）".format(
+                        name, name_owner[name], b["basename"]))
+            else:
+                name_owner[name] = b["basename"]
 
     return errors, warnings
 

@@ -65,3 +65,46 @@ def test_pick_slot_for_bin(monkeypatch):
     _patch(monkeypatch, meta)
     assert api.pick_slot_for_bin("abc") == {"fw_type": "wifi", "board": "ai_vox3"}
     assert api.pick_slot_for_bin("nope") == {}
+
+
+def test_prune_keeps_newest_and_active(monkeypatch, tmp_path):
+    monkeypatch.setattr(api, "FIRMWARE_DIR", tmp_path)
+    meta = {}
+    for i in range(4):
+        name = f"v{i}.bin"
+        (tmp_path / name).write_bytes(b"x")
+        meta[name] = {"active": i == 3, "fw_type": "wifi",
+                      "fw_sig": {"board": "b"}, "uploaded_at": i + 1}
+    removed = api.prune_firmware_versions(meta, keep=2)
+    # 每个槽位只保留最新 2 个版本，更旧的连同文件一起删除
+    assert set(meta) == {"v2.bin", "v3.bin"}, meta
+    assert set(removed) == {"v0.bin", "v1.bin"}, removed
+    assert not (tmp_path / "v0.bin").exists()
+
+
+def test_prune_never_deletes_active(monkeypatch, tmp_path):
+    # 启用中的旧固件即使超出保留数也不能删
+    monkeypatch.setattr(api, "FIRMWARE_DIR", tmp_path)
+    meta = {}
+    for i in range(3):
+        name = f"old{i}.bin"
+        (tmp_path / name).write_bytes(b"x")
+        meta[name] = {"active": i == 0, "fw_type": "wifi",
+                      "fw_sig": {"board": "b"}, "uploaded_at": i + 1}
+    removed = api.prune_firmware_versions(meta, keep=1)
+    assert "old0.bin" in meta, meta
+    assert set(removed) == {"old1.bin"}
+
+
+def test_meta_atomic_roundtrip(monkeypatch, tmp_path):
+    meta_file = tmp_path / "firmware_meta.json"
+    monkeypatch.setattr(api, "FIRMWARE_META_FILE", meta_file)
+    monkeypatch.setattr(api, "_META_CACHE", {})
+    monkeypatch.setattr(api, "_META_CACHE_MTIME", -1.0)
+    api.save_firmware_meta({"a.bin": {"active": True, "bin_id": "x"}})
+    assert not (tmp_path / "firmware_meta.json.tmp").exists()
+    assert api.load_firmware_meta()["a.bin"]["bin_id"] == "x"
+    # 返回副本：调用方修改不会污染缓存
+    snapshot = api.load_firmware_meta()
+    snapshot["a.bin"]["bin_id"] = "changed"
+    assert api.load_firmware_meta()["a.bin"]["bin_id"] == "x"

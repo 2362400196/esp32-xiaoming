@@ -653,36 +653,47 @@ async def admin_upload_firmware(
     # 配网类型/版本优先从固件内嵌签名 esp-ai-fw:prov=...;board=...;ver=... 提取
     # （idf.py 原生产物也能正确识别），签名缺失回退文件名 -wifi- 标识
     from src.infrastructure.device_api import (
-        extract_fw_signature, firmware_slot_key, firmware_type_from_signature_or_filename,
+        extract_fw_signature, firmware_meta_transaction, firmware_slot_key,
+        firmware_type_from_signature_or_filename, prune_firmware_versions,
     )
     fw_sig = extract_fw_signature(content)
     fw_type = firmware_type_from_signature_or_filename(fw_sig, safe_filename)
     if not version.strip() and fw_sig.get("ver"):
         version = fw_sig["ver"]
-    meta = load_firmware_meta()
-    new_entry = {"fw_type": fw_type, "fw_sig": fw_sig}
-    new_slot = firmware_slot_key(new_entry, safe_filename)
-    for name, m in meta.items():
-        # 只取消同槽位固件的激活：多板型不会被互相覆盖
-        if m.get("active") and firmware_slot_key(m, name) == new_slot:
-            m["active"] = False
 
-    # bin_id：auto=从固件中识别（提取不到回退文件名主干）; custom=自定义输入
-    if bin_id_mode == "auto" or not bin_id.strip():
-        bin_id = _extract_bin_id_from_firmware(content) or _auto_bin_id(safe_filename, meta)
-    else:
-        bin_id = bin_id.strip()
+    def _register() -> dict:
+        # 读-改-写全程持锁：避免与 OTA 查询/其他上传并发时互相覆盖元数据
+        with firmware_meta_transaction() as meta:
+            new_entry = {"fw_type": fw_type, "fw_sig": fw_sig}
+            new_slot = firmware_slot_key(new_entry, safe_filename)
+            for name, m in meta.items():
+                # 只取消同槽位固件的激活：多板型不会被互相覆盖
+                if m.get("active") and firmware_slot_key(m, name) == new_slot:
+                    m["active"] = False
 
-    meta[safe_filename] = {
-        "bin_id": bin_id,
-        "version": version.strip(),
-        "fw_type": fw_type,
-        "fw_sig": fw_sig,  # 结构化签名（prov/board/display/ver...），后台展示与后续扩展用
-        "uploaded_by": admin.email,
-        "uploaded_at": _time.time(),
-        "active": True,
-    }
-    await asyncio.to_thread(save_firmware_meta, meta)
+            # bin_id：auto=从固件中识别（提取不到回退文件名主干）; custom=自定义输入
+            if bin_id_mode == "auto" or not bin_id.strip():
+                resolved_bin_id = _extract_bin_id_from_firmware(content) or _auto_bin_id(safe_filename, meta)
+            else:
+                resolved_bin_id = bin_id.strip()
+
+            meta[safe_filename] = {
+                "bin_id": resolved_bin_id,
+                "version": version.strip(),
+                "fw_type": fw_type,
+                "fw_sig": fw_sig,  # 结构化签名（prov/board/display/ver...），后台展示与后续扩展用
+                "uploaded_by": admin.email,
+                "uploaded_at": _time.time(),
+                "active": True,
+            }
+            # 保留策略：每个槽位只保留最近 N 个版本，老固件连同文件一起清理
+            removed = prune_firmware_versions(meta)
+            return {"bin_id": resolved_bin_id, "removed": removed}
+
+    result = await asyncio.to_thread(_register)
+    bin_id = result["bin_id"]
+    if result["removed"]:
+        logger.info("[Admin] 固件保留策略回收: %s", ", ".join(result["removed"]))
 
     _add_oplog(admin.email, "firmware_upload", "上传固件 " + safe_filename + "（bin_id=" + (bin_id or "未填写") + "）")
     logger.info("[Admin] 固件上传: %s（%d 字节, bin_id=%s, 上传者 %s）",
@@ -690,7 +701,8 @@ async def admin_upload_firmware(
     return {
         "code": 0,
         "message": "固件已上传并设为启用中",
-        "data": {"filename": safe_filename, "bin_id": bin_id, "version": version, "active": True},
+        "data": {"filename": safe_filename, "bin_id": bin_id, "version": version, "active": True,
+                 "removed": result["removed"]},
     }
 
 

@@ -19,9 +19,13 @@ from __future__ import annotations
 
 import time
 import asyncio
+import contextlib
+import copy
 import json
+import os
 import re
 import struct
+import threading
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 from datetime import datetime
@@ -1269,24 +1273,113 @@ def list_firmwares() -> List[FirmwareInfo]:
 
 FIRMWARE_META_FILE = Path(__file__).parent.parent.parent / "data" / "firmware_meta.json"
 
+# 每个槽位（板卡+配网类型）保留的历史固件版本数（含启用中的那份）。
+# 上百种板卡时每份固件约 5MB，不限制会在 data/firmware 下无限堆积。
+FIRMWARE_KEEP_VERSIONS = int(os.environ.get("ESP_AI_FIRMWARE_KEEP_VERSIONS", "3"))
 
-def load_firmware_meta() -> dict:
-    """加载固件元数据（bin_id/version/uploaded_by/active），文件缺失返回空 dict"""
+# 固件元数据读写保护：
+# 每台设备 OTA 查询都会读一次 meta，上传固件时会整体重写。
+# 读取走内存缓存（按文件 mtime 失效），写入用 临时文件 + os.replace 原子替换，
+# 避免并发读到半截 JSON 被判成"无固件"。
+_META_LOCK = threading.RLock()
+_META_CACHE: dict = {}
+_META_CACHE_MTIME: float = -1.0
+
+
+def _read_meta_file() -> dict:
+    import json as _json
     try:
-        import json as _json
-        if FIRMWARE_META_FILE.exists():
-            return _json.loads(FIRMWARE_META_FILE.read_text(encoding="utf-8"))
+        return _json.loads(FIRMWARE_META_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
     except (OSError, ValueError) as e:
         logger.warning(f"[Firmware] 读取固件元数据失败: {e}")
-    return {}
+        return {}
+
+
+def load_firmware_meta() -> dict:
+    """加载固件元数据（bin_id/version/uploaded_by/active），文件缺失返回空 dict。
+
+    返回的是副本：调用方修改后需调用 save_firmware_meta 落盘。
+    """
+    global _META_CACHE, _META_CACHE_MTIME
+    with _META_LOCK:
+        try:
+            mtime = FIRMWARE_META_FILE.stat().st_mtime
+        except OSError:
+            _META_CACHE, _META_CACHE_MTIME = {}, -1.0
+            return {}
+        if mtime != _META_CACHE_MTIME:
+            _META_CACHE = _read_meta_file()
+            _META_CACHE_MTIME = mtime
+        return copy.deepcopy(_META_CACHE)
 
 
 def save_firmware_meta(meta: dict) -> None:
+    """原子写入固件元数据（临时文件 + os.replace），并刷新内存缓存。"""
+    global _META_CACHE, _META_CACHE_MTIME
     import json as _json
-    FIRMWARE_META_FILE.parent.mkdir(parents=True, exist_ok=True)
-    FIRMWARE_META_FILE.write_text(
-        _json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    with _META_LOCK:
+        FIRMWARE_META_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = FIRMWARE_META_FILE.with_name(FIRMWARE_META_FILE.name + ".tmp")
+        tmp.write_text(_json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, FIRMWARE_META_FILE)
+        _META_CACHE = copy.deepcopy(meta)
+        try:
+            _META_CACHE_MTIME = FIRMWARE_META_FILE.stat().st_mtime
+        except OSError:
+            _META_CACHE_MTIME = -1.0
+
+
+@contextlib.contextmanager
+def firmware_meta_transaction():
+    """读-改-写事务：整个过程持有元数据锁，避免上传与 OTA 查询并发导致丢失更新。"""
+    with _META_LOCK:
+        meta = load_firmware_meta()
+        yield meta
+        save_firmware_meta(meta)
+
+
+def prune_firmware_versions(meta: dict, keep: int = None) -> list:
+    """按槽位保留最近 N 个版本：删除更旧的非启用固件（文件 + 元数据）。
+
+    返回被删除的文件名列表，供调用方打日志/提示。
+    """
+    keep = FIRMWARE_KEEP_VERSIONS if keep is None else keep
+    if keep <= 0:
+        return []
+
+    slots: dict = {}
+    for filename, m in list(meta.items()):
+        slots.setdefault(firmware_slot_key(m, filename), []).append((filename, m))
+
+    removed = []
+    for entries in slots.values():
+        if len(entries) <= keep:
+            continue
+        # 排序键：上传时间优先，缺失时退回文件修改时间；启用中的永远不删
+        def _ts(item):
+            name, m = item
+            ts = m.get("uploaded_at") or 0
+            if not ts:
+                try:
+                    ts = (FIRMWARE_DIR / name).stat().st_mtime
+                except OSError:
+                    ts = 0
+            return float(ts)
+
+        entries.sort(key=_ts, reverse=True)
+        for name, m in entries[keep:]:
+            if m.get("active"):
+                continue
+            try:
+                (FIRMWARE_DIR / name).unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning(f"[Firmware] 清理旧固件失败 {name}: {e}")
+                continue
+            meta.pop(name, None)
+            removed.append(name)
+    return removed
 
 
 def firmware_type_from_filename(filename: str) -> str:
@@ -1433,16 +1526,15 @@ def set_active_firmware(filename: str) -> bool:
     """
     if not (FIRMWARE_DIR / filename).exists():
         return False
-    meta = load_firmware_meta()
-    entry = meta.setdefault(filename, {})
-    entry["fw_type"] = entry.get("fw_type") or firmware_type_from_filename(filename)
-    slot = firmware_slot_key(entry, filename)
-    for name, m in meta.items():
-        # 只取消同槽位固件的激活：不同板卡/不同配网类型互不影响
-        if m.get("active") and firmware_slot_key(m, name) == slot:
-            m["active"] = False
-    entry["active"] = True
-    save_firmware_meta(meta)
+    with firmware_meta_transaction() as meta:
+        entry = meta.setdefault(filename, {})
+        entry["fw_type"] = entry.get("fw_type") or firmware_type_from_filename(filename)
+        slot = firmware_slot_key(entry, filename)
+        for name, m in meta.items():
+            # 只取消同槽位固件的激活：不同板卡/不同配网类型互不影响
+            if m.get("active") and firmware_slot_key(m, name) == slot:
+                m["active"] = False
+        entry["active"] = True
     return True
 
 
@@ -1486,17 +1578,13 @@ async def upload_firmware(
 
         # 记录固件配网类型/板卡（优先内嵌签名 esp-ai-fw:prov=...;board=...，回退文件名 -wifi- 标识）
         # 板卡标识决定固件槽位，多板型场景下互不覆盖
-        meta = load_firmware_meta()
-        entry = meta.setdefault(safe_filename, {})
-        try:
-            with open(filepath, "rb") as rf:
-                sig = extract_fw_signature(rf.read(2 * 1024 * 1024))
-        except OSError:
-            sig = {}
-        if sig:
-            entry["fw_sig"] = sig
-        entry["fw_type"] = firmware_type_from_signature_or_filename(sig, safe_filename)
-        save_firmware_meta(meta)
+        with open(filepath, "rb") as rf:
+            sig = extract_fw_signature(rf.read(2 * 1024 * 1024))
+        with firmware_meta_transaction() as meta:
+            entry = meta.setdefault(safe_filename, {})
+            if sig:
+                entry["fw_sig"] = sig
+            entry["fw_type"] = firmware_type_from_signature_or_filename(sig, safe_filename)
 
         logger.info(f"[Firmware] Uploaded: {safe_filename}, size: {info.size if info else 0} bytes")
         return FirmwareListResponse(
