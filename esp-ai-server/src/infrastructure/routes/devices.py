@@ -13,6 +13,7 @@ import os
 import secrets
 import shutil
 from typing import Optional
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Body
 from pydantic import BaseModel, Field
@@ -92,6 +93,12 @@ class BindByCodeRequest(BaseModel):
 
 class UnbindRequest(BaseModel):
     device_id: str = Field(max_length=128)
+
+
+class ServerUrlRequest(BaseModel):
+    """设备连接的服务器地址（ws:// / wss://）"""
+
+    server_url: str = Field(..., max_length=512)
 
 
 class CreateDeviceRequest(BaseModel):
@@ -860,6 +867,142 @@ async def api_set_display_config(mac: str, body: dict = Body(...), user: UserMod
             logger.warning(f"[API] 下发 display_config 指令失败: {e}")
 
     return {"code": 0, "message": "ok", "data": updates}
+
+
+# ============================================================
+#  设备服务器地址 API
+# ============================================================
+
+# 下发新地址后等待 NVS 落盘再重启设备的延迟（秒）
+_SERVER_URL_RESTART_DELAY = 3.0
+
+
+def _parse_server_url(raw: str) -> tuple[str, str, str, str]:
+    """解析并规范化设备服务器地址。
+
+    固件按 ``ext4(协议) + ext5(主机) + ext6(端口)`` 拼接连接地址，
+    这里统一转换为 ``ws://host:port`` 形式。
+
+    Returns:
+        (规范化后的 URL, ext4 值, 主机, 端口)
+
+    Raises:
+        HTTPException: 地址为空或格式非法
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        raise HTTPException(400, "服务器地址不能为空")
+    if "://" not in raw:
+        raw = "ws://" + raw
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        raise HTTPException(400, "服务器地址格式不正确（端口非法）")
+
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("ws", "wss", "http", "https"):
+        raise HTTPException(400, "仅支持 ws:// 或 wss:// 地址")
+    if parsed.username or parsed.password:
+        raise HTTPException(400, "服务器地址不能包含用户名或密码")
+
+    host = (parsed.hostname or "").strip()
+    if not host:
+        raise HTTPException(400, "服务器地址缺少主机名")
+    # 固件 ext5 缓冲为 64 字节，超长会被截断
+    if len(host) > 63:
+        raise HTTPException(400, "主机名过长（最多 63 个字符）")
+    if ":" in host:
+        raise HTTPException(400, "暂不支持 IPv6 地址，请填写 IPv4 或域名")
+
+    if port is None:
+        port = 443 if scheme in ("wss", "https") else 80
+    if not (1 <= port <= 65535):
+        raise HTTPException(400, "端口超出范围（1~65535）")
+
+    ext4 = "https" if scheme in ("wss", "https") else "http"
+    ws_scheme = "wss" if ext4 == "https" else "ws"
+    normalized = f"{ws_scheme}://{host}:{port}"
+    return normalized, ext4, host, str(port)
+
+
+async def _restart_device_later(tool_mgr, delay: float) -> None:
+    """延迟重启设备，让 update_config 写入的 NVS 地址在重启后生效。"""
+    try:
+        await asyncio.sleep(delay)
+        from src.use_cases._plugin_helpers import send_device_command
+
+        err = await send_device_command(tool_mgr, "restart")
+        if err:
+            logger.warning(f"[API] 设备重启指令下发失败: {err}")
+    except Exception as e:
+        logger.warning(f"[API] 延迟重启设备失败: {e}")
+
+
+@router.post("/devices/{mac}/server_url")
+async def api_set_server_url(
+    mac: str,
+    body: ServerUrlRequest,
+    user: UserModel = Depends(get_current_user),
+):
+    """设置设备连接的服务器地址。
+
+    保存到后台 DB，并在设备在线时通过 WebSocket 下发
+    ``update_config``（ext4/ext5/ext6）写入 NVS，随后重启设备使新地址生效。
+    """
+    if not await _check_device_owner(mac, user):
+        raise HTTPException(403, "Device not bound to you")
+
+    normalized, ext4, host, port = _parse_server_url(body.server_url)
+
+    from src.infrastructure.db.repositories.device_repository import DeviceRepository
+
+    repo = DeviceRepository()
+    previous = await repo.get_device_config(mac)
+    if previous is None:
+        raise HTTPException(404, "Device not found")
+
+    result = await repo.update_device_partial(mac, {"server_url": normalized})
+    if result is None:
+        raise HTTPException(404, "Device not found")
+
+    # 仅用于返回值提示；仍会重新下发（设备离线保存后，上线再点一次即可生效）
+    changed = (previous.get("server_url") or "").strip() != normalized
+
+    pushed = False
+    try:
+        registry = get_device_registry()
+        d = registry.resolve(mac) if registry else None
+        if not d and registry:
+            d = registry.get_by_mac(mac)
+        tool_mgr = d.get("tool_manager") if d else None
+        if tool_mgr:
+            from src.use_cases._plugin_helpers import send_device_command
+
+            err = await send_device_command(
+                tool_mgr, "update_config", {"ext4": ext4, "ext5": host, "ext6": port}
+            )
+            if err:
+                logger.warning(f"[API] 下发服务器地址到设备 {mac} 失败: {err}")
+            else:
+                pushed = True
+                from src.infrastructure.task_manager import background_task
+
+                background_task(
+                    _restart_device_later(tool_mgr, _SERVER_URL_RESTART_DELAY),
+                    name=f"server_url_restart_{mac}",
+                )
+                logger.info(
+                    f"[API] 设备 {mac} 服务器地址已改为 {normalized}，将延迟重启生效"
+                )
+    except Exception as e:
+        logger.warning(f"[API] 下发服务器地址到设备 {mac} 异常: {e}")
+
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {"server_url": normalized, "pushed": pushed, "changed": changed},
+    }
 
 
 # ============================================================

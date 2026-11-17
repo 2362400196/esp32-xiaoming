@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from urllib.parse import quote
 
 from fastapi import Depends, APIRouter, Form, Request, UploadFile, File, HTTPException, Response
+from pydantic import BaseModel
 
 from src.infrastructure.logging import get_logger
 from src.infrastructure.security_jwt import get_current_user
@@ -21,6 +23,7 @@ from src.infrastructure.emo_pack import (
     list_packs, get_pack_dir, create_pack, delete_pack,
     get_active_pack, set_active_pack, list_pack_emos,
     get_or_create_pack_dir, _validate_pack_name, PACKS_DIR,
+    get_pack_meta, can_manage_pack, update_pack_meta,
 )
 from src.infrastructure.gif_processor import (
     process_gif, validate_size,
@@ -33,6 +36,16 @@ logger = get_logger(__name__)
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
 
 router = APIRouter(tags=["emos"])
+
+
+class PackUpdateIn(BaseModel):
+    """编辑表情包请求体：字段缺省表示不修改"""
+    display_name: str | None = None
+    cover: str | None = None
+
+
+def _is_admin(user: UserModel) -> bool:
+    return getattr(user, "role", "user") == "admin"
 
 
 # ── 兼容旧接口：GET /api/v1/emos/{device_id} ──
@@ -63,14 +76,52 @@ async def list_device_emos(device_id: str, request: Request):
 # ── 表情包 CRUD（JWT 用户认证）──
 
 @router.get("/api/v1/emos/packs/list")
-async def api_list_packs(user: UserModel = Depends(get_current_user)):
-    return {"code": 0, "message": "ok", "data": await list_packs()}
+async def api_list_packs(request: Request, user: UserModel = Depends(get_current_user)):
+    """表情包列表（含封面图地址与可管理标记）。
+
+    普通用户只看到公共包和自己的私有包；管理员看到全部。
+    """
+    host = request.headers.get("host", "localhost:8088")
+    scheme = request.headers.get("x-forwarded-proto", "http")
+    is_admin = _is_admin(user)
+    packs = await list_packs(user.id, is_admin)
+    for p in packs:
+        cover = p.get("cover")
+        p["cover_url"] = (
+            f"{scheme}://{host}/emos/packs/{quote(p['name'])}/{quote(cover)}"
+            if cover else None
+        )
+        p["can_manage"] = can_manage_pack(p, user.id, is_admin)
+    return {"code": 0, "message": "ok", "data": packs}
+
+
+@router.patch("/api/v1/emos/packs/{pack_name}")
+async def api_update_pack(pack_name: str, payload: PackUpdateIn,
+                          user: UserModel = Depends(get_current_user)):
+    """编辑表情包：修改显示名称 / 从包内选择封面 GIF"""
+    meta = await get_pack_meta(pack_name)
+    if meta is None:
+        return {"code": 1, "message": "表情包不存在", "data": None}
+    if not can_manage_pack(meta, user.id, _is_admin(user)):
+        raise HTTPException(status_code=403, detail="无权修改该表情包")
+    result = await update_pack_meta(
+        pack_name,
+        display_name=payload.display_name,
+        cover=payload.cover,
+    )
+    code = 0 if result["ok"] else 1
+    return {"code": code, "message": result["message"], "data": None}
 
 
 @router.get("/api/v1/emos/packs/{pack_name}")
 async def api_get_pack(pack_name: str, request: Request, user: UserModel = Depends(get_current_user)):
     host = request.headers.get("host", "localhost:8088")
     scheme = request.headers.get("x-forwarded-proto", "http")
+    # 私有包只有归属用户和管理员可读
+    meta = await get_pack_meta(pack_name)
+    owner = (meta or {}).get("owner_user_id")
+    if owner and owner != user.id and not _is_admin(user):
+        raise HTTPException(403, "无权访问该表情包")
     emos = list_pack_emos(pack_name, scheme, host)
     if emos is None:
         return {"code": 1, "message": f"表情包 '{pack_name}' 不存在", "data": None}
@@ -81,7 +132,9 @@ async def api_get_pack(pack_name: str, request: Request, user: UserModel = Depen
 async def api_create_pack(name: str = "", user: UserModel = Depends(get_current_user)):
     if not name:
         return {"code": 1, "message": "请提供表情包名称", "data": None}
-    result = await create_pack(name)
+    # 管理员创建的包为公共包（owner=None），普通用户创建私有包
+    owner = None if _is_admin(user) else user.id
+    result = await create_pack(name, owner_user_id=owner)
     code = 0 if result["ok"] else 1
     data = {"name": result.get("name"), "display_name": result.get("display_name")} if result["ok"] else None
     return {"code": code, "message": result["message"], "data": data}
@@ -89,6 +142,9 @@ async def api_create_pack(name: str = "", user: UserModel = Depends(get_current_
 
 @router.delete("/api/v1/emos/packs/{pack_name}")
 async def api_delete_pack(pack_name: str, user: UserModel = Depends(get_current_user)):
+    meta = await get_pack_meta(pack_name)
+    if meta is not None and not can_manage_pack(meta, user.id, _is_admin(user)):
+        raise HTTPException(status_code=403, detail="无权删除该表情包")
     result = await delete_pack(pack_name)
     code = 0 if result["ok"] else 1
     return {"code": code, "message": result["message"], "data": None}
@@ -99,6 +155,9 @@ async def api_upload_to_pack(pack_name: str, file: UploadFile = File(...), name:
     # 校验 pack_name，防止路径遍历
     if not _validate_pack_name(pack_name):
         return {"code": 1, "message": "无效的表情包名称"}
+    meta = await get_pack_meta(pack_name)
+    if meta is not None and not can_manage_pack(meta, user.id, _is_admin(user)):
+        raise HTTPException(status_code=403, detail="无权修改该表情包")
     # 优先检查 name 参数的扩展名，其次检查原始文件名
     check_name = name if name else (file.filename or "")
     if not check_name or not check_name.lower().endswith(".gif"):
@@ -290,6 +349,12 @@ async def api_set_active_pack(device_id: str, pack: str = "", user: UserModel = 
     did = device_key if device_key and device_key != device_id else device_id
     if not pack:
         return {"code": 1, "message": "请提供表情包名称", "data": None}
+    # 只能启用自己可见的表情包（公共包 / 自己的私有包；管理员不限）
+    if not _is_admin(user):
+        meta = await get_pack_meta(pack)
+        owner = (meta or {}).get("owner_user_id")
+        if owner and owner != user.id:
+            raise HTTPException(403, "无权使用该表情包")
     result = await set_active_pack(did, pack)
     if not result["ok"]:
         return {"code": 1, "message": result["message"], "data": None}

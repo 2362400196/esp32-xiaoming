@@ -120,6 +120,10 @@ async def init_db() -> None:
         await _ensure_column(conn, "devices", "vad_barge_in_enabled",
             "ALTER TABLE devices ADD COLUMN vad_barge_in_enabled VARCHAR(8) NOT NULL DEFAULT 'true'",
             devices_cols)
+        # server_url：设备连接的服务器地址（空 = 沿用设备配网时写入的地址）
+        await _ensure_column(conn, "devices", "server_url",
+            "ALTER TABLE devices ADD COLUMN server_url VARCHAR(512) NOT NULL DEFAULT ''",
+            devices_cols)
         await _ensure_column(conn, "marketplace_plugins", "provides",
             "ALTER TABLE marketplace_plugins ADD COLUMN provides TEXT NOT NULL DEFAULT '[]'",
             marketplace_cols)
@@ -149,6 +153,13 @@ async def init_db() -> None:
         await _ensure_column(conn, "billing_records", "llm_cache_hit_tokens",
             "ALTER TABLE billing_records ADD COLUMN llm_cache_hit_tokens INTEGER NOT NULL DEFAULT 0",
             billing_cols)
+
+        # 表情包：归属用户（NULL = 公共包）与自定义封面
+        emo_packs_cols = await _existing_columns(conn, "emo_packs")
+        await _ensure_column(conn, "emo_packs", "owner_user_id",
+            "ALTER TABLE emo_packs ADD COLUMN owner_user_id VARCHAR(36)", emo_packs_cols)
+        await _ensure_column(conn, "emo_packs", "cover",
+            "ALTER TABLE emo_packs ADD COLUMN cover VARCHAR(128)", emo_packs_cols)
 
         # === 权限引导：系统中没有管理员时，最早注册的用户自动提升为管理员 ===
         # （兼容已部署系统：首个用户注册时已是 admin 的逻辑只对新系统生效）

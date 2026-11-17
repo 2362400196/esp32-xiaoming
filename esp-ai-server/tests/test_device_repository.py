@@ -267,6 +267,17 @@ class TestBasicCRUD:
         assert "weather" in updated["mcp_servers"]
 
     @pytest.mark.asyncio
+    async def test_update_device_partial_keeps_server_url(self, repo):
+        """server_url 写入后，其他字段的部分更新不能把它重置"""
+        await repo.upsert_device(SAMPLE_DEVICE_ID, SAMPLE_CONFIG)
+        await repo.update_device_partial(SAMPLE_DEVICE_ID, {
+            "server_url": "ws://10.0.0.8:8088",
+        })
+        updated = await repo.update_device_partial(SAMPLE_DEVICE_ID, {"name": "改名"})
+        assert updated is not None
+        assert updated["server_url"] == "ws://10.0.0.8:8088"
+
+    @pytest.mark.asyncio
     async def test_update_nonexistent_returns_none(self, repo):
         """更新不存在的设备返回 None"""
         assert await repo.update_device_partial("nonexistent", {"name": "x"}) is None
@@ -706,6 +717,7 @@ class TestDictCompat:
             "screensaver_enabled", "screensaver_timeout",
             "wake_sensitivity",
             "vad_barge_in_enabled",
+            "server_url",
         }
         assert set(cfg.keys()) == expected_keys, (
             f"字段不一致: 多出 {set(cfg.keys()) - expected_keys}, "

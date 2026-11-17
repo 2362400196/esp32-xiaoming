@@ -507,9 +507,136 @@ class TestDevicesRoutes:
 
 
 # ════════════════════════════════════════════════════════════════
-# emos 路由测试
+# 设备服务器地址 API
 # ════════════════════════════════════════════════════════════════
 
+class TestDeviceServerUrl:
+    """POST /api/v1/devices/{mac}/server_url"""
+
+    @pytest.fixture
+    def app(self):
+        from src.infrastructure.routes.devices import router
+        from src.infrastructure.security_jwt import get_current_user
+
+        application = FastAPI()
+        application.include_router(router)
+        application.dependency_overrides[get_current_user] = lambda: _mock_user()
+        return application
+
+    @pytest.fixture
+    def client(self, app):
+        return TestClient(app)
+
+    def test_invalid_scheme(self, client):
+        with patch("src.infrastructure.routes.devices._check_device_owner",
+                   AsyncMock(return_value=True)):
+            resp = client.post("/api/v1/devices/dev1/server_url",
+                               json={"server_url": "ftp://1.2.3.4"})
+        assert resp.status_code == 400
+
+    def test_empty_url(self, client):
+        with patch("src.infrastructure.routes.devices._check_device_owner",
+                   AsyncMock(return_value=True)):
+            resp = client.post("/api/v1/devices/dev1/server_url",
+                               json={"server_url": "  "})
+        assert resp.status_code == 400
+
+    def test_save_offline_device(self, client):
+        """设备离线：仅保存到 DB，不下发"""
+        mock_repo = MagicMock()
+        mock_repo.get_device_config = AsyncMock(return_value={"server_url": ""})
+        mock_repo.update_device_partial = AsyncMock(
+            return_value={"server_url": "ws://10.0.0.8:8088"})
+        registry = MagicMock()
+        registry.resolve.return_value = None
+        registry.get_by_mac.return_value = None
+        with patch("src.infrastructure.routes.devices._check_device_owner",
+                   AsyncMock(return_value=True)), \
+             patch("src.infrastructure.db.repositories.device_repository.DeviceRepository",
+                   return_value=mock_repo), \
+             patch("src.infrastructure.routes.devices.get_device_registry",
+                   return_value=registry):
+            resp = client.post("/api/v1/devices/dev1/server_url",
+                               json={"server_url": "ws://10.0.0.8:8088"})
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["server_url"] == "ws://10.0.0.8:8088"
+        assert data["changed"] is True
+        assert data["pushed"] is False
+        mock_repo.update_device_partial.assert_awaited_once_with(
+            "dev1", {"server_url": "ws://10.0.0.8:8088"})
+
+    def test_same_url_still_pushes_when_online(self, client):
+        """设备离线时保存过的地址，上线后再点一次应用仍会下发"""
+        mock_repo = MagicMock()
+        mock_repo.get_device_config = AsyncMock(
+            return_value={"server_url": "ws://10.0.0.8:8088"})
+        mock_repo.update_device_partial = AsyncMock(
+            return_value={"server_url": "ws://10.0.0.8:8088"})
+        registry = MagicMock()
+        registry.resolve.return_value = {"tool_manager": MagicMock()}
+        with patch("src.infrastructure.routes.devices._check_device_owner",
+                   AsyncMock(return_value=True)), \
+             patch("src.infrastructure.db.repositories.device_repository.DeviceRepository",
+                   return_value=mock_repo), \
+             patch("src.infrastructure.routes.devices.get_device_registry",
+                   return_value=registry), \
+             patch("src.use_cases._plugin_helpers.send_device_command",
+                   AsyncMock(return_value=None)) as mock_send, \
+             patch("src.infrastructure.task_manager.background_task",
+                   MagicMock(side_effect=lambda coro, name="": coro.close())):
+            resp = client.post("/api/v1/devices/dev1/server_url",
+                               json={"server_url": "ws://10.0.0.8:8088"})
+        assert resp.json()["data"]["changed"] is False
+        assert resp.json()["data"]["pushed"] is True
+        mock_send.assert_awaited_once()
+
+    def test_online_device_pushes_config_and_restart(self, client):
+        mock_repo = MagicMock()
+        mock_repo.get_device_config = AsyncMock(return_value={"server_url": ""})
+        mock_repo.update_device_partial = AsyncMock(
+            return_value={"server_url": "wss://example.com:443"})
+        registry = MagicMock()
+        registry.resolve.return_value = {"tool_manager": MagicMock()}
+
+        def _fake_background_task(coro, name=""):
+            # 关闭未执行的协程，避免 "coroutine was never awaited" 警告
+            coro.close()
+
+        mock_bg = MagicMock(side_effect=_fake_background_task)
+        with patch("src.infrastructure.routes.devices._check_device_owner",
+                   AsyncMock(return_value=True)), \
+             patch("src.infrastructure.db.repositories.device_repository.DeviceRepository",
+                   return_value=mock_repo), \
+             patch("src.infrastructure.routes.devices.get_device_registry",
+                   return_value=registry), \
+             patch("src.use_cases._plugin_helpers.send_device_command",
+                   AsyncMock(return_value=None)) as mock_send, \
+             patch("src.infrastructure.task_manager.background_task", mock_bg):
+            resp = client.post("/api/v1/devices/dev1/server_url",
+                               json={"server_url": "https://example.com"})
+        data = resp.json()["data"]
+        assert data["server_url"] == "wss://example.com:443"
+        assert data["pushed"] is True
+        mock_send.assert_awaited_once()
+        assert mock_send.await_args.args[1] == "update_config"
+        assert mock_send.await_args.args[2] == {
+            "ext4": "https", "ext5": "example.com", "ext6": "443",
+        }
+        mock_bg.assert_called_once()
+
+    def test_parse_server_url_normalizes(self):
+        from src.infrastructure.routes.devices import _parse_server_url
+
+        assert _parse_server_url("192.168.1.10:8088") == (
+            "ws://192.168.1.10:8088", "http", "192.168.1.10", "8088")
+        assert _parse_server_url("wss://example.com") == (
+            "wss://example.com:443", "https", "example.com", "443")
+
+
+# ════════════════════════════════════════════════════════════════
+# emos 路由测试
+# ════════════════════════════════════════════════════════════════
 
 def _get_endpoint(app, path, method):
     """从 FastAPI app 中获取路由处理函数（用于直接调用测试）"""
@@ -575,6 +702,35 @@ class TestEmosRoutes:
         with patch("src.infrastructure.routes.emos.list_pack_emos", return_value=[{"name": "happy"}]):
             resp = client.get("/api/v1/emos/packs/default")
         assert resp.json()["code"] == 0
+
+    def test_update_pack_success(self, client):
+        """编辑表情包：改名 + 从包内选封面"""
+        with patch("src.infrastructure.routes.emos.get_pack_meta", new_callable=AsyncMock,
+                   return_value={"name": "p1", "owner_user_id": None}), \
+             patch("src.infrastructure.routes.emos.update_pack_meta", new_callable=AsyncMock,
+                   return_value={"ok": True, "message": "保存成功"}) as m:
+            resp = client.patch("/api/v1/emos/packs/p1",
+                                json={"display_name": "新名字", "cover": "happy.gif"})
+        assert resp.json()["code"] == 0
+        m.assert_awaited_once_with("p1", display_name="新名字", cover="happy.gif")
+
+    def test_update_pack_not_found(self, client):
+        with patch("src.infrastructure.routes.emos.get_pack_meta", new_callable=AsyncMock,
+                   return_value=None):
+            resp = client.patch("/api/v1/emos/packs/nope", json={"display_name": "x"})
+        assert resp.json()["code"] == 1
+
+    def test_update_pack_forbidden_for_other_user(self, client, app):
+        """普通用户不能编辑他人的私有表情包"""
+        from src.infrastructure.security_jwt import get_current_user
+        u = _mock_user()
+        u.role = "user"
+        u.id = 2
+        app.dependency_overrides[get_current_user] = lambda: u
+        with patch("src.infrastructure.routes.emos.get_pack_meta", new_callable=AsyncMock,
+                   return_value={"name": "p1", "owner_user_id": "1"}):
+            resp = client.patch("/api/v1/emos/packs/p1", json={"display_name": "x"})
+        assert resp.status_code == 403
 
     def test_create_pack_no_name(self, client):
         resp = client.post("/api/v1/emos/packs/create")

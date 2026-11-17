@@ -25,6 +25,7 @@ import io
 import logging
 import re
 import shutil
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse
@@ -1661,16 +1662,54 @@ async def admin_operation_logs(
 
 @router.get("/emojis")
 async def admin_list_emojis(request: Request, _: UserModel = Depends(require_admin)):
-    """查看所有表情包（含预览图）"""
+    """查看所有表情包（含预览图与封面）"""
     from src.infrastructure.emo_pack import list_packs as _list_packs, list_pack_emos
-    packs = await _list_packs()
+    packs = await _list_packs(None, True)   # 管理员可见全部（含用户私有包）
     host = request.headers.get("host", "localhost:8088")
     scheme = request.headers.get("x-forwarded-proto", "http")
     result = []
     for p in packs:
         emos = list_pack_emos(p["name"], scheme, host)
+        cover = p.get("cover")
+        p["cover_url"] = (
+            f"{scheme}://{host}/emos/packs/{quote(p['name'])}/{quote(cover)}"
+            if cover else None
+        )
         result.append({**p, "emos": emos})  # 返回所有预览
     return {"code": 0, "data": {"packs": result}}
+
+
+class AdminEmoPackUpdateIn(BaseModel):
+    """编辑表情包：改名 / 从包内选择封面 GIF"""
+    display_name: Optional[str] = None
+    cover: Optional[str] = None
+
+
+@router.post("/emojis/create")
+async def admin_create_emoji(name: str = Query(""), user: UserModel = Depends(require_admin)):
+    """新建公共表情包（所有用户可见可用）"""
+    from src.infrastructure.emo_pack import create_pack as _create_pack
+    result = await _create_pack(name, owner_user_id=None)
+    if not result["ok"]:
+        return {"code": 1, "message": result["message"]}
+    _add_oplog(user.email, "新建表情包", f"pack={result.get('name')}")
+    logger.info(f"[Admin] 新建表情包: {name}")
+    return {"code": 0, "message": result["message"],
+            "data": {"name": result.get("name"), "display_name": result.get("display_name")}}
+
+
+@router.patch("/emojis/{name}")
+async def admin_update_emoji(name: str, payload: AdminEmoPackUpdateIn,
+                             user: UserModel = Depends(require_admin)):
+    """编辑表情包名称与封面"""
+    from src.infrastructure.emo_pack import update_pack_meta
+    result = await update_pack_meta(name, display_name=payload.display_name, cover=payload.cover)
+    if not result["ok"]:
+        return {"code": 1, "message": result["message"]}
+    _add_oplog(user.email, "编辑表情包",
+               f"pack={name}, name={payload.display_name or '-'}, cover={payload.cover or '-'}")
+    logger.info(f"[Admin] 编辑表情包: {name}")
+    return {"code": 0, "message": result["message"]}
 
 
 @router.post("/emojis/upload")

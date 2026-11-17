@@ -42,6 +42,8 @@ def _model_to_pack_dict(model: EmoPackModel) -> dict:
     return {
         "name": model.pack_name,
         "display_name": model.display_name or model.pack_name,
+        "owner_user_id": model.owner_user_id,
+        "cover": model.cover,
     }
 
 
@@ -87,11 +89,12 @@ class EmoPackRepository:
                 return None
             return _model_to_pack_dict(model)
 
-    async def upsert_pack(self, pack_name: str, display_name: str) -> None:
+    async def upsert_pack(self, pack_name: str, display_name: str,
+                          owner_user_id: Optional[str] = None) -> None:
         """插入或更新表情包元数据（SQLite ``INSERT ... ON CONFLICT DO UPDATE``）。
 
-        - 新表情包：插入
-        - 已存在：更新 ``display_name``，刷新 ``updated_at``
+        - 新表情包：插入（``owner_user_id`` 为空表示公共包）
+        - 已存在：只更新 ``display_name``，不改归属
         """
         if not pack_name:
             return
@@ -99,6 +102,7 @@ class EmoPackRepository:
         stmt = sqlite_insert(EmoPackModel).values(
             pack_name=pack_name,
             display_name=display_name,
+            owner_user_id=owner_user_id,
         )
         stmt = stmt.on_conflict_do_update(
             index_elements=["pack_name"],
@@ -109,6 +113,26 @@ class EmoPackRepository:
         )
         async with get_session_ctx() as session:
             await session.execute(stmt)
+
+    async def update_pack(self, pack_name: str, display_name: Optional[str] = None,
+                          cover: Optional[str] = None) -> bool:
+        """更新表情包名称/封面，返回是否存在并更新成功。"""
+        if not pack_name:
+            return False
+        values: dict = {"updated_at": _now_ts()}
+        if display_name is not None:
+            values["display_name"] = display_name
+        if cover is not None:
+            values["cover"] = cover
+        if len(values) == 1:
+            return False
+        async with get_session_ctx() as session:
+            result = await session.execute(
+                update(EmoPackModel)
+                .where(EmoPackModel.pack_name == pack_name)
+                .values(**values)
+            )
+            return (result.rowcount or 0) > 0
 
     async def delete_pack(self, pack_name: str) -> bool:
         """删除表情包元数据。

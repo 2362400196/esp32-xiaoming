@@ -88,6 +88,9 @@ class DeviceModel(Base, TimestampMixin):
     # 表情包
     active_emo_pack: Mapped[str] = mapped_column(String(128), default="default")
 
+    # 设备连接的服务器地址（ws://host:port）。空 = 沿用设备配网时写入的地址
+    server_url: Mapped[str] = mapped_column(String(512), default="")
+
     # 屏幕显示配置
     robot_mode: Mapped[str] = mapped_column(String(8), default="false")
     screensaver_enabled: Mapped[str] = mapped_column(String(8), default="true")

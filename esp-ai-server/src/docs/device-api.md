@@ -1386,6 +1386,7 @@ GET /stats
 | `POST` | `/api/v1/devices/{mac}/history` | 清空对话历史 |
 | `GET` | `/api/v1/devices/{mac}/config` | 获取设备配置 |
 | `POST` | `/api/v1/devices/{mac}/config` | 更新设备配置 |
+| `POST` | `/api/v1/devices/{mac}/server_url` | 修改设备连接的服务器地址（下发并重启生效） |
 | `GET` | `/api/v1/devices/{mac}/volume` | 获取音量 |
 | `POST` | `/api/v1/devices/{mac}/volume` | 设置音量 |
 | `POST` | `/api/v1/devices/{mac}/ota` | 推送 OTA 升级 |

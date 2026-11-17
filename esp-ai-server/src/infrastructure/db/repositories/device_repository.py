@@ -107,6 +107,8 @@ def _dict_to_model_fields(device_id: str, config: dict) -> dict:
         "enabled_plugins": config.get("enabled_plugins"),
         "plugin_configs": config.get("plugin_configs") or {},
         "has_display": config.get("has_display"),
+        # 设备连接的服务器地址（空 = 沿用设备配网地址）
+        "server_url": config.get("server_url", "") or "",
         # 屏幕显示配置
         "robot_mode": config.get("robot_mode", "false"),
         "screensaver_enabled": config.get("screensaver_enabled", "true"),
@@ -174,6 +176,8 @@ def _model_to_dict(model: DeviceModel) -> dict:
         "enabled_plugins": model.enabled_plugins,
         "plugin_configs": dict(model.plugin_configs or {}),
         "has_display": model.has_display,
+        # 设备连接的服务器地址（空 = 沿用设备配网地址）
+        "server_url": model.server_url or "",
         # 屏幕显示配置
         "robot_mode": model.robot_mode or "false",
         "screensaver_enabled": model.screensaver_enabled or "true",
@@ -342,6 +346,8 @@ class DeviceRepository:
                 "disabled_skills": [],
                 "skills": [],
                 "active_emo_pack": "",
+                # 解绑后不再保留自定义服务器地址，设备回到配网地址
+                "server_url": "",
                 "user_id": None,
                 "bound_at": None,
                 "bind_code": None,
