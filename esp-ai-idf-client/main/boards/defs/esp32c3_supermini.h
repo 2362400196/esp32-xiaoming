@@ -46,6 +46,8 @@ static const board_config_t BOARD_CONFIG = {
     .wake_button_gpio = 9,                                   // 板载 BOOT 按键 (GPIO9)
     BOARD_AUDIO_ES8311_CUSTOM(3, 6, 7, 10, &ES8311_CFG),     // bck, ws, spk_tx, mic_rx
     BOARD_DISPLAY_NONE(),
+    BOARD_BATTERY_KEYS(-1, 0, -1, -1),
+    BOARD_SD_CARD(-1, -1, -1),
     BOARD_SERVICE_SELF_HOSTED(),
     BOARD_EXTRAS_NONE(),
 };

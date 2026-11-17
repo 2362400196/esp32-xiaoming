@@ -183,6 +183,17 @@ typedef struct {
     int display_i2c_scl;            // -1 无效
     int display_i2c_addr;           // I2C 地址
 
+    // ==================== 电池与本地按键（可选）====================
+    int battery_adc_gpio;           // 电池电压检测 ADC 引脚（-1 = 无）
+    float battery_divider_ratio;    // 分压比：Vbat = Vadc * ratio（0 表示按 2.0 处理）
+    int volume_up_gpio;             // 音量 + 按键（-1 = 无）
+    int volume_down_gpio;           // 音量 - 按键（-1 = 无）
+
+    // ==================== SD 卡（SDMMC 1-bit，可选）====================
+    int sd_clk_gpio;                // SD CLK（-1 = 无 SD 卡）
+    int sd_cmd_gpio;                // SD CMD
+    int sd_d0_gpio;                 // SD DAT0
+
     // ==================== 服务与表情策略 ====================
     bool emotion_builtin_only;      // 已废弃（保留字段兼容既有板型定义）：表情统一从服务器下载
 

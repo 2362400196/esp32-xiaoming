@@ -12,6 +12,11 @@
  */
 #pragma once
 
+#ifdef CONFIG_BOARD_AI_VOX3
+#include "boards/defs/ai_vox3.h"
+#define ACTIVE_BOARD_CONFIG (&BOARD_CONFIG)
+#endif
+
 #ifdef CONFIG_BOARD_ESP32C3_SUPERMINI
 #include "boards/defs/esp32c3_supermini.h"
 #define ACTIVE_BOARD_CONFIG (&BOARD_CONFIG)

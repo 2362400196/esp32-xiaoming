@@ -6,6 +6,9 @@
 #include "commands/command_registry.h"
 #include "boards/board_interface.h"
 #include "eeui_port.h"
+#include "battery.h"
+#include "keys.h"
+#include "sdcard.h"
 #if defined(AUDIO_SCHEME_ES8311)
 #include "audio_codec/es8311.h"
 #endif
@@ -232,6 +235,10 @@ void app_main(void)
     esp_log_level_set("wakeup", ESP_LOG_INFO);
     esp_log_level_set("display", ESP_LOG_INFO);
     esp_log_level_set("eeui_port", ESP_LOG_INFO);  // show_card 渲染明细（排查卡片问题）
+    esp_log_level_set("battery", ESP_LOG_INFO);    // 电池电压/电量/充电判定
+    esp_log_level_set("keys", ESP_LOG_INFO);       // 音量按键
+    esp_log_level_set("gif_downloader", ESP_LOG_INFO); // 表情包下载耗时诊断
+    esp_log_level_set("sdcard", ESP_LOG_INFO);     // SD 卡挂载/目录
 #ifdef CONFIG_LOG_LEVEL_DEBUG
     esp_log_level_set("cmd_lyric", ESP_LOG_DEBUG);
     esp_log_level_set("websocket", ESP_LOG_DEBUG);
@@ -435,6 +442,13 @@ void app_main(void)
 
     // 初始化功耗管理（在音频初始化之后，PA 引脚已配置）
     power_manager_init();
+
+    // 电池检测（真实 ADC 电量 + 充电趋势）与本地音量按键（板型未配置则自动跳过）
+    battery_init();
+    keys_init();
+
+    // SD 卡（板型配置了 SDMMC 引脚才挂载，未配置/未插卡不影响启动）
+    sdcard_init();
 
     // 从 NVS 恢复屏保配置（重启后保持之前设置的屏保开关和超时）
     {

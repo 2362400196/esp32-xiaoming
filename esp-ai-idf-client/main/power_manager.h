@@ -69,6 +69,11 @@ void power_manager_enable_output(void);
 bool power_manager_is_output_enabled(void);
 
 /**
+ * @brief 当前是否处于会话活跃态（下载等大流量任务据此临时关闭 WiFi 省电）
+ */
+bool power_manager_is_active(void);
+
+/**
  * @brief 设置会话活跃状态（省电切换）
  *
  * 待机（active=false，默认）：CPU DFS 空闲降频 + WiFi modem sleep（MIN_MODEM），

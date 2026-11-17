@@ -118,8 +118,16 @@ struct BatteryUI {
     lv_obj_t *top;         // 电池正极
     lv_obj_t *label;       // 百分比文字
     lv_obj_t *fill;        // 内部电量条
+    lv_obj_t *bolt;        // 充电闪电（充电中显示）
+    bool charging;         // 是否充电中
+    int x;                 // 电池当前 x
+    int y;                 // 电池当前 y
     int percent;
 } s_bat_ui = {};
+
+// 闪电折线顶点（lv_line 非 mutable 接口只保存指针，必须是静态存储）
+static lv_point_precise_t s_bolt_pts[4];
+static lv_timer_t *s_bolt_timer = NULL;
 
 // 位置计算（对齐 Arduino eeui.cpp get_bat_offset）
 static int get_bat_offset(int percent)
@@ -251,6 +259,7 @@ static void ui_reorder_layers(void)
     if (s_bat_ui.top && lv_obj_is_valid(s_bat_ui.top)) lv_obj_move_foreground(s_bat_ui.top);
     if (s_bat_ui.label && lv_obj_is_valid(s_bat_ui.label)) lv_obj_move_foreground(s_bat_ui.label);
     if (s_bat_ui.fill && lv_obj_is_valid(s_bat_ui.fill)) lv_obj_move_foreground(s_bat_ui.fill);
+    if (s_bat_ui.bolt && lv_obj_is_valid(s_bat_ui.bolt)) lv_obj_move_foreground(s_bat_ui.bolt);
     // 最后：表情下载提示遮罩必须始终在最上层。下载要 5~10 秒，期间状态文字/
     // 电池/信号仍可能被更新（每次更新都会把自己提到最前），否则提示会被盖住。
     if (s_emo_dl_overlay && lv_obj_is_valid(s_emo_dl_overlay)) {
@@ -422,7 +431,11 @@ esp_err_t eeui_port_init(void)
     // 注意：render_* 内部会自己加锁，不能在外层加锁
     eeui_port_render_signal(0);  // 初始无信号（灰色），之后由定时器更新
     eeui_port_render_volume(audio_get_volume());  // 创建音量图标，bar/label 1.5s 后隐藏，icon 常驻
-    eeui_port_render_battery(100);  // 电量图标显示 100%（暂无硬件，假数据）
+    // 有电池硬件的板型不预渲染（避免开机先显示 100% 再跳变），等 battery.c 首次采样
+    const board_config_t *bcfg = board_get_config();
+    if (!bcfg || bcfg->battery_adc_gpio < 0) {
+        eeui_port_render_battery(100);
+    }
 
     // 创建完所有图标后，统一重排层级
     if (lvgl_lock(200)) {
@@ -773,6 +786,110 @@ void eeui_port_set_brightness(int percent)
 #define BAT_TOP_W  4
 #define BAT_TOP_H  2
 
+// 充电闪电顶点跟随电池位置更新（尽量撑满 12x16 的电池框，保证显眼）
+static void battery_bolt_update_points(void)
+{
+    int x = s_bat_ui.x;
+    int y = s_bat_ui.y;
+    s_bolt_pts[0].x = x + 9;  s_bolt_pts[0].y = y;
+    s_bolt_pts[1].x = x + 2;  s_bolt_pts[1].y = y + 8;
+    s_bolt_pts[2].x = x + 6;  s_bolt_pts[2].y = y + 8;
+    s_bolt_pts[3].x = x + 1;  s_bolt_pts[3].y = y + 16;
+    if (s_bat_ui.bolt && lv_obj_is_valid(s_bat_ui.bolt)) {
+        lv_line_set_points(s_bat_ui.bolt, s_bolt_pts, 4);
+    }
+}
+
+// 充电动画（400ms 一帧）：
+// 1) 闪电明暗闪烁；
+// 2) 电量条在“当前电量 55% ↔ 100%”之间律动，形成明显的充能脉冲；
+// 3) 电量条统一改成黄色，和放电绿色区分。
+static void battery_bolt_timer_cb(lv_timer_t *timer)
+{
+    static bool phase = false;
+    phase = !phase;
+
+    if (s_bat_ui.bolt && lv_obj_is_valid(s_bat_ui.bolt)) {
+        lv_obj_set_style_opa(s_bat_ui.bolt, phase ? LV_OPA_COVER : LV_OPA_40, 0);
+    }
+    if (s_bat_ui.fill && lv_obj_is_valid(s_bat_ui.fill) && s_bat_ui.body) {
+        int max_h = BAT_HEIGHT - 4;
+        int target = max_h * s_bat_ui.percent / 100;
+        int h = phase ? target : target * 55 / 100;
+        if (h < 2) h = 2;
+        lv_obj_set_size(s_bat_ui.fill, BAT_WIDTH - 4, h);
+        lv_obj_set_pos(s_bat_ui.fill, s_bat_ui.x + 2,
+                       s_bat_ui.y + 2 + (max_h - h));
+        lv_obj_set_style_bg_color(s_bat_ui.fill, lv_color_make(255, 200, 0), 0);
+        lv_obj_set_style_bg_opa(s_bat_ui.fill, LV_OPA_COVER, 0);
+    }
+}
+
+// 恢复放电态电量条（充电动画期间尺寸/颜色被改写，结束时要还原）
+static void battery_fill_restore(void)
+{
+    if (!s_bat_ui.fill || !lv_obj_is_valid(s_bat_ui.fill)) return;
+    int max_h = BAT_HEIGHT - 4;
+    int h = max_h * s_bat_ui.percent / 100;
+    lv_obj_set_size(s_bat_ui.fill, BAT_WIDTH - 4, h);
+    lv_obj_set_pos(s_bat_ui.fill, s_bat_ui.x + 2, s_bat_ui.y + 2 + (max_h - h));
+    lv_obj_set_style_bg_color(s_bat_ui.fill,
+        s_bat_ui.percent <= 20 ? lv_color_make(255, 0, 0) : lv_color_make(0, 180, 80), 0);
+    lv_obj_set_style_bg_opa(s_bat_ui.fill, LV_OPA_COVER, 0);
+}
+
+void eeui_port_set_charging(bool charging)
+{
+    s_bat_ui.charging = charging;
+    if (!s_lvgl_ready) return;
+    // LVGL 可能正在解码 GIF 等长任务，锁超时放宽；拿不到锁时下次轮询会自动重试
+    if (!lvgl_lock(500)) return;
+
+    if (charging) {
+        if (s_bat_ui.bolt && lv_obj_is_valid(s_bat_ui.bolt) && s_bolt_timer) {
+            lvgl_unlock();   // 已处于充电态且动画正常，无需重复设置
+            return;
+        }
+        if (!s_bat_ui.bolt || !lv_obj_is_valid(s_bat_ui.bolt)) {
+            s_bat_ui.bolt = lv_line_create(s_container);
+            lv_obj_remove_flag(s_bat_ui.bolt, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_remove_flag(s_bat_ui.bolt, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_set_pos(s_bat_ui.bolt, 0, 0);
+            lv_obj_set_size(s_bat_ui.bolt, s_screen_width, s_screen_height);
+            lv_obj_set_style_line_width(s_bat_ui.bolt, 3, 0);
+            lv_obj_set_style_line_color(s_bat_ui.bolt, lv_color_make(255, 220, 0), 0);
+            lv_obj_set_style_line_rounded(s_bat_ui.bolt, true, 0);
+            lv_obj_set_style_bg_opa(s_bat_ui.bolt, LV_OPA_TRANSP, 0);
+        }
+        // 进入充电态时立即把电量条改黄，避免动画首帧出现绿色
+        if (s_bat_ui.fill && lv_obj_is_valid(s_bat_ui.fill)) {
+            lv_obj_set_style_bg_color(s_bat_ui.fill, lv_color_make(255, 200, 0), 0);
+        }
+        battery_bolt_update_points();
+        if (!s_bolt_timer) {
+            s_bolt_timer = lv_timer_create(battery_bolt_timer_cb, 400, NULL);
+        }
+    } else {
+        // 注意：不能用 bolt 是否存在作为条件。
+        // hide_battery() 等路径可能已经删掉 bolt，若以此跳过清理，
+        // 定时器会继续运行导致拔电后电量条一直脉冲闪烁。
+        if (s_bat_ui.bolt) {
+            if (lv_obj_is_valid(s_bat_ui.bolt)) lv_obj_delete(s_bat_ui.bolt);
+            s_bat_ui.bolt = NULL;
+        }
+        if (s_bolt_timer) {
+            lv_timer_delete(s_bolt_timer);
+            s_bolt_timer = NULL;
+        }
+        battery_fill_restore();
+        lvgl_unlock();
+        return;
+    }
+
+    ui_reorder_layers();
+    lvgl_unlock();
+}
+
 void eeui_port_render_battery(int percent)
 {
     if (!s_lvgl_ready) return;
@@ -834,10 +951,18 @@ void eeui_port_render_battery(int percent)
         lv_obj_set_size(s_bat_ui.fill, BAT_WIDTH - 4, fill_h);
         lv_obj_set_pos(s_bat_ui.fill, x + 2, y + 2 + (BAT_HEIGHT - 4 - fill_h));
 
-        // 低电量红色，正常绿色
+        // 低电量红色，正常绿色，充电中黄色（与放电态明显区分）
         lv_color_t fill_color = is_low_bat ? lv_color_make(255, 0, 0) : lv_color_make(0, 180, 80);
+        if (s_bat_ui.charging) fill_color = lv_color_make(255, 200, 0);
         lv_obj_set_style_bg_color(s_bat_ui.fill, fill_color, 0);
         lv_obj_set_style_bg_opa(s_bat_ui.fill, LV_OPA_COVER, 0);
+
+        // 充电闪电跟随电池位置
+        s_bat_ui.x = x;
+        s_bat_ui.y = y;
+        if (s_bat_ui.bolt && lv_obj_is_valid(s_bat_ui.bolt)) {
+            battery_bolt_update_points();
+        }
 
         ui_reorder_layers();
         lvgl_unlock();
@@ -852,6 +977,11 @@ void eeui_port_hide_battery(void)
         if (s_bat_ui.top && lv_obj_is_valid(s_bat_ui.top)) lv_obj_delete(s_bat_ui.top);
         if (s_bat_ui.label && lv_obj_is_valid(s_bat_ui.label)) lv_obj_delete(s_bat_ui.label);
         if (s_bat_ui.fill && lv_obj_is_valid(s_bat_ui.fill)) lv_obj_delete(s_bat_ui.fill);
+        if (s_bat_ui.bolt && lv_obj_is_valid(s_bat_ui.bolt)) lv_obj_delete(s_bat_ui.bolt);
+        if (s_bolt_timer) {
+            lv_timer_delete(s_bolt_timer);
+            s_bolt_timer = NULL;
+        }
         s_bat_ui = {};
         lvgl_unlock();
     }

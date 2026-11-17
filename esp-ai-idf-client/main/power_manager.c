@@ -292,6 +292,11 @@ bool power_manager_is_output_enabled(void)
 }
 
 // ==================== 会话状态（省电切换）====================
+bool power_manager_is_active(void)
+{
+    return s_active;
+}
+
 void power_manager_set_active(bool active)
 {
     if (s_active == active) return;

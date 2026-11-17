@@ -62,6 +62,12 @@ void eeui_port_render_battery(int percent);
 void eeui_port_hide_battery(void);
 
 /**
+ * 设置充电状态：充电中在电池内显示闪烁闪电
+ * @param charging true=充电中
+ */
+void eeui_port_set_charging(bool charging);
+
+/**
  * 渲染音量条
  * @param volume 0.0-1.0
  */

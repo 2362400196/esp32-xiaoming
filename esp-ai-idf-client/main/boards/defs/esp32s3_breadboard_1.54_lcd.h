@@ -23,6 +23,8 @@ static const board_config_t BOARD_CONFIG = {
 
     BOARD_BASE_ESP32S3(0),
     BOARD_DISPLAY_ST7789_240_BL(9, 13, 38, 39, 16),   // cs, dc, clk, mosi, 背光 GPIO16
+    BOARD_BATTERY_KEYS(-1, 0, -1, -1),
+    BOARD_SD_CARD(-1, -1, -1),
     BOARD_SERVICE_SELF_HOSTED(),
     BOARD_EXTRAS_NONE(),
 };

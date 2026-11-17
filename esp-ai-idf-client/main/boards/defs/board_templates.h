@@ -187,6 +187,36 @@ static const es8311_config_t ES8311_CFG = {
     .display_i2c_scl  = scl, \
     .display_i2c_addr = 0x3C
 
+// ==================== 电池与本地按键宏 ====================
+
+/**
+ * 电池检测 + 音量按键（都必须放在 DISPLAY 之后、SERVICE 之前）
+ *
+ * @param bat_gpio   电池分压 ADC 引脚（-1 表示无电池检测）
+ * @param ratio      分压比（Vbat = Vadc * ratio，常用 2.0）
+ * @param up_gpio    音量 + 按键 GPIO（-1 表示无）
+ * @param down_gpio  音量 - 按键 GPIO（-1 表示无）
+ */
+#define BOARD_BATTERY_KEYS(bat_gpio, ratio, up_gpio, down_gpio) \
+    .battery_adc_gpio      = bat_gpio, \
+    .battery_divider_ratio = ratio, \
+    .volume_up_gpio        = up_gpio, \
+    .volume_down_gpio      = down_gpio
+
+// ==================== SD 卡宏 ====================
+
+/**
+ * SD 卡（SDMMC 1-bit 模式），必须放在 BATTERY_KEYS 之后、SERVICE 之前
+ *
+ * @param clk  SD CLK 引脚（-1 表示无 SD 卡）
+ * @param cmd  SD CMD 引脚
+ * @param d0   SD DAT0 引脚
+ */
+#define BOARD_SD_CARD(clk, cmd, d0) \
+    .sd_clk_gpio = clk, \
+    .sd_cmd_gpio = cmd, \
+    .sd_d0_gpio  = d0
+
 // ==================== 服务模式宏 ====================
 
 /** 自托管服务（连接用户自己的 esp-ai-server） */

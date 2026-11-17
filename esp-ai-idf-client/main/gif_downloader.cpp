@@ -13,10 +13,10 @@
  */
 #include "gif_downloader.h"
 #include "ota_update.h"
+#include "power_manager.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
 #include <sys/stat.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -24,6 +24,7 @@
 #include "config.h"
 #include "board_compat.h"
 #include "device_id.h"
+#include "sdcard.h"
 #include "lvgl.h"
 #include "eeui_port.h"
 #include "esp_log.h"
@@ -63,6 +64,12 @@ const int g_gif_files_count = sizeof(g_gif_files) / sizeof(g_gif_files[0]);
 // 全屏提示里的进度条显示真实百分比：已完成文件数 + 当前文件已读字节占比。
 // 只增不减，避免现场出现"进度条往回走"。
 static int s_dl_file_total = 0;   // 本轮要处理的文件总数（0 = 当前没有进度可报）
+static int s_dl_last_percent = -1; // 上次上报的百分比（去重，避免频繁刷新 LVGL）
+
+// 刷新模式：服务器已切换表情包，本地缓存全部视为过期，本次强制重新下载。
+// 不再预删缓存文件（SPIFFS 删除 13 个文件实测要 18 秒，且会拖慢 ACK），
+// 新文件直接 fopen("wb") 覆盖旧缓存即可。
+static volatile bool s_force_download = false;
 static int s_dl_file_index = 0;   // 当前正在处理的文件序号（0 起，等于已完成数）
 
 /** 开始一轮下载：把进度归零（列表请求等辅助下载不算，避免进度乱跳） */
@@ -86,6 +93,10 @@ static void dl_progress_report(int index, size_t read_bytes, size_t total_bytes)
     int percent = (int)(units / ((long long)s_dl_file_total * 10));
     if (percent < 0) percent = 0;
     if (percent > 100) percent = 100;
+    // 百分比没变就不碰 UI：HTTP 每读 1KB 回调一次，每次都加锁渲染会让
+    // 下载速度被 LVGL 拖到十几 KB/s（表现为切换表情包要等一两分钟）
+    if (percent == s_dl_last_percent) return;
+    s_dl_last_percent = percent;
     eeui_port_set_emo_download_progress(percent);
 }
 
@@ -97,6 +108,7 @@ static void dl_progress_finish(bool completed)
     }
     s_dl_file_total = 0;
     s_dl_file_index = 0;
+    s_dl_last_percent = -1;
 }
 
 // 下载的 GIF 数据存储（PSRAM）
@@ -168,6 +180,9 @@ static uint8_t *download_file(const char *url, size_t *out_size)
     cfg.url = url;
     cfg.timeout_ms = 15000;
     cfg.keep_alive_enable = false;
+    // 默认 1KB 接收缓冲意味着每收 1KB 就多一次 select/recv 系统调用，
+    // 大文件（几百 KB 的 GIF）会被系统调用开销拖到几十 KB/s
+    cfg.buffer_size = 4096;
     // 不强制指定 transport_type，让 ESP-IDF 根据 URL scheme 自动选择（http→TCP, https→SSL）
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
@@ -234,11 +249,23 @@ static uint8_t *download_file(const char *url, size_t *out_size)
     return buf;
 }
 
-// ==================== SPIFFS 缓存（避免每次开机重复下载 GIF）====================
-// GIF 首次下载后写入 /spiffs/emos/，开机优先读本地缓存：
-// 每次开机只下载几十字节的清单 JSON，GIF 本体零流量。
-// 服务器更新表情时由 refresh_emo 指令清空缓存重新下载。
-#define EMO_CACHE_DIR "/spiffs/emos"
+// ==================== 本地缓存（避免每次开机重复下载 GIF）====================
+// GIF 首次下载后落盘，开机优先读本地缓存：GIF 本体零流量。
+//
+// 缓存位置：优先 SD 卡 /sdcard/emos（写入 >100KB/s，且写卡不占用 flash 缓存，
+// 不会卡住 WiFi/音频）；没有 SD 卡时【不写缓存】——实测 SPIFFS 写入只有 3KB/s，
+// 一个 20KB 的文件要写 1 分钟，会把 HTTP 请求和整机一起拖死。没有缓存时开机
+// 重新下载一遍（后台进行，界面用内置图兜底），可接受。
+//
+// 升级前写在 /spiffs/emos 的旧缓存仍然可读（只读不写），避免一次性重下。
+#define EMO_CACHE_SD_DIR     "/sdcard/emos"
+#define EMO_CACHE_LEGACY_DIR "/spiffs/emos"
+
+// 缓存写入目录（NULL = 不缓存）
+static const char *emo_cache_write_dir(void)
+{
+    return sdcard_is_mounted() ? EMO_CACHE_SD_DIR : NULL;
+}
 
 // 从 SPIFFS 读取缓存的 GIF（不存在/读取失败返回 NULL）
 // 注意：本函数执行 flash 操作，必须在内部 RAM 栈的任务中运行（见下方工作线程）
@@ -263,16 +290,27 @@ static uint8_t *load_gif_from_cache_impl(const char *path, size_t *out_size)
     return buf;
 }
 
-// 写入 SPIFFS 缓存（失败仅日志，不影响功能；空间不足时自动跳过缓存）
-// 注意：本函数执行 flash 操作，必须在内部 RAM 栈的任务中运行（见下方工作线程）
+// 写入缓存（失败仅日志，不影响功能；空间不足时自动跳过缓存）
+// 注意：写 SPIFFS 会禁用 flash 缓存，必须在内部 RAM 栈的任务中运行（见下方工作线程）；
+//      写 SD 卡没有这个限制，走同一路径也无副作用。
 static void save_gif_to_cache_impl(const char *path, const uint8_t *data, size_t size)
 {
-    mkdir(EMO_CACHE_DIR, 0755);  // 确保目录存在（已存在时返回 EEXIST，忽略）
+    bool is_spiffs = (strncmp(path, "/spiffs", 7) == 0);
+    // 目录已由调用方创建；这里再 mkdir 一次兜底（已存在时返回 EEXIST，忽略）
+    const char *slash = strrchr(path, '/');
+    if (slash && slash != path) {
+        char dir[64];
+        size_t n = (size_t)(slash - path);
+        if (n < sizeof(dir)) {
+            memcpy(dir, path, n);
+            dir[n] = '\0';
+            mkdir(dir, 0755);
+        }
+    }
 
-    // 空间预检：SPIFFS 空闲不足以容纳整个文件时直接跳过（留 8KB 索引/元数据余量），
-    // 避免写入半截文件后反复报"写入不完整"
+    // 空间预检（仅 SPIFFS）：空闲不足以容纳整个文件时直接跳过（留 8KB 余量）
     size_t total = 0, used = 0;
-    if (esp_spiffs_info("storage", &total, &used) == ESP_OK) {
+    if (is_spiffs && esp_spiffs_info("storage", &total, &used) == ESP_OK) {
         size_t free_bytes = total - used;
         if (free_bytes < size + 8 * 1024) {
             ESP_LOGW(TAG, "SPIFFS 空闲不足，跳过缓存: %s 需 %dKB，空闲 %dKB（表情仍可在本次运行中正常显示）",
@@ -281,6 +319,7 @@ static void save_gif_to_cache_impl(const char *path, const uint8_t *data, size_t
         }
     }
 
+    int64_t t0 = esp_timer_get_time();
     FILE *f = fopen(path, "wb");
     if (!f) {
         ESP_LOGW(TAG, "缓存写入失败(打开): %s (errno=%d %s)", path, errno, strerror(errno));
@@ -313,37 +352,13 @@ static void save_gif_to_cache_impl(const char *path, const uint8_t *data, size_t
     if (written != size) {
         // 删除无效缓存，下次开机重新下载
         remove(path);
-        size_t used2 = 0;
-        if (esp_spiffs_info("storage", &total, &used2) == ESP_OK) {
-            ESP_LOGW(TAG, "缓存写入不完整: %s (%u/%u)，删除无效缓存（SPIFFS 总=%luKB 已用=%luKB 空闲=%luKB）",
-                     path, (unsigned)written, (unsigned)size,
-                     (unsigned long)(total / 1024), (unsigned long)(used2 / 1024),
-                     (unsigned long)((total - used2) / 1024));
-        } else {
-            ESP_LOGW(TAG, "缓存写入不完整: %s (%u/%u)，删除无效缓存（SPIFFS 信息读取失败）",
-                     path, (unsigned)written, (unsigned)size);
-        }
+        ESP_LOGW(TAG, "缓存写入不完整: %s (%u/%u)，删除无效缓存",
+                 path, (unsigned)written, (unsigned)size);
     } else {
-        ESP_LOGI(TAG, "%s 已写入缓存 (%d bytes)", path, (int)size);
+        int ms = (int)((esp_timer_get_time() - t0) / 1000);
+        ESP_LOGI(TAG, "%s 已写入缓存 (%d bytes, %dms, %dKB/s)", path, (int)size, ms,
+                 ms > 0 ? (int)(size / 1024 * 1000 / ms) : 0);
     }
-}
-
-// 清空 GIF 缓存（refresh_gifs 表情包切换时调用，强制重新下载）
-static void clear_gif_cache(void)
-{
-    DIR *dir = opendir(EMO_CACHE_DIR);
-    if (!dir) return;
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL) {
-        if (strstr(ent->d_name, ".gif")) {
-            // d_name 最长 255 字节，path 需足够大（避免 -Werror=format-truncation）
-            char path[300];
-            snprintf(path, sizeof(path), "%s/%s", EMO_CACHE_DIR, ent->d_name);
-            remove(path);
-        }
-    }
-    closedir(dir);
-    ESP_LOGI(TAG, "GIF 缓存已清空");
 }
 
 // ==================== SPIFFS 内部 RAM 一次性工作线程 ====================
@@ -415,12 +430,12 @@ static void spiffs_remove_worker(void *ctx)
     remove(c->path);
 }
 
-// 从 SPIFFS 读取缓存的 GIF（委托内部 RAM 栈工作线程，不存在/失败返回 NULL）
-static uint8_t *load_gif_from_cache(const char *filename, size_t *out_size)
+// 从指定目录读一个缓存文件（委托内部 RAM 栈工作线程，不存在/失败返回 NULL）
+static uint8_t *load_gif_from_dir(const char *dir, const char *filename, size_t *out_size)
 {
     spiffs_op_ctx_t *ctx = (spiffs_op_ctx_t *)heap_caps_malloc(sizeof(spiffs_op_ctx_t), MALLOC_CAP_INTERNAL);
     if (!ctx) return NULL;
-    snprintf(ctx->path, sizeof(ctx->path), "%s/%s", EMO_CACHE_DIR, filename);
+    snprintf(ctx->path, sizeof(ctx->path), "%s/%s", dir, filename);
     ctx->out_buf = NULL;
     ctx->size = 0;
     spiffs_sync(spiffs_load_worker, ctx);
@@ -430,30 +445,106 @@ static uint8_t *load_gif_from_cache(const char *filename, size_t *out_size)
     return buf;
 }
 
-// 写入 SPIFFS 缓存（委托内部 RAM 栈工作线程）
+// 读取缓存：优先 SD 卡，其次升级前的 SPIFFS 旧缓存（只读）
+static uint8_t *load_gif_from_cache(const char *filename, size_t *out_size)
+{
+    const char *dir = emo_cache_write_dir();
+    if (dir) {
+        uint8_t *buf = load_gif_from_dir(dir, filename, out_size);
+        if (buf) return buf;
+    }
+    return load_gif_from_dir(EMO_CACHE_LEGACY_DIR, filename, out_size);
+}
+
+// 写入缓存（无 SD 卡时不缓存：SPIFFS 写入只有 3KB/s，会拖死整机）
 static void save_gif_to_cache(const char *filename, const uint8_t *data, size_t size)
 {
+    const char *dir = emo_cache_write_dir();
+    if (!dir) {
+        static bool s_warned = false;
+        if (!s_warned) {
+            s_warned = true;
+            ESP_LOGW(TAG, "未检测到 SD 卡，本次不写表情缓存（下次开机会重新下载）");
+        }
+        return;
+    }
     spiffs_op_ctx_t *ctx = (spiffs_op_ctx_t *)heap_caps_malloc(sizeof(spiffs_op_ctx_t), MALLOC_CAP_INTERNAL);
     if (!ctx) return;
-    snprintf(ctx->path, sizeof(ctx->path), "%s/%s", EMO_CACHE_DIR, filename);
+    snprintf(ctx->path, sizeof(ctx->path), "%s/%s", dir, filename);
     ctx->data = data;
     ctx->size = size;
     spiffs_sync(spiffs_save_worker, ctx);
     heap_caps_free(ctx);
 }
 
-// 删除 SPIFFS 缓存文件（委托内部 RAM 栈工作线程）
+// 删除缓存文件（SD 卡 + SPIFFS 旧缓存都删，委托内部 RAM 栈工作线程）
 static void remove_gif_cache_file(const char *filename)
 {
     spiffs_op_ctx_t *ctx = (spiffs_op_ctx_t *)heap_caps_malloc(sizeof(spiffs_op_ctx_t), MALLOC_CAP_INTERNAL);
     if (!ctx) return;
-    snprintf(ctx->path, sizeof(ctx->path), "%s/%s", EMO_CACHE_DIR, filename);
+    const char *dir = emo_cache_write_dir();
+    if (dir) {
+        snprintf(ctx->path, sizeof(ctx->path), "%s/%s", dir, filename);
+        spiffs_sync(spiffs_remove_worker, ctx);
+    }
+    snprintf(ctx->path, sizeof(ctx->path), "%s/%s", EMO_CACHE_LEGACY_DIR, filename);
     spiffs_sync(spiffs_remove_worker, ctx);
     heap_caps_free(ctx);
 }
 
+// ==================== 缓存写入延后队列 ====================
+// 写缓存不该挡在界面切换之前（尤其 SPIFFS 只有 3KB/s）。这里先把新 GIF 发布给
+// LVGL（界面立即切换），再把缓存写入排队，等全屏下载提示收起后统一写盘。
+static volatile bool s_cache_flush_abort = false;  // 新一次刷新到来时，放弃上一轮残留的写缓存
+#define PENDING_CACHE_MAX 20
+typedef struct {
+    char filename[40];
+    const uint8_t *data;
+    size_t size;
+} pending_cache_entry_t;
+static pending_cache_entry_t s_pending_cache[PENDING_CACHE_MAX];
+static int s_pending_cache_count = 0;
+
+static void queue_cache_write(const char *filename, const uint8_t *data, size_t size)
+{
+    if (s_pending_cache_count >= PENDING_CACHE_MAX) {
+        save_gif_to_cache(filename, data, size);  // 队列满，退化为同步写
+        return;
+    }
+    pending_cache_entry_t *e = &s_pending_cache[s_pending_cache_count++];
+    strlcpy(e->filename, filename, sizeof(e->filename));
+    e->data = data;
+    e->size = size;
+}
+
+static void flush_pending_cache(void)
+{
+    if (s_pending_cache_count == 0) return;
+    s_cache_flush_abort = false;
+    ESP_LOGI(TAG, "界面已切换，开始写 %d 个缓存文件", s_pending_cache_count);
+    int64_t t0 = esp_timer_get_time();
+    int i = 0;
+    for (; i < s_pending_cache_count; i++) {
+        if (s_cache_flush_abort) {
+            ESP_LOGW(TAG, "有新的表情包刷新，放弃剩余 %d 个缓存写入",
+                     s_pending_cache_count - i);
+            break;
+        }
+        save_gif_to_cache(s_pending_cache[i].filename,
+                          s_pending_cache[i].data, s_pending_cache[i].size);
+    }
+    s_pending_cache_count = 0;
+    ESP_LOGI(TAG, "缓存写入结束（%d 个），用时 %dms", i,
+             (int)((esp_timer_get_time() - t0) / 1000));
+}
+
+static void cancel_pending_cache(void)
+{
+    s_pending_cache_count = 0;
+}
+
 // 前向声明
-static void download_all_from(const char *base_url);
+static void download_all_from(const char *base_url, bool force);
 
 // ==================== API 获取表情列表 ====================
 
@@ -464,7 +555,7 @@ static void download_all_from(const char *base_url);
  * @param device_id 设备 ID
  * @return true=成功 false=失败（调用方应回退到静态 URL 模式）
  */
-static bool download_from_api(const char *http_base, const char *device_id)
+static bool download_from_api(const char *http_base, const char *device_id, bool force)
 {
     dl_progress_finish(false);   // 清掉上一轮残留：列表请求本身不计入进度
     char api_url[512];
@@ -539,6 +630,7 @@ static bool download_from_api(const char *http_base, const char *device_id)
             }
         }
 
+        bool from_default_pack = false;
         if (!download_url) {
             // 当前表情包中缺少此文件，从默认包补充
             // 避免使用内置 GIF 导致表情显示不一致，确保所有表情都有对应 GIF
@@ -546,12 +638,16 @@ static bool download_from_api(const char *http_base, const char *device_id)
             snprintf(fallback_url, sizeof(fallback_url), "%s/emos/packs/default/%s", http_base, target_file);
             download_url = fallback_url;
             expected_size = 0;
+            from_default_pack = true;
             ESP_LOGI(TAG, "当前包中缺少 %s，从默认包补充", target_file);
         }
 
         // SPIFFS 缓存：优先读本地（存在且大小与服务器一致 → 跳过下载）
+        // 刷新模式下丢弃新表情包里的旧缓存（属于上一个包），但从默认包补齐的文件
+        // 与表情包无关、内容不变，仍然可以用缓存，省掉这部分下载
+        bool allow_cache = !force || from_default_pack;
         size_t dsize = 0;
-        uint8_t *data_buf = load_gif_from_cache(target_file, &dsize);
+        uint8_t *data_buf = allow_cache ? load_gif_from_cache(target_file, &dsize) : NULL;
         bool from_cache = false;
         if (data_buf) {
             bool size_ok = (expected_size <= 0 || (int)dsize == expected_size);
@@ -584,9 +680,9 @@ static bool download_from_api(const char *http_base, const char *device_id)
                 continue;
             }
 
-            // 网络下载成功 → 写入缓存（下次开机直接读本地，零下载流量）
+            // 网络下载成功 → 排入缓存写入队列（等界面切换后再写，见 flush_pending_cache）
             if (!from_cache) {
-                save_gif_to_cache(target_file, data_buf, dsize);
+                queue_cache_write(target_file, data_buf, dsize);
             }
 
             new_descs[i].data = data_buf;
@@ -606,6 +702,7 @@ static bool download_from_api(const char *http_base, const char *device_id)
 
     if (success == 0) {
         // 所有文件下载失败，释放局部存储，不发布到全局（避免泄漏，download_all_from 会重新分配）
+        cancel_pending_cache();
         free(new_data);
         free(new_descs);
         return false;
@@ -621,7 +718,8 @@ static bool download_from_api(const char *http_base, const char *device_id)
         s_download_done = true;
         xSemaphoreGive(s_gif_mutex);
     } else {
-        // 锁不可用，释放局部数据避免泄漏
+        // 锁不可用，释放局部数据避免泄漏（排队中的缓存条目指向这些数据，一并丢弃）
+        cancel_pending_cache();
         for (int i = 0; i < g_gif_files_count; i++) {
             if (new_data[i]) free(new_data[i]);
         }
@@ -698,9 +796,22 @@ static void download_gifs_task(void *arg)
 
     ESP_LOGI(TAG, "服务器地址: %s", http_base);
 
+    // 下载期间关闭 WiFi modem sleep：待机态（MIN_MODEM）下吞吐会掉到十几 KB/s，
+    // 表现为切换表情包要等一两分钟；下载完成后再恢复省电。
+    bool ps_forced = !power_manager_is_active();
+    if (ps_forced) {
+        wifi_set_power_save(false);
+    }
+
     // 等待服务端后台初始化完成（MCP 连接预热等），避免 HTTP 请求撞上事件循环忙期
-    ESP_LOGI(TAG, "等待服务端就绪（3s）...");
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    // 刷新模式（refresh_emo）下服务端已在线，跳过这段等待，让指令 ACK 尽快回到服务端
+    if (!skip_wifi_wait) {
+        ESP_LOGI(TAG, "等待服务端就绪（3s）...");
+        vTaskDelay(pdMS_TO_TICKS(3000));
+    } else {
+        // 给 ACK 留出串口/WS 发送窗口，避免 HTTP 抢占发送队列
+        vTaskDelay(pdMS_TO_TICKS(300));
+    }
 
     // 显示全屏下载提示（refresh_emo 触发时）
     if (show_ui) {
@@ -711,11 +822,15 @@ static void download_gifs_task(void *arg)
     char device_id[64];
     device_id_get(device_id, sizeof(device_id));
 
+    // 刷新标记：本次是切换表情包触发的，缓存全部过期，必须重新下载
+    bool force = s_force_download;
+    s_force_download = false;
+
     // 先尝试从 API 获取表情列表（最多重试 3 次）
     // 每次重试间隔 3 秒，避免服务器短暂繁忙/网络抖动导致立即 fallback 到默认表情包
     bool ok = false;
     for (int retry = 0; retry < 3; retry++) {
-        ok = download_from_api(http_base, device_id);
+        ok = download_from_api(http_base, device_id, force);
         if (ok) {
             break;
         }
@@ -752,7 +867,7 @@ static void download_gifs_task(void *arg)
         if (reachable) {
             char base_url[512];
             snprintf(base_url, sizeof(base_url), "%s/emos/packs/default/", http_base);
-            download_all_from(base_url);
+            download_all_from(base_url, force);
         } else {
             ESP_LOGW(TAG, "服务器不可达，使用内置 GIF");
             s_download_started = false;  // 复位，避免唤醒被永久禁用
@@ -766,17 +881,25 @@ static void download_gifs_task(void *arg)
         eeui_port_hide_emo_downloading();
     }
 
+    // 界面已经切到新表情，再统一写 SPIFFS 缓存（写 flash 很慢，不能挡在切换之前）
+    flush_pending_cache();
+
     // 下载未成功完成（如内部内存分配失败/部分失败）时复位启动标志，
     // 避免 gif_download_is_busy() 永久为 true 导致唤醒被禁用
     if (!s_download_done) {
         s_download_started = false;
     }
 
+    // 恢复待机省电（若这期间用户已进入会话，保持 NONE 不动）
+    if (ps_forced && !power_manager_is_active()) {
+        wifi_set_power_save(true);
+    }
+
     vTaskDeleteWithCaps(NULL);  /* 配合 xTaskCreatePinnedToCoreWithCaps 释放 PSRAM 栈 */
 }
 
 /** 回退方案：从固定 URL 前缀下载所有 GIF */
-static void download_all_from(const char *base_url)
+static void download_all_from(const char *base_url, bool force)
 {
     // 使用局部变量，下载完成后再加锁发布到全局，避免与渲染任务竞态
     uint8_t **new_data = (uint8_t **)calloc(g_gif_files_count, sizeof(uint8_t *));
@@ -798,7 +921,7 @@ static void download_all_from(const char *base_url)
 
         // SPIFFS 缓存：优先读本地（静态模式无 size 信息，仅校验 GIF 头）
         size_t dsize = 0;
-        uint8_t *data_buf = load_gif_from_cache(g_gif_files[i].filename, &dsize);
+        uint8_t *data_buf = force ? NULL : load_gif_from_cache(g_gif_files[i].filename, &dsize);
         bool from_cache = false;
         if (data_buf) {
             bool header_ok = (dsize >= 6) &&
@@ -829,9 +952,9 @@ static void download_all_from(const char *base_url)
                 continue;
             }
 
-            // 网络下载成功 → 写入缓存
+            // 网络下载成功 → 排入缓存写入队列（界面切换后再写）
             if (!from_cache) {
-                save_gif_to_cache(g_gif_files[i].filename, data_buf, dsize);
+                queue_cache_write(g_gif_files[i].filename, data_buf, dsize);
             }
 
             new_descs[i].data = data_buf;
@@ -850,6 +973,7 @@ static void download_all_from(const char *base_url)
 
     if (success == 0) {
         // 所有文件下载失败，释放局部存储
+        cancel_pending_cache();
         free(new_data);
         free(new_descs);
         return;
@@ -865,7 +989,8 @@ static void download_all_from(const char *base_url)
         s_download_done = true;
         xSemaphoreGive(s_gif_mutex);
     } else {
-        // 锁不可用，释放局部数据避免泄漏
+        // 锁不可用，释放局部数据避免泄漏（排队中的缓存条目指向这些数据，一并丢弃）
+        cancel_pending_cache();
         for (int i = 0; i < g_gif_files_count; i++) {
             if (new_data[i]) free(new_data[i]);
         }
@@ -998,8 +1123,15 @@ void refresh_gifs(void)
         return;
     }
 
-    // 清空 SPIFFS 缓存（服务器已切换表情包，旧缓存不可用）
-    clear_gif_cache();
+    // 标记强制重新下载：旧缓存属于上一个表情包，不能再用。
+    // 这里不再预删缓存文件——SPIFFS 删除 13 个 GIF 实测要 18 秒，会把刷新指令的
+    // ACK 和界面切换一起拖到 20 秒以上；新文件会直接覆盖同名缓存。
+    s_force_download = true;
+    // 放弃上一轮（开机下载）还没写完的缓存：它会和本次下载抢 flash/NAND，
+    // 之前实测把一次 2KB 的列表请求拖到 15 秒
+    s_cache_flush_abort = true;
+    // 标记下载中：避免 websocket 重连时又起一个下载任务，也让唤醒模块避开
+    s_download_started = true;
 
     ensure_gif_mutex();
     // 加锁退役旧数据（不立即释放——LVGL 定时器可能仍在异步解码它，见 gif_retire_current_locked）

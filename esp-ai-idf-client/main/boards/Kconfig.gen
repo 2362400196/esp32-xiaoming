@@ -5,7 +5,7 @@
 
 choice BOARD_TYPE
     prompt "选择开发板型号"
-    default BOARD_ESP32C3_SUPERMINI
+    default BOARD_AI_VOX3
 
     # --- ESP32C3 ---
     config BOARD_ESP32C3_SUPERMINI
@@ -13,6 +13,10 @@ choice BOARD_TYPE
         depends on IDF_TARGET_ESP32C3
 
     # --- ESP32S3 ---
+    config BOARD_AI_VOX3
+        bool "[ESP32S3] ai_vox3 - AI-VOX3 (ESP32-S3 + ES8311 + 240x240 LCD)"
+        depends on IDF_TARGET_ESP32S3
+
     config BOARD_ESP32S3_BREADBOARD
         bool "[ESP32S3] esp32s3_breadboard - ESP32-S3 面包板 (无屏幕)"
         depends on IDF_TARGET_ESP32S3

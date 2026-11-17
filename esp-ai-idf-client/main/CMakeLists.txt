@@ -37,6 +37,7 @@ idf_component_register(
          "provisioning.c" "captive_portal.c"
          "hardware_io.c" "network_audio.c" "ota_update.c"
          "power_manager.c"
+         "battery.c" "keys.c" "sdcard.c"
          # 板级包核心（board_select.h 自动选择板型，无需手动添加板型源文件）
          "boards/board.c"
          # 板级扩展组件（extras，各板型按需挂载到 BOARD_CONFIG.extras）
@@ -92,7 +93,9 @@ idf_component_register(
     REQUIRES esp_wifi esp_event nvs_flash esp_netif esp_http_client
              esp_websocket_client esp_lcd esp_timer cjson esp-sr bt esp_http_server
              esp_adc app_update spiffs
+             fatfs sdmmc esp_driver_sdmmc
              esp_driver_gpio esp_driver_i2s esp_driver_spi esp_driver_ledc esp_driver_rmt esp_driver_uart
+             esp_driver_usb_serial_jtag
              ${EXTRA_LUA_DRIVER_REQS} ${LUA_PCNT_REQS} esp_driver_i2c
              dht
             )
