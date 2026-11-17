@@ -115,6 +115,36 @@ async def get_brightness(tool_manager=None) -> str:
 
 
 @tool()
+async def get_ip(tool_manager=None) -> str:
+    """获取**设备（ESP32 语音终端）自己**的局域网 IP 地址、MAC、所连 WiFi 名称和信号强度。
+    注意：这是设备本机的地址，不是服务器的 IP。
+    当用户问"你的 IP 是多少"、"你在哪个网络"、"WiFi 连的什么"时调用。"""
+    result = await _query_device_state(tool_manager, "get_ip")
+    if not result.startswith("ip="):
+        return result
+    # 设备回复格式: ip=192.168.31.123,mac=28:84:85:5A:23:D4,ssid=MyWiFi,rssi=-52
+    parts = result.split(",")
+    fields = {}
+    for part in parts:
+        if "=" in part:
+            key, value = part.split("=", 1)
+            fields[key.strip()] = value.strip()
+    ip = fields.get("ip", "")
+    if not ip or ip == "none":
+        return "设备当前没有联网，拿不到 IP 地址"
+    extras = []
+    if fields.get("ssid"):
+        extras.append(f"WiFi 名称 {fields['ssid']}")
+    rssi = fields.get("rssi", "")
+    if rssi.lstrip("-").isdigit():
+        extras.append(f"信号强度 {rssi} dBm")
+    if fields.get("mac"):
+        extras.append(f"MAC {fields['mac']}")
+    suffix = ("，".join(extras))
+    return f"设备当前 IP 是 {ip}" + (f"，{suffix}" if suffix else "")
+
+
+@tool()
 async def get_battery(tool_manager=None) -> str:
     """获取设备当前的电池状态（电量百分比、电压、是否在充电、是否已充满）。
     当用户问"还有多少电"、"电量剩多少"、"是不是在充电"、"充满了没有"时调用。"""

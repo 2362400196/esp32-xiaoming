@@ -338,6 +338,41 @@ void wifi_set_power_save(bool enable)
     }
 }
 
+/* ============ 网络信息查询（AI get_ip 工具） ============ */
+/* 当前 IPv4 地址；未连接时返回 false */
+bool wifi_get_ip_str(char *buf, size_t buf_len)
+{
+    if (!buf || buf_len < 16) return false;
+    if (!s_sta_netif) return false;
+    esp_netif_ip_info_t ip_info;
+    if (esp_netif_get_ip_info(s_sta_netif, &ip_info) != ESP_OK || ip_info.ip.addr == 0) {
+        return false;
+    }
+    snprintf(buf, buf_len, IPSTR, IP2STR(&ip_info.ip));
+    return true;
+}
+
+/* 信号强度 dBm；未连接返回 -127 */
+int wifi_get_rssi(void)
+{
+    return s_wifi_rssi;
+}
+
+/* 当前连接的路由器名称（SSID）；未连接返回 false */
+bool wifi_get_ssid(char *buf, size_t buf_len)
+{
+    if (!buf || buf_len < 2) return false;
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK) return false;
+    size_t n = 0;
+    while (n < sizeof(ap_info.ssid) && ap_info.ssid[n] != '\0' && n < buf_len - 1) {
+        buf[n] = (char)ap_info.ssid[n];
+        n++;
+    }
+    buf[n] = '\0';
+    return n > 0;
+}
+
 /* 强制重建 WiFi 连接：清陈旧状态位 -> 断开 -> 重连（供 websocket 断线自愈调用） */
 void wifi_force_reconnect(void)
 {

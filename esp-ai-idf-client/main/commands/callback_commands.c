@@ -691,6 +691,7 @@ static esp_err_t cmd_clear_screen(cJSON *json)
 // 外部函数声明
 extern void register_volume_commands(void);
 extern void register_battery_commands(void);
+extern void register_network_commands(void);
 
 void register_callback_commands(void)
 {
@@ -718,6 +719,8 @@ void register_callback_commands(void)
     register_volume_commands();
     // 注册电量查询指令（AI 工具 get_battery 使用）
     register_battery_commands();
+    // 注册网络信息查询指令（AI 工具 get_ip 使用）
+    register_network_commands();
 
     // 创建逐段渲染定时器（Arduino 500ms）
     if (s_llm_timer == NULL) {

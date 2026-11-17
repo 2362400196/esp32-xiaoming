@@ -155,6 +155,9 @@ esp_err_t wifi_init(void);
 void wifi_set_power_save(bool enable);   // 待机省电开关（power_manager 调用）
 bool wifi_is_connected(void);            // 真实连接状态（查 AP 记录，不依赖事件位）
 void wifi_force_reconnect(void);         // 强制重建连接（websocket 断线自愈调用）
+bool wifi_get_ip_str(char *buf, size_t buf_len);  // 当前 IPv4 地址（未连接返回 false）
+int wifi_get_rssi(void);                 // 信号强度 dBm（-127 = 未连接）
+bool wifi_get_ssid(char *buf, size_t buf_len);    // 当前路由器名称（未连接返回 false）
 
 // 会话看门狗（main.c 实现，websocket.c 在收到服务端数据 / iat_start 时调用）
 void session_watchdog_refresh(void);

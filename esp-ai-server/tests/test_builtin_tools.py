@@ -33,6 +33,7 @@ from src.plugins.memory.plugin import (
 from src.plugins.system_basic.plugin import (
     get_battery,
     get_brightness,
+    get_ip,
     get_current_date,
     get_current_time,
     get_volume,
@@ -288,6 +289,31 @@ class TestGetBrightness:
                       AsyncMock(return_value=("brightness=60", "ok", ""))):
             result = await get_brightness(tool_manager=tm)
         assert "60%" in result
+
+
+class TestGetIp:
+    """get_ip：获取设备网络信息"""
+
+    async def test_connected(self):
+        tm = _make_tool_manager_with_channel()
+        with _plugin_ctx("system_basic", ["device"]), \
+                patch("src.plugins.system_basic.plugin.request_device_result",
+                      AsyncMock(return_value=(
+                          "ip=192.168.31.123,mac=28:84:85:5A:23:D4,ssid=MyWiFi,rssi=-52",
+                          "ok", ""))):
+            result = await get_ip(tool_manager=tm)
+        assert "192.168.31.123" in result
+        assert "MyWiFi" in result
+        assert "-52" in result
+
+    async def test_offline(self):
+        tm = _make_tool_manager_with_channel()
+        with _plugin_ctx("system_basic", ["device"]), \
+                patch("src.plugins.system_basic.plugin.request_device_result",
+                      AsyncMock(return_value=(
+                          "ip=none,mac=28:84:85:5A:23:D4", "ok", ""))):
+            result = await get_ip(tool_manager=tm)
+        assert "没有联网" in result
 
 
 class TestGetBattery:
